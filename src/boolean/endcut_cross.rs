@@ -499,6 +499,55 @@ mod tests {
         assert_eq!(crate::neutral::write_body(&base), original);
     }
     #[test]
+    fn off_center_pipe_holes_match_independent_wall_integrals() {
+        let base = survey("pipe_hole_one_wall", "base");
+        for radius in [0.1_f64, 0.25, 0.5, 0.8] {
+            for cy in [-1.3_f64, -0.7, 0., 0.4, 1.2] {
+                if cy.abs() + radius >= 1.75 {
+                    continue;
+                }
+                let n = p(1., 0., 0.);
+                let tool = crate::extrude::extrude(
+                    &crate::neutral::Profile {
+                        loops: vec![vec![Curve::Arc {
+                            c: p(0., cy, 12.),
+                            n,
+                            x: p(0., 1., 0.),
+                            r: radius,
+                            t0: 0.,
+                            t1: TAU,
+                        }]],
+                        n,
+                        low: 0.,
+                        high: 3.,
+                    },
+                    1e-6,
+                )
+                .unwrap();
+                let result = operation(&base, &tool, 1e-6);
+                let integrand = |t: f64| {
+                    let y = cy + radius * t.sin();
+                    2. * radius
+                        * radius
+                        * t.cos().powi(2)
+                        * ((4. - y * y).sqrt() - (1.75_f64.powi(2) - y * y).sqrt())
+                };
+                let count = 4096;
+                let h = PI / count as f64;
+                let mut sum = integrand(-PI / 2.) + integrand(PI / 2.);
+                for i in 1..count {
+                    sum += if i % 2 == 0 { 2. } else { 4. } * integrand(-PI / 2. + h * i as f64);
+                }
+                let expected = 22.5 * PI - sum * h / 3.;
+                assert!(
+                    (crate::mass::measure(&result, 1e-6).unwrap().volume - expected).abs() < 1e-8,
+                    "r {radius} cy {cy}"
+                );
+                assert_eq!(crate::topology::check(&result, 1e-6).unwrap().genus(), 2.);
+            }
+        }
+    }
+    #[test]
     fn surveyed_pipe_cuts_admit_oriented_annular_sections() {
         let integrate = |f: &dyn Fn(f64) -> f64, lo: f64, hi: f64| {
             let n = 4096;
