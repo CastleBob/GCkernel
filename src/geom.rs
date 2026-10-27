@@ -50,11 +50,12 @@ pub enum Curve {
     /// (t0 < t1 <= t0 + 2 pi). `u` and `v` are conjugate semi-diameters: finite and independent, not necessarily
     /// unit or at right angles (Astra 2026-10-27). Wire type 3.
     Conic { c: Vec3, u: Vec3, v: Vec3, t0: f64, t1: f64 },
-    /// Where a cutter cylinder crosses a host cylinder (agreed with Astra 2026-10-27), wire type 4. t runs round the
-    /// cutter (axis point `c`, unit axis `a`, unit `x` perpendicular to it, y = a x x, radius `rho`):
-    /// Q(t) = c + rho (cos t x + sin t y); the point is Q(t) + h(t) a on the host (axis point `p`, unit axis `b`,
-    /// radius `r`), h the root of |a'|^2 h^2 + 2 (D'.a') h + |D'|^2 - r^2 = 0 (D = Q - p; primes: the parts
-    /// perpendicular to b) chosen by `branch` (+1 or -1). The discriminant is positive over [t0, t1].
+    /// Where two cylinders cross (agreed with Astra 2026-10-27), wire type 4. t runs round the **parameter** cylinder
+    /// (axis point `c`, unit axis `a`, unit `x` perpendicular to it, y = a x x, radius `rho`):
+    /// Q(t) = c + rho (cos t x + sin t y); the point is Q(t) + h(t) a on the **root** cylinder (axis point `p`, unit
+    /// axis `b`, radius `r`), h the root of |a'|^2 h^2 + 2 (D'.a') h + |D'|^2 - r^2 = 0 (D = Q - p; primes: the parts
+    /// perpendicular to b) chosen by `branch` (+1 or -1). The discriminant is positive over [t0, t1]. Which cylinder
+    /// is the parameter one is the writer's choice of chart (the one smooth over the trim), not which is the tool.
     CylinderPair { c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t0: f64, t1: f64 },
 }
 
