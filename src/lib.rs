@@ -8,6 +8,7 @@
 pub mod boolean;
 pub mod extrude;
 pub mod geom;
+pub mod mass;
 pub mod neutral;
 pub mod protocol;
 pub mod topology;
