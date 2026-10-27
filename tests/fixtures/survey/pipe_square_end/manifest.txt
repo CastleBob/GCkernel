@@ -1,0 +1,7 @@
+GC Kernel fixture, written by GCmaker GcKernelLab.WriteFixture 2026-10-27 19:36
+units inch (part was inches); tolerance 1E-06
+format: neutral body v1, little-endian f64, the exact arrays GCmaker sends (after ToElementary)
+base.f64: GCmaker's base body
+step01.f64: cut tool, pipe_square_end
+
+tool: see GcKernelLabTests.ShopCutSurvey (pipe_square_end)
