@@ -42,13 +42,30 @@ The result preserves the box and adds circular inner cap boundaries and an
 inward-facing cylindrical wall with its seam counted twice. It retains analytic
 circles/cylinder rather than a polygonal approximation. Supported axes are X/Y/Z.
 Only one bore into a plain box is currently supported. Repeated round bores,
-rounded slots, blind round pockets, side-wall contact/crossing and fillet cuts
-are unsupported.
+blind round pockets, side-wall contact/crossing and fillet cuts are unsupported.
+
+### Contained capsule through-slot
+
+A plain axis-aligned box and a six-face capsule prism cutter: two semicylindrical
+walls, two straight planar walls and two caps. The end radii must be equal, the
+sweep axis cardinal, and the cutter must span the whole box thickness. The slot
+may rotate within its cap plane. Its analytic bounds must have side-wall clearance
+greater than tolerance. Conservative full-circle bounds may reject some slots
+whose actual semicircle alone would fit; there is no guessed acceptance.
+
+Admission matches the entire oriented cutter B-rep to a capsule prism, allowing
+equivalent indexing, edge directions, loop starts and surface frames. The output
+uses the ORIGINAL cap curves as a hole in the box cross-section, swept through
+the box thickness by our own extrusion code. Cap curves and cylindrical walls
+remain analytic. It does not replace an unsupported cutter with a capsule.
+Blind, side-wall touching/crossing and repeated/interacting curved cuts remain
+unsupported; curved cuts currently require a plain uncut box as their base.
 
 ## Admission, errors and representation
 
-The public entry selects a supported input domain BEFORE execution: cylindrical
-tools enter contained-bore admission; other tools enter rectilinear admission.
+The public entry selects a supported input domain BEFORE execution: tools with
+one cylindrical face enter bore admission, two enter capsule admission, none
+enter rectilinear admission, and other cylinder counts are unsupported.
 An error never triggers another algorithm. A malformed model reports InvalidInput;
 unsupported geometry, resolution or resource requirements report Unsupported.
 The worker catches unexpected faults separately. Validation includes oriented
@@ -66,9 +83,10 @@ integration tests; Rust-only tests do not prove Eyeshot display compatibility.
 
 `cargo test --lib boolean` runs focused geometry and protocol checks. These
 include independently calculated volume, a divergence-theorem integral of the
-returned bore boundary, material probes, 60 deterministic box-cut cases,
+returned bore and slot boundaries, material probes, 60 deterministic box-cut cases,
 scale/translation, existing face holes, repeated rectangular cuts, exact and
 near contact, unsupported cases, malformed inputs and empty results. The
+slot rotations and all three sweep axes, curve/index/loop ordering changes. The
 foundation integration tests additionally exercise protocol/neutral-format
 interoperability. The local source commits introducing capabilities are 9614fe8
 (rectilinear) and bd93e97 (contained circular bore).
