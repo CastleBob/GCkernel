@@ -55,6 +55,32 @@ pub(super) fn cut(a: &Body, b: &Body, tolerance: f64) -> Result<Body> {
     Ok(result)
 }
 
+/// Admission for the separately defined contained-bore operation. This proves
+/// the entire input is a plain box, not just that its bounding box looks right.
+pub(super) fn plain_box_bounds(body: &Body, tolerance: f64) -> Result<([f64; 3], [f64; 3])> {
+    if body.vertices.len() != 8
+        || body.edges.len() != 12
+        || body.faces.len() != 6
+        || body
+            .faces
+            .iter()
+            .any(|f| f.loops.len() != 1 || f.loops[0].len() != 4)
+    {
+        return Err(unsupported(
+            "contained bore currently requires a plain six-face box",
+        ));
+    }
+    let faces = validate_faces(body)?;
+    let grid = Grid::new(body, &Body::default(), tolerance)?;
+    if grid.membership(&faces)?.iter().any(|inside| !*inside) {
+        return Err(unsupported("contained bore currently requires a solid box"));
+    }
+    Ok((
+        std::array::from_fn(|i| grid.coordinates[i][0]),
+        std::array::from_fn(|i| *grid.coordinates[i].last().unwrap()),
+    ))
+}
+
 #[derive(Debug)]
 struct FlatFace {
     axis: usize,

@@ -1,5 +1,8 @@
 //! Independent boolean operations. Owner: Astra/Codex.
-//! The initial supported domain is closed axis-aligned rectilinear solids.
+//! Supported domains are rectilinear solids and contained circular through-bores
+//! in plain axis-aligned boxes. Admission selects one operation before execution;
+//! failure never triggers another algorithm.
+mod bore;
 mod rectilinear;
 
 pub fn cut(
@@ -7,5 +10,13 @@ pub fn cut(
     tool: &crate::neutral::Body,
     tolerance: f64,
 ) -> Result<crate::neutral::Body, crate::KernelError> {
-    rectilinear::cut(body, tool, tolerance)
+    if tool
+        .faces
+        .iter()
+        .any(|f| matches!(f.surface, crate::geom::Surface::Cylinder { .. }))
+    {
+        bore::cut(body, tool, tolerance)
+    } else {
+        rectilinear::cut(body, tool, tolerance)
+    }
 }
