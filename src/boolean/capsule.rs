@@ -39,6 +39,7 @@ fn near(a: Vec3, b: Vec3, tol: f64) -> bool {
 }
 fn middle(c: &Curve) -> Vec3 {
     match c {
+        Curve::Conic { c, u, v, t0, t1 } => Curve::conic_point(*c, *u, *v, (t0 + t1) * 0.5),
         Curve::Line { a, b } => a.add(b.sub(*a).scale(0.5)),
         Curve::Arc { c, n, x, r, t0, t1 } => {
             Curve::point_at_angle(*c, *n, *x, *r, t0 + (t1 - t0) * 0.5)
@@ -382,6 +383,9 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     // vertices. A semicircle can leave the box between its endpoints.
     for curve in &hole {
         let (minimum, maximum) = match curve {
+            Curve::Conic { .. } => {
+                return Err(unsupported("capsule cutters require circular end arcs"))
+            }
             Curve::Line { a, b } => {
                 let a = xyz(*a);
                 let b = xyz(*b);

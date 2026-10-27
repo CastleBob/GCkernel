@@ -332,6 +332,9 @@ mod tests {
                         for (index, forward) in lp {
                             let travel = if *forward { 1. } else { -1. };
                             match body.edges[*index].curve {
+                                Curve::Conic { .. } => {
+                                    panic!("round-bore fixture unexpectedly contains a conic")
+                                }
                                 Curve::Line { a, b } => {
                                     area += 0.5 * a.cross(b).dot(outward) * travel
                                 }

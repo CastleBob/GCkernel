@@ -70,6 +70,7 @@ fn curve_bounds(curve: &Curve) -> ([f64; 3], [f64; 3]) {
 
 fn distance(curve: &Curve, q: Vec3) -> f64 {
     match *curve {
+        Curve::Conic { .. } => unreachable!("conics are refused by passage admission"),
         Curve::Line { a, b } => {
             let d = b.sub(a);
             let t = (q.sub(a).dot(d) / d.dot(d)).clamp(0., 1.);
@@ -93,6 +94,15 @@ fn loop_area(body: &Body, lp: &[(usize, bool)], n: Vec3) -> f64 {
         .map(|(i, fwd)| {
             let c = &body.edges[*i].curve;
             let integral = match *c {
+                Curve::Conic {
+                    c: center,
+                    u,
+                    v,
+                    t0,
+                    t1,
+                } => center
+                    .cross(c.end().sub(c.start()))
+                    .add(u.cross(v).scale(t1 - t0)),
                 Curve::Line { a, b } => a.cross(b),
                 Curve::Arc {
                     c: center,
@@ -140,6 +150,9 @@ fn inside(body: &Body, face: &Face, q: Vec3, n: Vec3, tol: f64) -> Result<bool> 
             source.reversed()
         };
         match c {
+            Curve::Conic { .. } => {
+                return Err(unsupported("conic-trimmed passages are not admitted yet"))
+            }
             Curve::Line { a, b } => {
                 let ay = a.sub(q).dot(v);
                 let by = b.sub(q).dot(v);
@@ -205,6 +218,9 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
     }
     for edge in &body.edges {
         match edge.curve {
+            Curve::Conic { .. } => {
+                return Err(unsupported("conic-trimmed passages are not admitted yet"))
+            }
             Curve::Line { a, b } => {
                 if !a.is_finite() || !b.is_finite() || a.distance(b) <= tol {
                     return Err(bad("invalid passage boundary line"));
@@ -285,6 +301,9 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
                 let mut lines = 0;
                 for (i, fwd) in &face.loops[0] {
                     match body.edges[*i].curve {
+                        Curve::Conic { .. } => {
+                            return Err(unsupported("conic-trimmed passages are not admitted yet"))
+                        }
                         Curve::Line { a: from, b: to } => {
                             if to.sub(from).cross(a).length() > tol
                                 || (from.sub(p).cross(a).length() - r).abs() > tol

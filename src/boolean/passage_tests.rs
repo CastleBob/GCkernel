@@ -267,6 +267,11 @@ fn permute(body: &Body, shift: usize) -> Body {
     }
     for e in &mut result.edges {
         match &mut e.curve {
+            Curve::Conic { c, u, v, .. } => {
+                *c = map(*c);
+                *u = map(*u);
+                *v = map(*v);
+            }
             Curve::Line { a, b } => {
                 *a = map(*a);
                 *b = map(*b);
