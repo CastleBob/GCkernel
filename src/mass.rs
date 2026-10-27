@@ -52,18 +52,27 @@ fn gauss(f: &dyn Fn(f64) -> f64, a: f64, b: f64) -> f64 {
     gauss_nodes().iter().map(|&(x, w)| w * f(m + h * x)).sum::<f64>() * h
 }
 
-/// Integral of a smooth f over [a, b]: 16-point Gauss-Legendre, halved until the halves agree with the whole.
-pub fn quadrature(f: &dyn Fn(f64) -> f64, a: f64, b: f64) -> f64 {
-    fn refine(f: &dyn Fn(f64) -> f64, a: f64, b: f64, whole: f64, depth: u32) -> f64 {
-        let m = (a + b) / 2.0;
-        let (left, right) = (gauss(f, a, m), gauss(f, m, b));
-        if depth == 0 || (left + right - whole).abs() <= 1e-14 * (left.abs() + right.abs()).max(1e-300) {
-            left + right
+/// Integral of a smooth f over [a, b]: 16-point Gauss-Legendre, a panel halved until its halves agree with it within
+/// `absolute` (shared out by length) or 1e-13 relative. At most 4096 panels: past that the integral is refused, not
+/// estimated (Astra).
+pub fn quadrature(f: &dyn Fn(f64) -> f64, a: f64, b: f64, absolute: f64) -> Result<f64, String> {
+    const PANELS: usize = 4096;
+    let mut pending = vec![(a, b, gauss(f, a, b))];
+    let (mut total, mut panels) = (0.0, 1usize);
+    while let Some((lo, hi, whole)) = pending.pop() {
+        let m = (lo + hi) / 2.0;
+        let (left, right) = (gauss(f, lo, m), gauss(f, m, hi));
+        let allowed = (absolute * (hi - lo) / (b - a)).max(1e-13 * (left.abs() + right.abs()));
+        if (left + right - whole).abs() <= allowed {
+            total += left + right;
         } else {
-            refine(f, a, m, left, depth - 1) + refine(f, m, b, right, depth - 1)
+            panels += 1;
+            if panels > PANELS { return Err(format!("quadrature did not converge within {PANELS} panels")); }
+            pending.push((lo, m, left));
+            pending.push((m, hi, right));
         }
     }
-    refine(f, a, b, gauss(f, a, b), 20)
+    Ok(total)
 }
 
 fn segment(body: &Body, edge: usize, forward: bool) -> Curve {
@@ -79,6 +88,8 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
     let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. }));
     let n = body.vertices.len().max(1) as f64;
     let o = body.vertices.iter().fold(Vec3::new(0.0, 0.0, 0.0), |s, v| s.add(*v)).scale(1.0 / n);
+    // The body's size, for the quadrature's absolute tolerance.
+    let size = body.vertices.iter().map(|v| v.distance(o)).fold(0.0, f64::max).max(1e-9);
     for (f, face) in body.faces.iter().enumerate() {
         let sense = if face.sense { 1.0 } else { -1.0 };
         match &face.surface {
@@ -95,7 +106,7 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
                 let (px, py) = (p.sub(o).dot(*x), p.sub(o).dot(y));
                 let (mut flux, mut sweep) = (0.0, 0.0);
                 for &(e, fwd) in face.loops.iter().flatten() {
-                    let (j, k) = cylinder_terms(&segment(body, e, fwd), *p, *a, *x, y, *r, px, py, tolerance)
+                    let (j, k) = cylinder_terms(&segment(body, e, fwd), *p, o, *a, *x, y, *r, px, py, tolerance, size)
                         .map_err(|m| KernelError::InvalidInput(format!("face {f}, edge {e}: {m}")))?;
                     flux += j;
                     sweep += k;
@@ -105,12 +116,17 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
             }
         }
     }
+    if !volume.is_finite() || !area.is_finite() {
+        return Err(KernelError::Unsupported("a boundary integral could not be evaluated".into()));
+    }
     Ok(MassProperties { volume, area, exact })
 }
 
-/// For one boundary curve on the cylinder: (integral of s f dtheta, integral of s r dtheta).
+/// For one boundary curve on the cylinder: (integral of s f dtheta, integral of s r dtheta). s is measured along the
+/// axis from the body's centroid `o`, not from the axis point `p`, which may sit far away (Astra): f dtheta and
+/// r dtheta are closed forms, so a constant added to s changes no face's loop integrals.
 #[allow(clippy::too_many_arguments)]
-fn cylinder_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, px: f64, py: f64, tol: f64)
+fn cylinder_terms(curve: &Curve, p: Vec3, o: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, px: f64, py: f64, tol: f64, size: f64)
     -> Result<(f64, f64), String> {
     let (c, u, v, t0, t1) = match *curve {
         Curve::Line { a: s, b: e } => {
@@ -120,7 +136,7 @@ fn cylinder_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, px:
         }
         Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
         Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
-        Curve::CylinderPair { .. } => return curve_on_cylinder_terms(curve, p, a, x, y, r, px, py, tol),
+        Curve::CylinderPair { .. } => return curve_on_cylinder_terms(curve, p, o, a, x, y, r, px, py, tol, size),
     };
     let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
     let (dc, up, vp) = (c.sub(p), perp(u), perp(v));
@@ -131,7 +147,7 @@ fn cylinder_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, px:
     let theta_u = up.dot(y).atan2(up.dot(x));
     let (ca, sa) = (theta_u.cos(), theta_u.sin());
     let (big_a, big_b) = (px * ca + py * sa, e * (py * ca - px * sa));
-    let (sc, cu, cv) = (dc.dot(a), u.dot(a), v.dot(a));
+    let (sc, cu, cv) = (c.sub(o).dot(a), u.dot(a), v.dot(a));
     let span = t1 - t0;
     let ic = t1.sin() - t0.sin();
     let is = t0.cos() - t1.cos();
@@ -143,23 +159,24 @@ fn cylinder_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, px:
     Ok((j, k))
 }
 
-/// The same two integrals for any curve on the cylinder, by quadrature: with w = point - P, s = w . a,
+/// The same two integrals for any curve on the cylinder, by quadrature: with w = point - P, s = (point - o) . a,
 /// cos theta = w . x / r, sin theta = w . y / r and dtheta/dt = (w.x (w'.y) - w.y (w'.x)) / r^2.
 #[allow(clippy::too_many_arguments)]
-fn curve_on_cylinder_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, px: f64, py: f64, tol: f64)
-    -> Result<(f64, f64), String> {
+fn curve_on_cylinder_terms(curve: &Curve, p: Vec3, o: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, px: f64, py: f64, tol: f64,
+    size: f64) -> Result<(f64, f64), String> {
     let (t0, t1) = curve.domain();
     for i in 0..=8 {
         let w = curve.eval(t0 + (t1 - t0) * i as f64 / 8.0).0.sub(p);
         if (w.sub(a.scale(w.dot(a))).length() - r).abs() > tol { return Err("a curve that does not lie on its cylinder".into()); }
     }
+    // w . x as (q - o) . x - (p - o) . x: the far axis point enters once, as px and py, not at every t.
     let parts = |t: f64| {
-        let (q, d) = curve.eval(t);
-        let w = q.sub(p);
-        let (wx, wy) = (w.dot(x), w.dot(y));
-        (w.dot(a), wx, wy, (wx * d.dot(y) - wy * d.dot(x)) / (r * r))
+        let (near, d) = curve.eval_from(o, t);
+        let (wx, wy) = (near.dot(x) - px, near.dot(y) - py);
+        (near.dot(a), wx, wy, (wx * d.dot(y) - wy * d.dot(x)) / (r * r))
     };
-    let j = quadrature(&|t| { let (s, wx, wy, dtheta) = parts(t); s * r * (px * wx / r + py * wy / r + r) * dtheta }, t0, t1);
-    let k = quadrature(&|t| { let (s, _, _, dtheta) = parts(t); s * r * dtheta }, t0, t1);
+    let j = quadrature(&|t| { let (s, wx, wy, dtheta) = parts(t); s * r * (px * wx / r + py * wy / r + r) * dtheta }, t0, t1,
+        1e-14 * size.powi(3))?;
+    let k = quadrature(&|t| { let (s, _, _, dtheta) = parts(t); s * r * dtheta }, t0, t1, 1e-14 * size.powi(2))?;
     Ok((j, k))
 }

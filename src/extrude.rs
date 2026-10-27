@@ -33,14 +33,16 @@ pub fn signed_area(lp: &[Curve], n: Vec3) -> f64 {
                 let (dc, ds) = (t1.cos() - t0.cos(), t1.sin() - t0.sin());
                 area += 0.5 * (cx * (uy * dc + vy * ds) - cy * (ux * dc + vx * ds) + (ux * vy - uy * vx) * (t1 - t0));
             }
-            // No closed form: x y' - y x' by quadrature (mass::quadrature).
+            // No closed form: x y' - y x' by quadrature (mass::quadrature); a refused integral makes the area NaN,
+            // which mass::measure reports.
             Curve::CylinderPair { .. } => {
                 let (t0, t1) = c.domain();
+                let size = c.start().length().max(c.eval((t0 + t1) / 2.0).0.length()).max(1e-9);
                 area += 0.5 * crate::mass::quadrature(&|t| {
                     let (q, d) = c.eval(t);
                     let ((x, y), (dx, dy)) = (uv(q), (d.dot(u), d.dot(v)));
                     x * dy - y * dx
-                }, t0, t1);
+                }, t0, t1, 1e-14 * size * size).unwrap_or(f64::NAN);
             }
         }
     }

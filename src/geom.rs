@@ -58,14 +58,17 @@ pub enum Curve {
     CylinderPair { c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t0: f64, t1: f64 },
 }
 
-/// The pieces of a CylinderPair at t: point, tangent, and the discriminant S(t).
+/// The pieces of a CylinderPair at t: point less c (kept small, so callers can add c - o once for any origin o),
+/// tangent, and the discriminant S(t).
 #[allow(clippy::too_many_arguments)]
 pub fn pair_eval(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t: f64) -> (Vec3, Vec3, f64) {
     let y = a.cross(x);
     let perp = |w: Vec3| w.sub(b.scale(w.dot(b)));
-    let q = c.add(x.scale(rho * t.cos())).add(y.scale(rho * t.sin()));
+    let round = x.scale(rho * t.cos()).add(y.scale(rho * t.sin()));
     let dq = x.scale(-rho * t.sin()).add(y.scale(rho * t.cos()));
-    let (dp, ddp, ap) = (perp(q.sub(p)), perp(dq), perp(a));
+    // perp(Q - p) as perp(c - p) + perp(Q - c): the host's axis point may sit far along its axis, and the large
+    // difference is then taken once, the same at every t, instead of afresh (and noisily) at each.
+    let (dp, ddp, ap) = (perp(c.sub(p)).add(perp(round)), perp(dq), perp(a));
     let alpha = ap.dot(ap);
     let (beta, dbeta) = (dp.dot(ap), ddp.dot(ap));
     let (gamma, dgamma) = (dp.dot(dp) - r * r, 2.0 * dp.dot(ddp));
@@ -74,7 +77,7 @@ pub fn pair_eval(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, 
     let root = s.max(0.0).sqrt();
     let h = (-beta + branch * root) / alpha;
     let dh = (-dbeta + branch * ds / (2.0 * root)) / alpha;
-    (q.add(a.scale(h)), dq.add(a.scale(dh)), s)
+    (round.add(a.scale(h)), dq.add(a.scale(dh)), s)
 }
 
 /// The discriminant S(t) of a CylinderPair as a trigonometric polynomial s0 + s1 cos t + s2 sin t + s3 cos 2t +
@@ -127,9 +130,20 @@ impl Curve {
             }
             Curve::Conic { c, u, v, .. } => (Self::conic_point(c, u, v, t), u.scale(-t.sin()).add(v.scale(t.cos()))),
             Curve::CylinderPair { c, a, x, rho, p, b, r, branch, .. } => {
-                let (q, d, _) = pair_eval(c, a, x, rho, p, b, r, branch, t);
-                (q, d)
+                let (offset, d, _) = pair_eval(c, a, x, rho, p, b, r, branch, t);
+                (c.add(offset), d)
             }
+        }
+    }
+    /// `eval` with the point given from origin `o`. For a CylinderPair the large difference c - o is taken once,
+    /// so a curve far from the world origin evaluates near `o` without noise (mass quadrature).
+    pub fn eval_from(&self, o: Vec3, t: f64) -> (Vec3, Vec3) {
+        match *self {
+            Curve::CylinderPair { c, a, x, rho, p, b, r, branch, .. } => {
+                let (offset, d, _) = pair_eval(c, a, x, rho, p, b, r, branch, t);
+                (c.sub(o).add(offset), d)
+            }
+            _ => { let (q, d) = self.eval(t); (q.sub(o), d) }
         }
     }
     pub fn start(&self) -> Vec3 {

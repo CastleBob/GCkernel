@@ -142,3 +142,38 @@ fn plug_checks_and_measures_by_quadrature() {
     assert!((m.volume - volume).abs() < 1e-12, "{} vs {volume}", m.volume);
     assert!((m.area - (PI * RHO * RHO + wall + patch)).abs() < 1e-12, "{} vs {}", m.area, PI * RHO * RHO + wall + patch);
 }
+
+/// Astra's case: the same plug moved far away, its cylinders' axis points anchored far along their axes. The measure
+/// matches the plug at home and finishes promptly (axial distances from the body's centroid, bounded work).
+#[test]
+fn translated_plug_with_far_axis_anchors_measures_the_same() {
+    let home = measure(&plug(), 1e-9).unwrap();
+    let d = Vec3::new(1.0e4, -3.0e4, 2.0e4);
+    let mut far = plug();
+    for v in &mut far.vertices { *v = v.add(d); }
+    for e in &mut far.edges { e.curve = e.curve.translated(d); }
+    // The host's axis point may sit anywhere on its axis (exact: only its part across b enters). The cutter's c
+    // may not: h then cancels at that size, so writers keep c near the curve.
+    if let Curve::CylinderPair { p, b, .. } = &mut far.edges[1].curve {
+        *p = p.add(b.scale(7.0e5));
+    }
+    for f in &mut far.faces {
+        f.surface = match f.surface.clone() {
+            Surface::Plane { p, n, x } => Surface::Plane { p: p.add(d), n, x },
+            Surface::Cylinder { p, a, x, r } => Surface::Cylinder { p: p.add(d).add(a.scale(-9.0e5)), a, x, r },
+        };
+    }
+    check(&far, 1e-7).unwrap();
+    let clock = std::time::Instant::now();
+    let m = measure(&far, 1e-7).unwrap();
+    assert!(clock.elapsed().as_secs_f64() < 2.0, "{:?}", clock.elapsed());
+    assert!((m.volume - home.volume).abs() < 1e-9 * home.volume, "{} vs {}", m.volume, home.volume);
+    assert!((m.area - home.area).abs() < 1e-9 * home.area, "{} vs {}", m.area, home.area);
+}
+
+#[test]
+fn quadrature_refuses_what_it_cannot_converge() {
+    use gc_kernel::mass::quadrature;
+    assert!((quadrature(&|t| t.cos(), 0.0, 1.0, 1e-15).unwrap() - 1f64.sin()).abs() < 1e-15);
+    assert!(quadrature(&|t| (1.0 / t).sin(), 1e-9, 1.0, 1e-15).is_err());
+}
