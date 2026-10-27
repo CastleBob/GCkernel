@@ -223,6 +223,8 @@ struct Admitted {
     low: f64,
     high: f64,
     lower_face: usize,
+    enclosing_center: Vec3,
+    enclosing_radius: f64,
 }
 fn admit(tool: &Body, tol: f64) -> Result<Admitted> {
     if tool.vertices.len() != 8
@@ -348,6 +350,8 @@ fn admit(tool: &Body, tol: f64) -> Result<Admitted> {
         low,
         high,
         lower_face,
+        enclosing_center: a.add(b).scale(0.5),
+        enclosing_radius: radius + a.distance(b) * 0.5,
     })
 }
 
@@ -372,6 +376,32 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     let admitted = admit(tool, tol)?;
     let axis = admitted.axis;
     let n = admitted.n;
+    if !(body.vertices.len() == 8 && body.edges.len() == 12 && body.faces.len() == 6) {
+        let (low, high, bottom_face, top_face) = super::passage::round_passage(
+            body,
+            axis,
+            admitted.enclosing_center,
+            admitted.enclosing_radius,
+            admitted.low,
+            admitted.high,
+            tol,
+        )?;
+        let shift = n.scale(low - admitted.low);
+        let outline = boundary(tool, &tool.faces[admitted.lower_face])
+            .into_iter()
+            .map(|c| c.translated(shift))
+            .collect();
+        let cavity = crate::extrude::extrude(
+            &Profile {
+                loops: vec![outline],
+                n,
+                low: 0.,
+                high: high - low,
+            },
+            tol,
+        )?;
+        return super::passage::splice_cavity(body, cavity, axis, bottom_face, top_face, tol);
+    }
     let (low, high) = super::rectilinear::plain_box_bounds(body, tol)?;
     if admitted.low > low[axis] || admitted.high < high[axis] {
         return Err(unsupported(

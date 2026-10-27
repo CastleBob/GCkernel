@@ -80,8 +80,14 @@ equivalent indexing, edge directions, loop starts and surface frames. The output
 uses the ORIGINAL cap curves as a hole in the box cross-section, swept through
 the box thickness by our own extrusion code. Cap curves and cylindrical walls
 remain analytic. It does not replace an unsupported cutter with a capsule.
-Blind, side-wall touching/crossing and repeated/interacting curved cuts remain
-unsupported for slots; capsule cuts still require a plain uncut box as their base.
+Other supported passage bodies, including the real filleted I-beam, use the same
+local planar-passage proof with a disk enclosing the entire capsule. That disk
+is a conservative clearance bound only; the actual original slot curves define
+the cavity. Its inverted side faces and cap loops are spliced into the existing
+body. This supports separated slot/hole sequences and retains existing fillets.
+The enclosing disk can reject a slot that would fit in a narrower region.
+Blind, side-wall touching/crossing and interacting curved cuts remain unsupported.
+Conic-trimmed bodies are not yet admitted by the local passage validator.
 
 ## Admission, errors and representation
 

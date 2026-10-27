@@ -433,3 +433,68 @@ pub(super) fn round_passage(
     }
     Ok((hits[0].0, hits[1].0, hits[0].2, hits[1].2))
 }
+
+/// Attach the inverted side boundary of a caller-validated cavity, reusing its
+/// actual cap loops as holes in the two proven entry/exit faces. The cavity is
+/// produced by our own extrusion after passage admission, not guessed from bounds.
+pub(super) fn splice_cavity(
+    body: &Body,
+    cavity: Body,
+    axis: usize,
+    bottom_face: usize,
+    top_face: usize,
+    tol: f64,
+) -> Result<Body> {
+    let mut result = body.clone();
+    let vertex_offset = result.vertices.len();
+    let edge_offset = result.edges.len();
+    let mut cap_count = [0, 0];
+    result.vertices.extend(cavity.vertices);
+    result.edges.extend(cavity.edges.into_iter().map(|mut e| {
+        e.start += vertex_offset;
+        e.end += vertex_offset;
+        e
+    }));
+    for mut face in cavity.faces {
+        let loops: Vec<Vec<(usize, bool)>> = face
+            .loops
+            .into_iter()
+            .map(|lp| {
+                lp.into_iter()
+                    .rev()
+                    .map(|(i, fwd)| (i + edge_offset, !fwd))
+                    .collect()
+            })
+            .collect();
+        if let Surface::Plane { n, .. } = face.surface {
+            let a = xyz(n);
+            if a[axis].abs() == 1. && (0..3).all(|i| i == axis || a[i] == 0.) {
+                let which = if a[axis] * sign(face.sense) < 0. {
+                    0
+                } else {
+                    1
+                };
+                cap_count[which] += 1;
+                result.faces[if which == 0 { bottom_face } else { top_face }]
+                    .loops
+                    .extend(loops);
+                continue;
+            }
+        }
+        face.sense = !face.sense;
+        face.loops = loops;
+        result.faces.push(face);
+    }
+    if cap_count != [1, 1] {
+        return Err(KernelError::Internal(
+            "passage cavity does not have exactly two axial caps".into(),
+        ));
+    }
+    crate::topology::check(&result, tol).map_err(|e| {
+        KernelError::Internal(format!("passage splice failed closed topology: {e}"))
+    })?;
+    validate(&result, tol).map_err(|e| {
+        KernelError::Internal(format!("passage splice failed analytic validation: {e}"))
+    })?;
+    Ok(result)
+}

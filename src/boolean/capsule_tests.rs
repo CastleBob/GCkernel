@@ -288,3 +288,111 @@ fn capsule_cut_succeeds_through_protocol() {
     assert_eq!(crate::topology::check(&result, TOL).unwrap().genus(), 1.);
     assert!((boundary_volume(&result) - (320. - 4. * (8. + PI))).abs() < 1e-9);
 }
+
+fn captured_ibeam() -> Body {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rat_hole/base.f64");
+    let bytes = std::fs::read(path).unwrap();
+    let data: Vec<f64> = bytes
+        .chunks_exact(8)
+        .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    crate::neutral::Reader::new(&data).body().unwrap()
+}
+fn translate(body: &Body, offset: Vec3) -> Body {
+    let mut out = body.clone();
+    for v in &mut out.vertices {
+        *v = v.add(offset);
+    }
+    for e in &mut out.edges {
+        e.curve = e.curve.translated(offset);
+    }
+    for f in &mut out.faces {
+        match &mut f.surface {
+            Surface::Plane { p, .. } | Surface::Cylinder { p, .. } => *p = p.add(offset),
+        }
+    }
+    out
+}
+#[test]
+fn real_ibeam_supports_separated_slot_bore_slot_sequence() {
+    let base = captured_ibeam();
+    let original = crate::neutral::write_body(&base);
+    let (_, tool) = fixture(2, 0., 0., (-6., 1.));
+    let one = crate::boolean::cut(&base, &tool, TOL).unwrap();
+    let wire = crate::neutral::write_body(&one);
+    let one = crate::neutral::Reader::new(&wire).body().unwrap();
+    assert_eq!(crate::topology::check(&one, TOL).unwrap().genus(), 1.);
+    assert!((boundary_volume(&base) - boundary_volume(&one) - 0.23 * (8. + PI)).abs() < 1e-9);
+    let n = Vec3::new(0., 0., 1.);
+    let circle = crate::extrude::extrude(
+        &Profile {
+            loops: vec![vec![Curve::Arc {
+                c: Vec3::new(5., 14., 0.),
+                n,
+                x: Vec3::new(1., 0., 0.),
+                r: 0.5,
+                t0: 0.,
+                t1: std::f64::consts::TAU,
+            }]],
+            n,
+            low: -6.,
+            high: 1.,
+        },
+        TOL,
+    )
+    .unwrap();
+    let two = crate::boolean::cut(&one, &circle, TOL).unwrap();
+    let three = crate::boolean::cut(&two, &translate(&tool, Vec3::new(0., 20., 0.)), TOL).unwrap();
+    assert_eq!(crate::topology::check(&three, TOL).unwrap().genus(), 3.);
+    assert!(
+        (boundary_volume(&base) - boundary_volume(&three) - 0.23 * (2. * (8. + PI) + PI * 0.25))
+            .abs()
+            < 1e-8
+    );
+    assert_eq!(crate::neutral::write_body(&base), original);
+    for (i, face) in base.faces.iter().enumerate() {
+        if matches!(face.surface, Surface::Cylinder { .. }) {
+            assert_eq!(format!("{face:?}"), format!("{:?}", three.faces[i]));
+        }
+    }
+}
+
+#[test]
+fn separated_web_slots_commute_in_either_order() {
+    let base = captured_ibeam();
+    let (_, tool) = fixture(2, 0., 0., (-6., 1.));
+    let other = translate(&tool, Vec3::new(0., 20., 0.));
+    let ab = crate::boolean::cut(
+        &crate::boolean::cut(&base, &tool, TOL).unwrap(),
+        &other,
+        TOL,
+    )
+    .unwrap();
+    let ba = crate::boolean::cut(
+        &crate::boolean::cut(&base, &other, TOL).unwrap(),
+        &tool,
+        TOL,
+    )
+    .unwrap();
+    assert!((boundary_volume(&ab) - boundary_volume(&ba)).abs() < 1e-9);
+    assert_eq!(crate::topology::check(&ab, TOL).unwrap().genus(), 2.);
+    assert_eq!(crate::topology::check(&ba, TOL).unwrap().genus(), 2.);
+}
+
+#[test]
+fn web_slot_clearance_and_existing_hole_boundaries_are_enforced() {
+    let base = captured_ibeam();
+    let (_, tool) = fixture(2, 0., 0., (-6., 1.));
+    let one = crate::boolean::cut(&base, &tool, TOL).unwrap();
+    for offset in [
+        Vec3::new(-2., 0., 0.),
+        Vec3::new(0., 0., 0.),
+        Vec3::new(0., 1., 0.),
+    ] {
+        assert!(matches!(
+            crate::boolean::cut(&one, &translate(&tool, offset), TOL),
+            Err(KernelError::Unsupported(_))
+        ));
+    }
+}
