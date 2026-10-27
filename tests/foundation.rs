@@ -339,3 +339,24 @@ fn conic_area_is_exact_and_conic_profiles_are_not_extruded() {
     let profile = Profile { loops: vec![full], n: Z, low: 0.0, high: 1.0 };
     assert!(matches!(extrude(&profile, TOL), Err(KernelError::Unsupported(_))));
 }
+
+/// The same oblique-cut cylinder GCmaker's GcKernelLabTests.KernelConicEdge reads: a radius-1 cylinder on z = 0
+/// cut by z = 2 + x tan(0.3), its top edge an exact conic. The kernel reads it strictly and its topology holds.
+#[test]
+fn oblique_cut_cylinder_with_a_conic_edge_checks() {
+    let k = 0.3f64.tan();
+    let m = (1.0 + k * k).sqrt();
+    let mut data = vec![1.0, 2.0, 3.0, 3.0, 1.0, 0.0, 0.0, 1.0, 0.0, 2.0 + k];
+    data.extend_from_slice(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 2.0 * PI, 0.0, 0.0]);
+    data.extend_from_slice(&[3.0, 0.0, 0.0, 2.0, 1.0, 0.0, k, 0.0, 1.0, 0.0, 0.0, 2.0 * PI, 1.0, 1.0]);
+    data.extend_from_slice(&[0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 2.0 + k, 0.0, 1.0]);
+    data.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+    data.extend_from_slice(&[0.0, 0.0, 0.0, 2.0, -k / m, 0.0, 1.0 / m, 1.0 / m, 0.0, k / m, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    data.extend_from_slice(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 4.0, 0.0, 1.0, 2.0, 1.0, 1.0, 0.0, 2.0, 0.0]);
+    let mut reader = Reader::new(&data);
+    let body = reader.body().unwrap();
+    reader.finish().unwrap();
+    let report = check(&body, TOL).unwrap();
+    assert_eq!((report.vertices, report.edges, report.faces, report.loops), (2, 3, 3, 3));
+    assert_eq!(write_body(&body), data);
+}
