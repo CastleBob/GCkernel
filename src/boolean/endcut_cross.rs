@@ -499,6 +499,27 @@ mod tests {
         assert_eq!(crate::neutral::write_body(&base), original);
     }
     #[test]
+    fn twenty_one_pipe_holes_replay_without_losing_prior_openings() {
+        let case = "pipe_hole_one_wall";
+        let mut body = survey(case, "base");
+        let tool = survey(case, "step01");
+        let removed = 22.5 * PI - 70.48768294431949;
+        for step in 0..21 {
+            let z = 1. + step as f64 * 1.1;
+            body = operation(&body, &placed(&tool, 1., p(0., 0., z - 12.)), 1e-6);
+            assert_eq!(
+                crate::topology::check(&body, 1e-6).unwrap().genus(),
+                (step + 2) as f64
+            );
+            assert!(
+                (crate::mass::measure(&body, 1e-6).unwrap().volume
+                    - (22.5 * PI - (step + 1) as f64 * removed))
+                    .abs()
+                    < 1e-8
+            );
+        }
+    }
+    #[test]
     fn off_center_pipe_holes_match_independent_wall_integrals() {
         let base = survey("pipe_hole_one_wall", "base");
         for radius in [0.1_f64, 0.25, 0.5, 0.8] {
