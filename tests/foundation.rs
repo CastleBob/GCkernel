@@ -184,6 +184,11 @@ fn sampled_area(lp: &[Curve]) -> f64 {
                     pts.push(Curve::point_at_angle(*center, *n, *x, *r, t));
                 }
             }
+            Curve::Conic { c: center, u, v, t0, t1 } => {
+                for k in 0..2000 {
+                    pts.push(Curve::conic_point(*center, *u, *v, t0 + (t1 - t0) * k as f64 / 2000.0));
+                }
+            }
         }
     }
     let mut a = 0.0;
@@ -272,4 +277,65 @@ fn put_curve_round_trips_through_the_reader() {
     put_curve(&mut data, &circle(1.0, 2.0, 3.0));
     let back = Reader::new(&data).curve().unwrap();
     assert!(back.start().distance(Vec3::new(4.0, 2.0, 0.0)) < 1e-12);
+}
+
+fn conic_curve(values: &[f64]) -> Result<Curve, KernelError> {
+    let mut data = vec![3.0];
+    data.extend_from_slice(values);
+    Reader::new(&data).curve()
+}
+
+/// A plane z = x tan(a) cutting the cylinder x^2 + y^2 = 1 (axis z): the ellipse c + u cos t + v sin t with
+/// u = (1, 0, tan a), v = (0, 1, 0). Oblique semi-diameters are allowed; dependent ones are not.
+#[test]
+fn conic_reads_strictly_and_round_trips() {
+    let k = 0.3f64.tan();
+    let ellipse = [0.0, 0.0, 0.0, 1.0, 0.0, k, 0.0, 1.0, 0.0, 0.0, 2.0 * PI];
+    let c = conic_curve(&ellipse).unwrap();
+    assert!(c.start().distance(Vec3::new(1.0, 0.0, k)) < 1e-15);
+    assert!(c.end().distance(c.start()) < 1e-12);
+    let mut out = Vec::new();
+    put_curve(&mut out, &c);
+    assert_eq!(out, [&[3.0][..], &ellipse[..]].concat());
+
+    let skew = [0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.25, 1.5];
+    assert!(conic_curve(&skew).is_ok());
+    let refuse = |v: &[f64], why: &str| assert!(matches!(conic_curve(v), Err(KernelError::InvalidInput(_))), "{why}");
+    refuse(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0], "parallel semi-diameters");
+    refuse(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0], "zero semi-diameter");
+    refuse(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0], "empty span");
+    refuse(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 7.0], "more than a full turn");
+    refuse(&[0.0, 0.0, 0.0, 1.0, f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0], "non-finite");
+    refuse(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], "truncated");
+}
+
+#[test]
+fn conic_reverses_and_translates_exactly() {
+    let c = Curve::Conic { c: Vec3::new(1.0, 2.0, 3.0), u: Vec3::new(2.0, 0.0, 0.5), v: Vec3::new(0.3, 1.0, 0.0), t0: 0.2, t1: 1.9 };
+    let r = c.reversed();
+    assert!(r.start().distance(c.end()) < 1e-14 && r.end().distance(c.start()) < 1e-14);
+    // Reversed twice is the original curve, point for point.
+    let rr = r.reversed();
+    for i in 0..=10 {
+        let t = 0.2 + 1.7 * i as f64 / 10.0;
+        let Curve::Conic { c: cc, u, v, .. } = rr else { panic!() };
+        assert!(Curve::conic_point(cc, u, v, t).distance(match c { Curve::Conic { c, u, v, .. } => Curve::conic_point(c, u, v, t), _ => unreachable!() }) < 1e-14);
+    }
+    let d = Vec3::new(-1.0, 4.0, 0.5);
+    let moved = c.translated(d);
+    assert!(moved.start().distance(c.start().add(d)) < 1e-14 && moved.end().distance(c.end().add(d)) < 1e-14);
+}
+
+/// Area of a whole ellipse is pi |u x v|; half an ellipse closed by its chord is half that.
+#[test]
+fn conic_area_is_exact_and_conic_profiles_are_not_extruded() {
+    let (u, v) = (Vec3::new(3.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 0.0));
+    let full = vec![Curve::Conic { c: Vec3::new(1.0, 1.0, 0.0), u, v, t0: 0.0, t1: 2.0 * PI }];
+    assert!((signed_area(&full, Z) - 6.0 * PI).abs() < 1e-12);
+    let half = Curve::Conic { c: Vec3::new(0.0, 0.0, 0.0), u, v, t0: 0.0, t1: PI };
+    let chord = Curve::Line { a: half.end(), b: half.start() };
+    assert!((signed_area(&[half.clone(), chord.clone()], Z) - 3.0 * PI).abs() < 1e-12);
+    assert!((signed_area(&[chord.reversed(), half.reversed()], Z) + 3.0 * PI).abs() < 1e-12);
+    let profile = Profile { loops: vec![full], n: Z, low: 0.0, high: 1.0 };
+    assert!(matches!(extrude(&profile, TOL), Err(KernelError::Unsupported(_))));
 }

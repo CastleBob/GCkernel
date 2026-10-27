@@ -46,6 +46,10 @@ pub enum Curve {
     /// Counter-clockwise about unit `n` from angle `t0` to `t1` (t1 > t0), angles from unit `x`
     /// (perpendicular to n) toward n x x.
     Arc { c: Vec3, n: Vec3, x: Vec3, r: f64, t0: f64, t1: f64 },
+    /// An exact ellipse arc (a plane cutting a cylinder obliquely): `c + u cos t + v sin t` for t from `t0` to `t1`
+    /// (t0 < t1 <= t0 + 2 pi). `u` and `v` are conjugate semi-diameters: finite and independent, not necessarily
+    /// unit or at right angles (Astra 2026-10-27). Wire type 3.
+    Conic { c: Vec3, u: Vec3, v: Vec3, t0: f64, t1: f64 },
 }
 
 impl Curve {
@@ -53,22 +57,26 @@ impl Curve {
         let y = n.cross(x);
         c.add(x.scale(r * t.cos())).add(y.scale(r * t.sin()))
     }
+    pub fn conic_point(c: Vec3, u: Vec3, v: Vec3, t: f64) -> Vec3 { c.add(u.scale(t.cos())).add(v.scale(t.sin())) }
     pub fn start(&self) -> Vec3 {
         match self {
             Curve::Line { a, .. } => *a,
             Curve::Arc { c, n, x, r, t0, .. } => Self::point_at_angle(*c, *n, *x, *r, *t0),
+            Curve::Conic { c, u, v, t0, .. } => Self::conic_point(*c, *u, *v, *t0),
         }
     }
     pub fn end(&self) -> Vec3 {
         match self {
             Curve::Line { b, .. } => *b,
             Curve::Arc { c, n, x, r, t1, .. } => Self::point_at_angle(*c, *n, *x, *r, *t1),
+            Curve::Conic { c, u, v, t1, .. } => Self::conic_point(*c, *u, *v, *t1),
         }
     }
     pub fn translated(&self, d: Vec3) -> Curve {
         match self {
             Curve::Line { a, b } => Curve::Line { a: a.add(d), b: b.add(d) },
             Curve::Arc { c, n, x, r, t0, t1 } => Curve::Arc { c: c.add(d), n: *n, x: *x, r: *r, t0: *t0, t1: *t1 },
+            Curve::Conic { c, u, v, t0, t1 } => Curve::Conic { c: c.add(d), u: *u, v: *v, t0: *t0, t1: *t1 },
         }
     }
     /// The same curve run the other way: an arc becomes counter-clockwise about -n from its old end.
@@ -79,6 +87,8 @@ impl Curve {
                 let x = self.end().sub(*c).scale(1.0 / r);
                 Curve::Arc { c: *c, n: n.scale(-1.0), x, r: *r, t0: 0.0, t1: t1 - t0 }
             }
+            // c + u cos(-s) + v sin(-s) = c + u cos s - v sin s, for s from -t1 to -t0.
+            Curve::Conic { c, u, v, t0, t1 } => Curve::Conic { c: *c, u: *u, v: v.scale(-1.0), t0: -t1, t1: -t0 },
         }
     }
 }

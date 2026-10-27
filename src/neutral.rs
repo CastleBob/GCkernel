@@ -116,6 +116,18 @@ impl<'a> Reader<'a> {
                 Ok(Curve::Arc { c, n, x, r, t0, t1 })
             }
             t if t == 2.0 => Err(KernelError::Unsupported("B-spline curves are not supported by the GC Kernel yet".into())),
+            t if t == 3.0 => {
+                let (c, u, v) = (self.point()?, self.point()?, self.point()?);
+                let (t0, t1) = (self.next()?, self.next()?);
+                let (lu, lv) = (u.length(), v.length());
+                if !(lu > 1e-14 && lv > 1e-14) || u.cross(v).length() <= 1e-9 * lu * lv {
+                    return invalid("a conic needs two independent semi-diameters");
+                }
+                if t1 <= t0 || t1 - t0 > 2.0 * std::f64::consts::PI + 1e-12 {
+                    return invalid("a conic needs t0 < t1 <= t0 + 2 pi");
+                }
+                Ok(Curve::Conic { c, u, v, t0, t1 })
+            }
             t => invalid(format!("unknown curve type {t}")),
         }
     }
@@ -200,6 +212,9 @@ pub fn put_curve(out: &mut Vec<f64>, c: &Curve) {
         Curve::Line { a, b } => { out.push(0.0); put(out, *a); put(out, *b); }
         Curve::Arc { c, n, x, r, t0, t1 } => {
             out.push(1.0); put(out, *c); put(out, *n); put(out, *x); out.extend_from_slice(&[*r, *t0, *t1]);
+        }
+        Curve::Conic { c, u, v, t0, t1 } => {
+            out.push(3.0); put(out, *c); put(out, *u); put(out, *v); out.extend_from_slice(&[*t0, *t1]);
         }
     }
 }

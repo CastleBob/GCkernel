@@ -27,6 +27,12 @@ pub fn signed_area(lp: &[Curve], n: Vec3) -> f64 {
                 let b = a + sweep;
                 area += 0.5 * (r * cx * (b.sin() - a.sin()) - r * cy * (b.cos() - a.cos()) + r * r * (b - a));
             }
+            // x y' - y x' for c + u cos t + v sin t is cx (y' part) - cy (x' part) + (u x v) in the plane.
+            Curve::Conic { c: center, u: cu, v: cv, t0, t1 } => {
+                let ((cx, cy), (ux, uy), (vx, vy)) = (uv(*center), uv(*cu), uv(*cv));
+                let (dc, ds) = (t1.cos() - t0.cos(), t1.sin() - t0.sin());
+                area += 0.5 * (cx * (uy * dc + vy * ds) - cy * (ux * dc + vx * ds) + (ux * vy - uy * vx) * (t1 - t0));
+            }
         }
     }
     area
@@ -57,6 +63,10 @@ pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
                 if an.cross(n).length() > 1e-9 {
                     return Err(KernelError::InvalidInput("a profile arc does not lie in the profile plane".into()));
                 }
+            }
+            // Sweeping an ellipse makes an elliptic cylinder, which is not a surface the kernel has.
+            if let Curve::Conic { .. } = c {
+                return Err(KernelError::Unsupported("extruding an elliptic profile edge is not supported".into()));
             }
         }
     }
@@ -113,6 +123,7 @@ pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
                 Curve::Arc { c: center, n: an, r, .. } => {
                     (Surface::Cylinder { p: center.add(down), a: n, x: u, r: *r }, an.dot(n) > 0.0)
                 }
+                Curve::Conic { .. } => unreachable!("conic profile edges are refused above"),
             };
             let lp = vec![(bottom_e(j), true), (up_e(j + 1), true), (top_e(j), false), (up_e(j), false)];
             sides.push(Face { surface: surface_and_sense.0, sense: surface_and_sense.1, loops: vec![lp] });
