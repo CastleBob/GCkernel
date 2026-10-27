@@ -85,11 +85,53 @@ fn distance(q: Vec3, surface: &Surface) -> f64 {
     }
 }
 
-/// The largest distance from the surface over the curve's ends and 15 interior points, when beyond `tolerance`.
-/// Samples, not a proof: lines in planes and circles in planes or on cylinders are fixed by their ends and middle,
-/// and the kernel's other curves are smooth on the scale of the samples.
+/// A bound on how far the whole curve leaves the surface, when it may exceed `tolerance` (Astra's analytic checks,
+/// not samples):
+/// - line or arc/ellipse c + u cos t + v sin t on a plane: |(c - p).n| + sqrt((u.n)^2 + (v.n)^2) (a line's ends);
+/// - line on a cylinder: the squared radius is quadratic along it, so its ends and the clamped stationary point;
+/// - arc/ellipse on a cylinder: the squared-radius residual is a trigonometric polynomial of degree two; the sum of
+///   its coefficient magnitudes bounds it, against tolerance (2 r - tolerance), inward and outward;
+/// - a CylinderPair lies on its two cylinders by construction: it may bound a face only on one of them.
 fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> {
-    let (t0, t1) = curve.domain();
-    let worst = (0..=16).map(|i| distance(curve.eval(t0 + (t1 - t0) * i as f64 / 16.0).0, surface)).fold(0.0, f64::max);
+    let ellipse = |c: Vec3, u: Vec3, v: Vec3| (c, u, v);
+    let (c, u, v) = match *curve {
+        Curve::Line { a, b } => {
+            let worst = match *surface {
+                Surface::Plane { .. } => distance(a, surface).max(distance(b, surface)),
+                Surface::Cylinder { p, a: axis, .. } => {
+                    let perp = |w: Vec3| w.sub(axis.scale(w.dot(axis)));
+                    let (w0, d) = (perp(a.sub(p)), perp(b.sub(a)));
+                    let t = if d.dot(d) > 0.0 { (-w0.dot(d) / d.dot(d)).clamp(0.0, 1.0) } else { 0.0 };
+                    [0.0, 1.0, t].iter().map(|&s| distance(a.add(b.sub(a).scale(s)), surface)).fold(0.0, f64::max)
+                }
+            };
+            return (worst > tolerance).then_some(worst);
+        }
+        Curve::Arc { c, n, x, r, .. } => ellipse(c, x.scale(r), n.cross(x).scale(r)),
+        Curve::Conic { c, u, v, .. } => ellipse(c, u, v),
+        Curve::CylinderPair { c, a, rho, p, b, r, .. } => {
+            let same = |q: Vec3, axis: Vec3, radius: f64| match *surface {
+                Surface::Cylinder { p: fp, a: fa, r: fr, .. } => {
+                    let w = q.sub(fp);
+                    fa.cross(axis).length() <= 1e-9 && w.sub(fa.scale(w.dot(fa))).length() <= tolerance && (fr - radius).abs() <= tolerance
+                }
+                Surface::Plane { .. } => false,
+            };
+            return if same(c, a, rho) || same(p, b, r) { None } else { Some(f64::INFINITY) };
+        }
+    };
+    let worst = match *surface {
+        Surface::Plane { p, n, .. } => c.sub(p).dot(n).abs() + (u.dot(n).powi(2) + v.dot(n).powi(2)).sqrt(),
+        Surface::Cylinder { p, a, r, .. } => {
+            // |perp(c - p + u cos t + v sin t)|^2 - r^2 = k0 + k1 cos t + k2 sin t + k3 cos 2t + k4 sin 2t.
+            let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
+            let (w, pu, pv) = (perp(c.sub(p)), perp(u), perp(v));
+            let k = [w.dot(w) + (pu.dot(pu) + pv.dot(pv)) / 2.0 - r * r, 2.0 * w.dot(pu), 2.0 * w.dot(pv),
+                     (pu.dot(pu) - pv.dot(pv)) / 2.0, pu.dot(pv)];
+            let residual: f64 = k.iter().map(|x| x.abs()).sum();
+            // |rho^2 - r^2| <= tol (2 r - tol) keeps rho within tol of r on both sides.
+            if r > tolerance && residual <= tolerance * (2.0 * r - tolerance) { 0.0 } else { (residual / r).max(tolerance * 2.0) }
+        }
+    };
     (worst > tolerance).then_some(worst)
 }

@@ -72,9 +72,12 @@ pub fn pair_eval(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, 
     let (dp, ddp, ap) = (perp(c.sub(p)).add(perp(round)), perp(dq), perp(a));
     let alpha = ap.dot(ap);
     let (beta, dbeta) = (dp.dot(ap), ddp.dot(ap));
-    let (gamma, dgamma) = (dp.dot(dp) - r * r, 2.0 * dp.dot(ddp));
-    let s = beta * beta - alpha * gamma;
-    let ds = 2.0 * beta * dbeta - alpha * dgamma;
+    // S = beta^2 - alpha (|D'|^2 - r^2) = alpha r^2 - |D' x a'|^2 (Lagrange's identity): the cross product drops the
+    // part of D' along a', so a parameter-cylinder anchor far along its axis does not cancel (Astra's probe:
+    // c.z = 1e8 gave S = 0 and a point half an inch off the old way).
+    let cross = dp.cross(ap);
+    let s = alpha * r * r - cross.dot(cross);
+    let ds = -2.0 * cross.dot(ddp.cross(ap));
     let root = s.max(0.0).sqrt();
     let h = (-beta + branch * root) / alpha;
     let dh = (-dbeta + branch * ds / (2.0 * root)) / alpha;

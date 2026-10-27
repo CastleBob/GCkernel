@@ -177,3 +177,38 @@ fn quadrature_refuses_what_it_cannot_converge() {
     assert!((quadrature(&|t| t.cos(), 0.0, 1.0, 1e-15).unwrap() - 1f64.sin()).abs() < 1e-15);
     assert!(quadrature(&|t| (1.0 / t).sin(), 1e-9, 1.0, 1e-15).is_err());
 }
+
+/// Astra's probe: only the parameter cylinder's anchor moved to z = 1e8 along its own axis. The discriminant in
+/// Lagrange form (alpha r^2 - |D' x a'|^2) keeps the curve: the points stay on both cylinders and on the plug's top.
+#[test]
+fn far_parameter_anchor_keeps_the_curve() {
+    let near = plug_edge();
+    let Curve::CylinderPair { a, x, rho, p, b, r, branch, t0, t1, .. } = near.clone() else { unreachable!() };
+    let far = Curve::CylinderPair { c: Vec3::new(0.0, 0.0, 1.0e8), a, x, rho, p, b, r, branch, t0, t1 };
+    for i in 0..=16 {
+        let t = 2.0 * PI * i as f64 / 16.0;
+        let (q, qn) = (far.eval(t).0, near.eval(t).0);
+        assert!(q.distance(qn) < 1e-6, "{q:?} vs {qn:?}");
+    }
+}
+
+/// The analytic membership bounds refuse curves just off their face: an arc 1e-5 too big for its cylinder, an arc
+/// tilted out of its plane, a CylinderPair on a plane face.
+#[test]
+fn curves_just_off_their_surfaces_are_refused() {
+    let mut body = plug();
+    let Curve::Arc { r, .. } = &mut body.edges[0].curve else { unreachable!() };
+    *r += 1e-5;
+    body.vertices[0].x += 1e-5;
+    body.edges[2].curve = Curve::Line { a: body.vertices[0], b: body.vertices[1] };
+    assert!(matches!(check(&body, 1e-7), Err(KernelError::InvalidInput(m)) if m.contains("leaves face")));
+
+    let mut tilted = plug();
+    let Curve::Arc { n, .. } = &mut tilted.edges[0].curve else { unreachable!() };
+    *n = Vec3::new(0.0, 1e-4, 1.0).unit().unwrap();
+    assert!(matches!(check(&tilted, 1e-7), Err(KernelError::InvalidInput(m)) if m.contains("leaves face")));
+
+    let mut on_plane = plug();
+    on_plane.faces[2].surface = Surface::Plane { p: Vec3::new(0.0, 0.0, 0.3), n: Z, x: X };
+    assert!(matches!(check(&on_plane, 1e-7), Err(KernelError::InvalidInput(m)) if m.contains("leaves face 2")));
+}
