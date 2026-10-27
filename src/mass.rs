@@ -75,13 +75,15 @@ pub fn quadrature(f: &dyn Fn(f64) -> f64, a: f64, b: f64, absolute: f64) -> Resu
     Ok(total)
 }
 
-fn segment(body: &Body, edge: usize, forward: bool) -> Curve {
-    let c = &body.edges[edge].curve;
-    if forward { c.clone() } else { c.reversed() }
+/// A loop segment moved by `shift` (to the measuring frame), run the way the loop runs.
+fn segment(body: &Body, edge: usize, forward: bool, shift: Vec3) -> Curve {
+    let c = body.edges[edge].curve.translated(shift);
+    if forward { c } else { c.reversed() }
 }
 
-/// Volume and area; a body whose faces point inwards has negative volume. The flux is taken about the vertices'
-/// centroid, not the world origin, so a small part far from the origin loses nothing to cancellation (Astra).
+/// Volume and area; a body whose faces point inwards has negative volume. Everything is measured in a frame at the
+/// vertices' centroid: each curve and surface is moved there once, so a small part far from the world origin loses
+/// nothing to cancellation (Astra). The body itself is not changed.
 /// Curves that do not lie on their cylinder (beyond `tolerance`) are refused.
 pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelError> {
     let (mut volume, mut area) = (0.0, 0.0);
@@ -90,23 +92,26 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
     let o = body.vertices.iter().fold(Vec3::new(0.0, 0.0, 0.0), |s, v| s.add(*v)).scale(1.0 / n);
     // The body's size, for the quadrature's absolute tolerance.
     let size = body.vertices.iter().map(|v| v.distance(o)).fold(0.0, f64::max).max(1e-9);
+    let shift = o.scale(-1.0);
+    let o = Vec3::new(0.0, 0.0, 0.0);
     for (f, face) in body.faces.iter().enumerate() {
         let sense = if face.sense { 1.0 } else { -1.0 };
         match &face.surface {
             Surface::Plane { p, n, .. } => {
                 let outward = n.scale(sense);
                 let a: f64 = face.loops.iter()
-                    .map(|lp| signed_area(&lp.iter().map(|&(e, fwd)| segment(body, e, fwd)).collect::<Vec<_>>(), outward))
+                    .map(|lp| signed_area(&lp.iter().map(|&(e, fwd)| segment(body, e, fwd, shift)).collect::<Vec<_>>(), outward))
                     .sum();
                 area += a;
-                volume += p.sub(o).dot(outward) * a / 3.0;
+                volume += p.add(shift).dot(outward) * a / 3.0;
             }
             Surface::Cylinder { p, a, x, r } => {
+                let p = &p.add(shift);
                 let y = a.cross(*x);
                 let (px, py) = (p.sub(o).dot(*x), p.sub(o).dot(y));
                 let (mut flux, mut sweep) = (0.0, 0.0);
                 for &(e, fwd) in face.loops.iter().flatten() {
-                    let (j, k) = cylinder_terms(&segment(body, e, fwd), *p, o, *a, *x, y, *r, px, py, tolerance, size)
+                    let (j, k) = cylinder_terms(&segment(body, e, fwd, shift), *p, o, *a, *x, y, *r, px, py, tolerance, size)
                         .map_err(|m| KernelError::InvalidInput(format!("face {f}, edge {e}: {m}")))?;
                     flux += j;
                     sweep += k;
