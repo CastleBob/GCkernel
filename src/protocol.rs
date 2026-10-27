@@ -9,10 +9,11 @@
 //! Ops: 1 check (a body: validated and echoed back, followed by its V, E, F, L counts),
 //!      2 extrude (a profile -> the prism body, followed by its exact volume),
 //!      3 cut (two bodies back to back -> body less tool),
-//!      4 measure (a body -> its volume, surface area, and 1 when both are closed form, 0 when by quadrature).
+//!      4 measure (a body -> its volume, surface area, and 1 when both are closed form, 0 when by quadrature),
+//!      5 rebuild prism (a body -> the kernel's own extrusion of it, when it is a straight prism; rebuild.rs).
 
 use crate::neutral::{write_body, Reader};
-use crate::{boolean, extrude, mass, topology, KernelError};
+use crate::{boolean, extrude, mass, rebuild, topology, KernelError};
 
 pub const VERSION: u32 = 1;
 pub const UNITS_INCH: u32 = 1;
@@ -21,6 +22,7 @@ pub const OP_CHECK: u32 = 1;
 pub const OP_EXTRUDE: u32 = 2;
 pub const OP_CUT: u32 = 3;
 pub const OP_MEASURE: u32 = 4;
+pub const OP_REBUILD_PRISM: u32 = 5;
 
 pub struct Request {
     pub op: u32,
@@ -105,6 +107,14 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             topology::check(&body, tol)?;
             let m = mass::measure(&body, tol)?;
             Ok(vec![m.volume, m.area, if m.exact { 1.0 } else { 0.0 }])
+        }
+        OP_REBUILD_PRISM => {
+            let body = reader.body()?;
+            reader.finish()?;
+            topology::check(&body, tol)?;
+            let rebuilt = rebuild::rebuild_prism(&body, tol)?;
+            topology::check(&rebuilt, tol).map_err(|e| KernelError::Internal(format!("rebuild built an invalid solid: {e}")))?;
+            Ok(write_body(&rebuilt))
         }
         op => Err(KernelError::Unsupported(format!("op {op}"))),
     }
