@@ -3,7 +3,7 @@
 //! counts that are not whole or exceed the data present, bad references, degenerate frames, truncated and
 //! trailing data are all errors. Nothing is repaired.
 
-use crate::geom::{Curve, Surface, Vec3};
+use crate::geom::{pair_disc_coefficients, pair_disc_lower_bound, Curve, Surface, Vec3};
 use crate::KernelError;
 
 #[derive(Clone, Debug)]
@@ -128,6 +128,26 @@ impl<'a> Reader<'a> {
                 }
                 Ok(Curve::Conic { c, u, v, t0, t1 })
             }
+            t if t == 4.0 => {
+                let c = self.point()?;
+                let (a, x) = self.frame()?;
+                let rho = self.next()?;
+                let p = self.point()?;
+                let b = self.direction()?;
+                let (r, branch, t0, t1) = (self.next()?, self.next()?, self.next()?, self.next()?);
+                if rho <= 0.0 || r <= 0.0 { return invalid("a cylinder pair needs positive radii"); }
+                if branch != 1.0 && branch != -1.0 { return invalid("a cylinder pair's branch must be 1 or -1"); }
+                if a.sub(b.scale(a.dot(b))).length() < 1e-9 { return invalid("a cylinder pair needs axes that are not parallel"); }
+                if t1 <= t0 || t1 - t0 > 2.0 * std::f64::consts::PI + 1e-12 {
+                    return invalid("a cylinder pair needs t0 < t1 <= t0 + 2 pi");
+                }
+                // The curve exists, and its two branches stay apart, only where the discriminant is positive.
+                let k = pair_disc_coefficients(c, a, x, rho, p, b, r);
+                if pair_disc_lower_bound(&k, t0, t1, 4096) <= 0.0 {
+                    return invalid("a cylinder pair's discriminant is not proved positive over its interval");
+                }
+                Ok(Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 })
+            }
             t => invalid(format!("unknown curve type {t}")),
         }
     }
@@ -215,6 +235,10 @@ pub fn put_curve(out: &mut Vec<f64>, c: &Curve) {
         }
         Curve::Conic { c, u, v, t0, t1 } => {
             out.push(3.0); put(out, *c); put(out, *u); put(out, *v); out.extend_from_slice(&[*t0, *t1]);
+        }
+        Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => {
+            out.push(4.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho);
+            put(out, *p); put(out, *b); out.extend_from_slice(&[*r, *branch, *t0, *t1]);
         }
     }
 }

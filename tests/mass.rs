@@ -127,7 +127,8 @@ fn captured_ibeam_base_measures_exactly() {
 fn measure_op_answers_volume_and_area() {
     let (_, b) = prism(vec![rectangle(0.0, 0.0, 10.0, 8.0)], 0.0, 4.0);
     let reply = handle(&parse_request(&encode_request(OP_MEASURE, TOL, &write_body(&b))).unwrap()).unwrap();
-    assert_eq!(reply.len(), 2);
+    assert_eq!(reply.len(), 3);
     close(reply[0], 320.0, 1e-14);
     close(reply[1], 304.0, 1e-14);
+    assert_eq!(reply[2], 1.0);   // closed form
 }
