@@ -132,6 +132,7 @@ impl Graph {
             }
         }
     }
+    #[cfg(test)]
     fn range(self, a: f64, b: f64) -> (f64, f64) {
         let va = self.value(a);
         let vb = self.value(b);
@@ -453,6 +454,8 @@ fn hit(face: &Face, points: &[Vec3], tol: f64) -> Result<Hit> {
     })
 }
 
+// Independent single-rectangle admission reference for the original rat-hole tests.
+#[cfg(test)]
 fn section(body: &Body, lo: f64, hi: f64, tol: f64) -> Result<Option<Band>> {
     let mid = lo + (hi - lo) * 0.5;
     let mut hits: [Option<Hit>; 4] = [None, None, None, None];
@@ -552,11 +555,13 @@ fn difference_stations(a: Graph, b: Graph, lo: f64, hi: f64) -> Vec<f64> {
     xs.retain(|x| x.is_finite() && *x >= lo && *x <= hi);
     xs
 }
+#[cfg(test)]
 fn below(a: Graph, b: Graph, lo: f64, hi: f64, tol: f64) -> bool {
     difference_stations(a, b, lo, hi)
         .into_iter()
         .all(|x| a.value(x) - b.value(x) <= tol)
 }
+#[cfg(test)]
 fn subtract(mut body: Band, tool: Option<Band>, tol: f64) -> Result<Option<Band>> {
     let Some(tool) = tool else {
         return Ok(Some(body));
@@ -773,9 +778,6 @@ fn surface(graph: Graph, is_z: bool, positive: bool) -> Result<(Surface, bool)> 
             ))
         }
     }
-}
-fn patches(b: &Band, tol: f64) -> Result<Vec<Patch>> {
-    selected_patches(b, [true; 4], tol)
 }
 // Order: lower/upper Z, then lower/upper Y. Internal cell faces are omitted
 // before constructing any curves, so no artificial internal edges are made.
@@ -1431,79 +1433,9 @@ pub(super) fn planar_cross_cut(body: &Body, tool: &Body, tol: f64) -> Result<Bod
     cross::cut_along(body, tool, chosen, tol)
 }
 
-pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
-    if !tol.is_finite() || tol <= 0. {
-        return Err(invalid("end-cut tolerance must be finite and positive"));
-    }
-    let frame = frame(body, tool)?;
-    let body = transform(body, |p| frame.local(p));
-    let tool = transform(tool, |p| frame.local(p));
-    validate(&body, tol)?;
-    validate(&tool, tol)?;
-    let mut values = events(&body);
-    values.extend(events(&tool));
-    let xs = stations(values, tol)?;
-    if xs.len().saturating_mul(body.edges.len() + tool.edges.len()) > 2_000_000 {
-        return Err(unsupported("end-cut recognition exceeds its work limit"));
-    }
-    let mut bands = Vec::new();
-    let mut original = Vec::new();
-    let mut tools = Vec::new();
-    for pair in xs.windows(2) {
-        let b = section(&body, pair[0], pair[1], tol)?;
-        let t = section(&tool, pair[0], pair[1], tol)?;
-        original.push(b.iter().cloned().collect());
-        tools.push(t.iter().cloned().collect());
-        bands.push(if let Some(b) = b {
-            subtract(b, t, tol)?
-        } else {
-            None
-        });
-    }
-    verify_interfaces(&body, &xs, &original, tol)?;
-    verify_interfaces(&tool, &xs, &tools, tol)?;
-    if bands.iter().all(Option::is_none) {
-        return Ok(Body::default());
-    }
-    let mut runs = 0;
-    let mut previous: Option<&Band> = None;
-    let mut all_patches = Vec::new();
-    for band in &bands {
-        if let Some(b) = band {
-            if let Some(prior) = previous {
-                let l = Rect::at(prior, b.lo);
-                let r = Rect::at(b, b.lo);
-                if l.y1.min(r.y1) - l.y0.max(r.y0) <= tol || l.z1.min(r.z1) - l.z0.max(r.z0) <= tol
-                {
-                    return Err(unsupported(
-                        "end-cut would leave disconnected or touching material components",
-                    ));
-                }
-            } else {
-                runs += 1;
-            }
-            all_patches.extend(patches(b, tol)?);
-            previous = Some(b);
-        } else {
-            previous = None;
-        }
-    }
-    if runs != 1 {
-        return Err(unsupported(
-            "end-cut would leave multiple material components",
-        ));
-    }
-    for i in 0..xs.len() {
-        let left = if i > 0 { bands[i - 1].as_slice() } else { &[] };
-        let right = bands.get(i).map(Option::as_slice).unwrap_or(&[]);
-        all_patches.extend(end_patches(left, right, xs[i], tol)?);
-    }
-    let result = assemble(all_patches, tol)?;
-    Ok(transform(&result, |p| frame.world(p)))
-}
-
 #[cfg(test)]
 mod tests {
+    use super::cross::cut;
     use super::*;
     fn derivative(curve: &Curve, t: f64) -> Vec3 {
         curve.eval(t).1
@@ -1837,18 +1769,25 @@ mod tests {
         }
     }
     #[test]
-    fn blind_interior_and_malformed_transverse_inputs_are_refused() {
+    fn partial_depth_and_interior_copes_preserve_thin_skin_refusal() {
         let base = fixture("base.f64");
         let tool = fixture("step01.f64");
+        let full_volume = 155.58846611769187;
+        let removed = full_volume - 154.58210003470572;
+        for (delta, fraction) in [(p(0., 0., 4.), 0.5), (p(0., 5., 0.), 1.)] {
+            let moved = scaled(&tool, 1., delta);
+            let result = cut(&base, &moved, 1e-6).unwrap();
+            crate::topology::check(&result, 1e-6).unwrap();
+            let measured = crate::mass::measure(&result, 1e-6).unwrap().volume;
+            assert!((measured - (full_volume - removed * fraction)).abs() < 1e-9);
+        }
         // A sub-tolerance retained end skin is still material. Admission must
         // reject that interior cut, not erase the skin by treating it as flush.
-        for delta in [p(0., 0., 4.), p(0., 5., 0.), p(0., 0.25e-6, 0.)] {
-            let moved = scaled(&tool, 1., delta);
-            assert!(matches!(
-                cut(&base, &moved, 1e-6),
-                Err(KernelError::Unsupported(_))
-            ));
-        }
+        let moved = scaled(&tool, 1., p(0., 0.25e-6, 0.));
+        assert!(matches!(
+            cut(&base, &moved, 1e-6),
+            Err(KernelError::Unsupported(_))
+        ));
         let mut malformed = base.clone();
         let face = malformed
             .faces

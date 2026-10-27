@@ -368,6 +368,20 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     if !tol.is_finite() || tol <= 0. {
         return Err(invalid("slot tolerance must be finite and positive"));
     }
+    // Unequal cylindrical end radii describe a general curved profile, not
+    // our exact capsule domain. Select the transverse domain before admission;
+    // it validates every stored surface and never changes either radius.
+    let radii: Vec<_> = tool
+        .faces
+        .iter()
+        .filter_map(|f| match f.surface {
+            Surface::Cylinder { r, .. } => Some(r),
+            _ => None,
+        })
+        .collect();
+    if radii.len() == 2 && radii[0] != radii[1] {
+        return super::endcut::cross_cut(body, tool, tol);
+    }
     let admitted = admit(tool, tol)?;
     let axis = admitted.axis;
     let n = admitted.n;

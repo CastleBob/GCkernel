@@ -131,30 +131,21 @@ caller-selected directory with GCKERNEL_ASTRA_END_EXPORT for native review.
 
 ### Transverse analytic end cuts
 
-A separate bounded domain handles the captured I-beam rat-hole pair, without
-hardcoded I-beam dimensions. In a right-handed cardinal frame, each admitted
-transverse band contains one rectangular material interval bounded by plane or
-cylinder graphs. The input is reconstructed from its CURRENT oriented B-rep;
-it does not regenerate an uncut stock recipe. Whole-depth cutters can remove
-one end interval. The second rat-hole therefore preserves the first cut.
+The captured I-beam rat-hole pair and partial-depth cope profiles now use the
+same transverse cell engine described below. The earlier single-rectangle
+section/subtraction routines remain only as independent test references.
+Input is reconstructed from its CURRENT oriented B-rep; it does not regenerate
+an uncut stock recipe. Interior openings and finite caps use complete material
+cells, so previous holes and partially cut walls are retained.
 
-Admission checks every surface against its analytic boundary, the rectangular
-sections between all vertex/extremum stations, and the complete oriented
-coverage of transverse faces. Interval bounds prove cutter coverage across the
-whole band. No input patch may disappear below partition resolution. A finite
-end skin is never silently treated as a flush cut. Coordinate coincidence and
-shared vertices use the declared B-rep tolerance; original supporting surfaces
-remain analytic. Assembly splits shared boundary edges before enforcing closed
-occurrence topology. Coplanar partition seams remain in the result.
-
-Plane/cylinder trims use analytic circular or conic arcs, including genuinely
-oblique planes. Cylinder/cylinder trims, interior transverse pockets/holes,
-multiple material components, and cases without a provable rectangular section
-remain Unsupported in this domain. Circular web holes still use passage
-admission. End cuts currently require a cutter with one cylindrical side wall
-and a base with a perpendicular longitudinal cylinder axis. Limits: 256 stations,
-5,000 faces / 20,000 edges / 20,000 vertices, and explicit recognition/assembly
-work bounds. This is not a general surface-intersection Boolean solver.
+Admission checks every surface against its analytic boundary, all oriented
+sections and transverse interfaces. No input patch may disappear below partition
+resolution. A finite end skin is never silently treated as a flush cut.
+Coordinate coincidence and shared vertices use the declared B-rep tolerance;
+original supporting surfaces remain analytic. Assembly splits shared boundary
+edges before enforcing closed occurrence topology. Coplanar partition seams
+remain in the result. Limits include 256 stations, 5,000 input faces / 20,000
+edges / 20,000 vertices and explicit recognition/assembly work bounds.
 
 Verification includes both GCmaker-captured rat-hole tools in order, type-3
 conic replay, 630 production material probes, all six cardinal frames, scales
@@ -162,11 +153,12 @@ conic replay, 630 production material probes, all six cardinal frames, scales
 and returned-boundary volume against an independent dimension-based formula.
 
 The public entry selects a supported input domain BEFORE execution: tools with
-one cylindrical face and the full-circle seam topology enter bore admission;
-other one-cylinder tools enter transverse-end-cut admission; two enter capsule
-admission. Zero-cylinder tools on curved stock enter rectangular-through
-admission; otherwise they enter rectilinear admission. Other cylinder counts
-are unsupported.
+one cylindrical face and full-circle seam topology enter bore admission;
+other one-cylinder tools enter transverse cell admission. Two-cylinder tools
+with distinct stored radii enter that same general profile domain without
+changing either radius; equal-radius tools enter capsule admission. Zero-cylinder
+tools on curved stock enter the planar tool domains described above; otherwise
+they enter rectilinear admission. Other cylinder counts are unsupported.
 An error never triggers another algorithm. A malformed model reports InvalidInput;
 unsupported geometry, resolution or resource requirements report Unsupported.
 The worker catches unexpected faults separately. Validation includes oriented
@@ -258,7 +250,7 @@ identify each face interval. Material sections may be separated in Y or Z;
 concentric circular graphs have analytic ordering bounds across each X band.
 This admits one-wall and both-wall pipe holes and pipe capsule slots whose
 finite tool and all supporting section graphs can be ordered over each band.
-Partial wall depth with unresolved crossings still refuses. Independent pipe
+Partial wall depth with provable intersection stations is admitted; unresolved near coincidences still refuse. Independent pipe
 wall integrals, material probes, protocol
 replay, six frames and far-translated/scaled cases verify this domain.
 
@@ -273,3 +265,34 @@ stored X coordinate equals cx+r or cx-r. Re-subtracting cx can otherwise yield
 r minus one floating-point unit and invent a nonzero radial root. This arithmetic
 fix does not snap near stations or change a supporting circle; a scaled,
 far-translated miter regression exercises the original loss.
+
+
+## Active graph intersection stations
+
+Before ordering section coordinates, the engine collects active supporting
+lines and circle branches from both operands. Closed-form line/line,
+line/circle and circle/circle intersections add stations within each existing
+vertex/extremum band. Candidate roots from squared equations are checked against
+both stored branches. Interior tangencies are refused. Subsequent whole-band
+ordering and all B-rep coverage checks are still required. Discovery shares the
+two-million-operation budget; station and patch limits remain in force.
+
+At a computed station, separate graph evaluations can leave endpoint residuals
+of a few floating-point units. Endpoint ordering admits at most
+min(input tolerance, 16*machine epsilon*sum of evaluation term magnitudes).
+Interior critical points still require positive separation greater than the
+input tolerance. This is a bounded endpoint arithmetic allowance, not outward-
+rounded interval certification. Distinct near-coincident graphs are still
+refused; no supporting surfaces are snapped or merged.
+
+The captured Rect Tube now replays its first four tools; STR-1 replays its first
+partial-depth cope. The actual tube miter has an independent dimensional
+area/first-moment integral and 47,027 material probes. Later captured steps are
+checked against Claude's independent Eyeshot mesh references (absolute allowance
+0.001 in^3 for tessellation; see tests/fixtures/parts/*/reference.md). Native
+returned-body acceptance is recorded separately by the GCmaker owner.
+STR-1's next wedge retains an explicit near-coincident-line refusal. Rect Tube's
+fifth, arbitrary side-profile cut is not yet admitted by this whole-body chart.
+A pipe hole whose finite bottom crosses the inner wall is independently checked
+by a piecewise wall integral, 10,925 material probes, repeat cuts and transformed
+scale/translation tests; its volume is 70.48824992315208 in^3.

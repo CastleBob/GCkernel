@@ -4,12 +4,135 @@
 use super::*;
 
 fn positive(lower: Graph, upper: Graph, lo: f64, hi: f64, tol: f64) -> bool {
-    below(lower, upper, lo, hi, 0.)
-        && upper.value((lo + hi) * 0.5) - lower.value((lo + hi) * 0.5) > tol
+    // At a computed intersection station, evaluating two independently stored
+    // graphs can leave a few ulps of endpoint residual. Bound only that arithmetic
+    // residual, using the terms before cancellation; do not use the modelling
+    // tolerance to erase an interior crossing or a narrow material interval.
+    let evaluation_size = |g: Graph, x: f64| match g {
+        Graph::Line { m, b } => (m * x).abs() + b.abs(),
+        Graph::Circle { cv, r, .. } => cv.abs() + r,
+    };
+    [lo, hi].into_iter().all(|x| {
+        let roundoff =
+            (16. * f64::EPSILON * (evaluation_size(lower, x) + evaluation_size(upper, x))).min(tol);
+        upper.value(x) - lower.value(x) >= -roundoff
+    }) && upper.value((lo + hi) * 0.5) - lower.value((lo + hi) * 0.5) > tol
         && difference_stations(lower, upper, lo, hi)
             .into_iter()
             .filter(|x| *x > lo && *x < hi)
             .all(|x| upper.value(x) - lower.value(x) > tol)
+}
+
+// Intersections of the actual supporting graphs partition intervals in which
+// their ordering is constant. Squared equations supply candidates only: both
+// circle branches are checked before accepting a station. The downstream
+// whole-band ordering proof remains mandatory.
+fn intersections(a: Graph, b: Graph, lo: f64, hi: f64, tol: f64) -> Result<Vec<f64>> {
+    let mut candidates = Vec::new();
+    match (a, b) {
+        (Graph::Line { m: am, b: ab }, Graph::Line { m: bm, b: bb }) => {
+            if am != bm {
+                candidates.push(((bb - ab) / (am - bm), false));
+            }
+        }
+        (Graph::Circle { .. }, Graph::Line { .. }) => return intersections(b, a, lo, hi, tol),
+        (Graph::Line { m, b }, Graph::Circle { cx, cv, r, .. }) => {
+            let d = m * cx + b - cv;
+            let aa = 1. + m * m;
+            let discriminant = aa * r * r - d * d;
+            if discriminant >= 0. {
+                let root = discriminant.sqrt();
+                // Stable quadratic roots in the coordinate relative to cx.
+                let q = -m * d - root.copysign(m * d);
+                if q == 0. {
+                    candidates.push((cx, true));
+                } else {
+                    candidates.push((cx + q / aa, discriminant == 0.));
+                    candidates.push((cx + (d - r) * (d + r) / q, discriminant == 0.));
+                }
+            }
+        }
+        (
+            Graph::Circle {
+                cx: ax,
+                cv: ay,
+                r: ar,
+                ..
+            },
+            Graph::Circle {
+                cx: bx,
+                cv: by,
+                r: br,
+                ..
+            },
+        ) => {
+            let (dx, dy) = (bx - ax, by - ay);
+            let d = dx.hypot(dy);
+            if d != 0. && d <= ar + br && d >= (ar - br).abs() {
+                let along = ((ar - br) * (ar + br) + d * d) / (2. * d);
+                let height2 = (ar - along) * (ar + along);
+                if height2 < 0. {
+                    return Err(unsupported("unresolved circle intersection discriminant"));
+                }
+                let base_x = ax + along * dx / d;
+                let offset = height2.sqrt() * dy / d;
+                candidates.push((base_x - offset, height2 == 0.));
+                candidates.push((base_x + offset, height2 == 0.));
+            }
+            // Concentric equal circles either coincide or meet at their X
+            // extrema, which are already input events; unequal ones never meet.
+        }
+    }
+    let mut result = Vec::new();
+    for (x, tangent) in candidates {
+        if !x.is_finite() {
+            return Err(unsupported("nonfinite transverse intersection"));
+        }
+        if x <= lo || x >= hi {
+            continue;
+        }
+        if (a.value(x) - b.value(x)).abs() > tol {
+            continue; // Candidate belongs to the other circle branch.
+        }
+        if tangent {
+            return Err(unsupported(
+                "tangent transverse graphs inside an active band",
+            ));
+        }
+        result.push(x);
+    }
+    Ok(result)
+}
+
+fn intersection_stations(
+    body: &Body,
+    tool: &Body,
+    xs: &[f64],
+    tol: f64,
+    work: &mut usize,
+) -> Result<Vec<f64>> {
+    let mut refined = xs.to_vec();
+    for band in xs.windows(2) {
+        let mid = band[0] + (band[1] - band[0]) * 0.5;
+        let mut hits = boundary_hits(body, mid, tol)?;
+        hits.extend(boundary_hits(tool, mid, tol)?);
+        for is_z in [false, true] {
+            let mut graphs = Vec::new();
+            for hit in hits.iter().filter(|h| (h.role >= 2) == is_z) {
+                spend(work, graphs.len() + 1)?;
+                if !graphs.contains(&hit.graph) {
+                    graphs.push(hit.graph);
+                }
+            }
+            for i in 0..graphs.len() {
+                for j in i + 1..graphs.len() {
+                    spend(work, 1)?;
+                    refined.extend(intersections(graphs[i], graphs[j], band[0], band[1], tol)?);
+                }
+            }
+        }
+    }
+    stations(refined, tol)
 }
 
 fn ordered_graphs(mut graphs: Vec<Graph>, lo: f64, hi: f64, tol: f64) -> Result<Vec<Graph>> {
@@ -53,14 +176,7 @@ fn spend(work: &mut usize, amount: usize) -> Result<()> {
     }
     Ok(())
 }
-fn sections_with_budget(
-    body: &Body,
-    lo: f64,
-    hi: f64,
-    tol: f64,
-    work: &mut usize,
-) -> Result<Vec<Band>> {
-    let mid = lo + (hi - lo) * 0.5;
+fn boundary_hits(body: &Body, mid: f64, tol: f64) -> Result<Vec<Hit>> {
     let mut hits = Vec::new();
     for face in &body.faces {
         if matches!(face.surface, Surface::Plane { n, .. } if n.y==0. && n.z==0.) {
@@ -141,6 +257,17 @@ fn sections_with_budget(
     if hits.len() > 1024 {
         return Err(unsupported("too many transverse section segments"));
     }
+    Ok(hits)
+}
+fn sections_with_budget(
+    body: &Body,
+    lo: f64,
+    hi: f64,
+    tol: f64,
+    work: &mut usize,
+) -> Result<Vec<Band>> {
+    let mid = lo + (hi - lo) * 0.5;
+    let hits = boundary_hits(body, mid, tol)?;
     if hits.is_empty() {
         return Ok(Vec::new());
     }
@@ -394,10 +521,16 @@ fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
     if xs.len().saturating_mul(body.edges.len() + tool.edges.len()) > 2_000_000 {
         return Err(unsupported("transverse recognition exceeds its work limit"));
     }
+    let mut arrangement_work = 0;
+    xs = intersection_stations(&body, &tool, &xs, tol, &mut arrangement_work)?;
+    if xs.len().saturating_mul(body.edges.len() + tool.edges.len()) > 2_000_000 {
+        return Err(unsupported(
+            "refined transverse recognition exceeds its work limit",
+        ));
+    }
     let mut original = Vec::new();
     let mut cutters = Vec::new();
     let mut bands = Vec::new();
-    let mut arrangement_work = 0;
     for x in xs.windows(2) {
         let b = sections_with_budget(&body, x[0], x[1], tol, &mut arrangement_work)?;
         let t = sections_with_budget(&tool, x[0], x[1], tol, &mut arrangement_work)?;
@@ -523,6 +656,59 @@ fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn analytic_intersection_events_check_branches_and_keep_tangencies_explicit() {
+        let horizontal = |b| Graph::Line { m: 0., b };
+        let circle = |cx, cv, r, branch| Graph::Circle { cx, cv, r, branch };
+        let upper = circle(0., 0., 1., 1.);
+        let mut roots = intersections(horizontal(0.5), upper, -1., 1., 1e-9).unwrap();
+        roots.sort_by(f64::total_cmp);
+        assert_eq!(roots.len(), 2);
+        assert!((roots[0] + 0.75_f64.sqrt()).abs() < 1e-14);
+        assert!((roots[1] - 0.75_f64.sqrt()).abs() < 1e-14);
+        assert!(intersections(horizontal(-0.5), upper, -1., 1., 1e-9)
+            .unwrap()
+            .is_empty());
+        assert!(intersections(horizontal(1.), upper, -1., 1., 1e-9).is_err());
+        assert!(intersections(horizontal(1.01), upper, -1., 1., 1e-9)
+            .unwrap()
+            .is_empty());
+        let roots = intersections(upper, circle(1., 0., 1., 1.), 0., 1., 1e-9).unwrap();
+        assert!(!roots.is_empty() && roots.iter().all(|x| (*x - 0.5).abs() < 1e-14));
+        assert!(intersections(upper, circle(1., 0., 1., -1.), 0., 1., 1e-9)
+            .unwrap()
+            .is_empty());
+        assert!(
+            intersections(upper, circle(0., 0., 0.9, 1.), -0.9, 0.9, 1e-9)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            intersections(horizontal(2.), Graph::Line { m: 2., b: 0. }, 0., 2., 1e-9).unwrap(),
+            vec![1.]
+        );
+        assert!(intersections(horizontal(2.), horizontal(1.), 0., 2., 1e-9)
+            .unwrap()
+            .is_empty());
+        // A distinct sub-tolerance separation is not a coincident graph, and
+        // a sub-tolerance interior reversal is still a failed ordering proof.
+        assert!(ordered_graphs(vec![horizontal(0.), horizontal(1e-12)], -1., 1., 1e-6).is_err());
+        assert!(!positive(
+            horizontal(0.),
+            Graph::Line { m: 1., b: 0. },
+            -1e-10,
+            1.,
+            1e-6
+        ));
+        let lower = horizontal(-0.4721303058753803);
+        let upper = Graph::Line {
+            m: 6.001499981278495,
+            b: 38.42878924596892,
+        };
+        let x = intersections(lower, upper, -7., -6., 1e-6).unwrap()[0];
+        assert!(positive(lower, upper, x, x + 0.1, 1e-6));
+        assert!(positive(upper, lower, x - 0.1, x, 1e-6));
+    }
     fn survey(case: &str, name: &str) -> Body {
         let bytes = std::fs::read(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -534,6 +720,140 @@ mod tests {
             .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
             .collect();
         crate::neutral::Reader::new(&values).body().unwrap()
+    }
+    fn part(case: &str, name: &str) -> Body {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/fixtures/parts/{case}/{name}.f64")),
+        )
+        .unwrap();
+        let values: Vec<_> = bytes
+            .chunks_exact(8)
+            .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        crate::neutral::Reader::new(&values).body().unwrap()
+    }
+    #[test]
+    fn actual_rect_tube_miter_matches_section_moments_and_four_steps_replay() {
+        let base = part("rect_tube", "base");
+        let tool = part("rect_tube", "step01");
+        let (m, intercept) = tool
+            .faces
+            .iter()
+            .find_map(|f| match f.surface {
+                Surface::Plane { p, n, .. } if n.x != 0. && n.y != 0. => {
+                    Some((-n.x / n.y, p.y + n.x * p.x / n.y))
+                }
+                _ => None,
+            })
+            .unwrap();
+        // Independent dimensional reference: 8x6 tube, outer corner radius 1,
+        // inner .75, length 12. Integrate the clipped linear end height against
+        // each outer/inner strip's area and first X moment. No B-rep sections or
+        // kernel mass integration are used for this reference.
+        let mut expected = 0.;
+        for (lo, hi, c, r, constant, sign) in [
+            (0., 1., 1., 1., 4., 1.),
+            (1., 7., 0., 0., 6., 1.),
+            (7., 8., 7., 1., 4., 1.),
+            (0.25, 1., 1., 0.75, 4., -1.),
+            (1., 7., 0., 0., 5.5, -1.),
+            (7., 7.75, 7., 0.75, 4., -1.),
+        ] {
+            let mut xs = vec![lo, hi];
+            for y in [0., 12.] {
+                let x = (y - intercept) / m;
+                if x > lo && x < hi {
+                    xs.push(x);
+                }
+            }
+            xs.sort_by(f64::total_cmp);
+            for band in xs.windows(2) {
+                let y = m * (band[0] + band[1]) * 0.5 + intercept;
+                let (slope, b) = if y <= 0. {
+                    (0., 0.)
+                } else if y >= 12. {
+                    (0., 12.)
+                } else {
+                    (m, intercept)
+                };
+                let primitive = |x: f64| {
+                    let mut value = constant * (slope * x * x * 0.5 + b * x);
+                    if r != 0. {
+                        let t = (x - c).clamp(-r, r);
+                        let root = (r * r - t * t).max(0.).sqrt();
+                        let area = (t * root + r * r * (t / r).asin()) * 0.5;
+                        let moment = c * area - root.powi(3) / 3.;
+                        value += 2. * (slope * moment + b * area);
+                    }
+                    value
+                };
+                expected += sign * (primitive(band[1]) - primitive(band[0]));
+            }
+        }
+        let result = operation(&base, &tool, 1e-6);
+        assert!((crate::mass::measure(&result, 1e-6).unwrap().volume - expected).abs() < 1e-9);
+        let f = frame_for_axis(&base, 2).unwrap();
+        let local = transform(&result, |q| f.local(q));
+        let xs = stations(events(&local), 1e-6).unwrap();
+        let bands: Vec<_> = xs
+            .windows(2)
+            .map(|w| sections(&local, w[0], w[1], 1e-6).unwrap())
+            .collect();
+        for ix in 0..41 {
+            for iy in 0..37 {
+                for iz in 0..31 {
+                    let q = p(
+                        -0.213 + 0.217 * ix as f64,
+                        -0.191 + 0.353 * iy as f64,
+                        -6.119 + 0.211 * iz as f64,
+                    );
+                    let d2 =
+                        (q.x - q.x.clamp(1., 7.)).powi(2) + (q.z - q.z.clamp(-5., -1.)).powi(2);
+                    let expected = d2 < 1.
+                        && d2 > 0.75_f64.powi(2)
+                        && q.y > 0.
+                        && q.y < 12.
+                        && q.y < m * q.x + intercept;
+                    let ql = f.local(q);
+                    let actual = xs
+                        .windows(2)
+                        .position(|w| ql.x > w[0] && ql.x < w[1])
+                        .is_some_and(|i| {
+                            bands[i]
+                                .iter()
+                                .any(|b| Rect::at(b, ql.x).contains(ql.y, ql.z))
+                        });
+                    assert_eq!(actual, expected, "miter probe {q:?}");
+                }
+            }
+        }
+        // Independent native mesh references recorded by Claude, 9ebdf7d.
+        // Their tessellation error is larger than our analytic integral error.
+        let mut body = result;
+        for (step, native_volume) in [(2, 58.662702784), (3, 55.725486031), (4, 54.783702062)] {
+            let tool = part("rect_tube", &format!("step{step:02}"));
+            let before = crate::neutral::write_body(&body);
+            let result = operation(&body, &tool, 1e-6);
+            assert_eq!(before, crate::neutral::write_body(&body));
+            crate::topology::check(&result, 1e-6).unwrap();
+            assert!(
+                (crate::mass::measure(&result, 1e-6).unwrap().volume - native_volume).abs() < 0.001
+            );
+            body = result;
+        }
+        let base = part("str1", "base");
+        let result = operation(&base, &part("str1", "step01"), 1e-6);
+        crate::topology::check(&result, 1e-6).unwrap();
+        assert!(
+            (crate::mass::measure(&result, 1e-6).unwrap().volume - 112.845646699).abs() < 0.001
+        );
+        // Two genuinely different stored lines remain explicitly unresolved;
+        // success of step one must not imply completion of this real part.
+        assert!(matches!(
+            crate::boolean::cut(&result, &part("str1", "step02"), 1e-6),
+            Err(KernelError::Unsupported(_))
+        ));
     }
     #[test]
     fn rectangular_tube_multiple_walls_preserve_the_unaffected_stock() {
@@ -859,6 +1179,15 @@ mod tests {
             -PI / 2.,
             PI / 2.,
         );
+        let transition = ((1.75_f64.powi(2) - 1.7_f64.powi(2)).sqrt() / 0.5).asin();
+        let clipped_wall = |t: f64| {
+            let y = 0.5 * t.sin();
+            0.5 * t.cos().powi(2)
+                * ((4. - y * y).sqrt() - (1.75_f64.powi(2) - y * y).sqrt().max(1.7))
+        };
+        let breakthrough_removed = 2.
+            * (integral(&clipped_wall, 0., transition)
+                + integral(&clipped_wall, transition, PI / 2.));
         let beam_expected = (155.58846611769187 + reference_volume()) * 0.5;
         for (name, base, tool, expected, genus) in [
             (
@@ -874,6 +1203,13 @@ mod tests {
                 placed(&survey("pipe_hole_one_wall", "step01"), 1., p(0.9, 0., 0.)),
                 22.5 * PI - pipe_removed,
                 1.,
+            ),
+            (
+                "pipe partial breakthrough",
+                survey("pipe_hole_one_wall", "base"),
+                placed(&survey("pipe_hole_one_wall", "step01"), 1., p(0.7, 0., 0.)),
+                22.5 * PI - breakthrough_removed,
+                2.,
             ),
             (
                 "beam pocket",
@@ -914,7 +1250,7 @@ mod tests {
                                 d > 0.0625 && d < 0.25,
                                 q.x > 1.5 && (q.y - 1.75).powi(2) + (q.z - 12.).powi(2) < 0.25,
                             )
-                        } else if name == "pipe pocket" {
+                        } else if name.starts_with("pipe") {
                             let q = p(
                                 1.613 + ix as f64 * 0.023,
                                 -0.613 + iy as f64 * 0.051,
@@ -924,7 +1260,8 @@ mod tests {
                             (
                                 q,
                                 r2 > 1.75_f64.powi(2) && r2 < 4.,
-                                q.x > 1.9 && q.y * q.y + (q.z - 12.).powi(2) < 0.25,
+                                q.x > (if name == "pipe pocket" { 1.9 } else { 1.7 })
+                                    && q.y * q.y + (q.z - 12.).powi(2) < 0.25,
                             )
                         } else {
                             let q = p(
@@ -963,7 +1300,7 @@ mod tests {
             let again = operation(&result, &placed(&tool, 1., offset), 1e-6);
             let original = if name == "corner" {
                 72. + 4.5 * PI
-            } else if name == "pipe pocket" {
+            } else if name.starts_with("pipe") {
                 22.5 * PI
             } else {
                 155.58846611769187
@@ -1206,14 +1543,6 @@ mod tests {
             cap.sense = !cap.sense;
             assert!(crate::boolean::cut(&bad, &tool, 1e-6).is_err());
         }
-        let base = survey("pipe_hole_one_wall", "base");
-        let original = crate::neutral::write_body(&base);
-        let blind = placed(&survey("pipe_hole_one_wall", "step01"), 1., p(0.7, 0., 0.));
-        assert!(matches!(
-            crate::boolean::cut(&base, &blind, 1e-6),
-            Err(KernelError::Unsupported(_))
-        ));
-        assert_eq!(crate::neutral::write_body(&base), original);
     }
     fn fixture(name: &str) -> Body {
         let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

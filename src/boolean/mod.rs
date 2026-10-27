@@ -31,7 +31,7 @@ pub fn cut(
         1 if tool.vertices.len() == 2 && tool.edges.len() == 3 && tool.faces.len() == 3 => {
             bore::cut(body, tool, tolerance)
         }
-        1 => endcut::cut(body, tool, tolerance),
+        1 => endcut::cross_cut(body, tool, tolerance),
         2 => capsule::cut(body, tool, tolerance),
         _ => Err(crate::KernelError::Unsupported(
             "this curved cutter is outside the supported cut domains".into(),
