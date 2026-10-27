@@ -57,10 +57,9 @@ fn a_non_prism_is_refused() {
     assert!(matches!(rebuild_prism(&cut, TOL), Err(KernelError::Unsupported(_))));
 }
 
-/// The structural proof, not the measures, catches a bottom edge that is not the top edge moved: one bottom line of a
-/// block replaced by a half circle between the same two points.
+/// A bottom edge bulged out of its side plane is now refused by the input check itself (edge-on-surface).
 #[test]
-fn a_bottom_edge_that_is_not_the_moved_top_edge_is_refused_by_the_proof() {
+fn a_bottom_edge_bulged_off_its_side_face_is_refused_by_the_input_check() {
     let z = Vec3::new(0.0, 0.0, 1.0);
     let rect = vec![line((0.0, 0.0), (10.0, 0.0)), line((10.0, 0.0), (10.0, 8.0)), line((10.0, 8.0), (0.0, 8.0)), line((0.0, 8.0), (0.0, 0.0))];
     let mut block = extrude(&Profile { loops: vec![rect], n: z, low: 0.0, high: 4.0 }, TOL).unwrap();
@@ -68,9 +67,40 @@ fn a_bottom_edge_that_is_not_the_moved_top_edge_is_refused_by_the_proof() {
     let Curve::Line { a, b } = block.edges[bottom].curve else { unreachable!() };
     let (mid, r) = (a.add(b).scale(0.5), a.distance(b) / 2.0);
     block.edges[bottom].curve = Curve::Arc { c: mid, n: z, x: a.sub(mid).scale(1.0 / r), r, t0: 0.0, t1: PI };
-    assert!(block.edges[bottom].curve.end().distance(b) < 1e-12);
-    match rebuild_prism(&block, TOL) {
-        Err(KernelError::Unsupported(m)) => assert!(m.contains("bottom edge is not its top edge moved"), "{m}"),
+    assert!(matches!(rebuild_prism(&block, TOL), Err(KernelError::InvalidInput(m)) if m.contains("leaves face")));
+}
+
+/// A sound body that only the structural proof refuses: a 10 x 8 x 4 box whose y = 0 side is split at z = 2 into
+/// two stacked faces. Topology, surfaces and measures are all right; the top edge's side face is bounded by a
+/// ruling of 2, not 4 (and its neighbours have five edges), so it is not "one side face per cap edge" and is
+/// refused (conservatively), not rebuilt.
+#[test]
+fn a_split_side_face_is_refused_by_the_structural_proof() {
+    use gc_kernel::geom::Surface;
+    use gc_kernel::neutral::{Edge, Face};
+    let v = |x: f64, y: f64, z: f64| Vec3::new(x, y, z);
+    let vertices = vec![v(0.0, 0.0, 0.0), v(10.0, 0.0, 0.0), v(10.0, 8.0, 0.0), v(0.0, 8.0, 0.0), v(0.0, 0.0, 4.0), v(10.0, 0.0, 4.0),
+                        v(10.0, 8.0, 4.0), v(0.0, 8.0, 4.0), v(0.0, 0.0, 2.0), v(10.0, 0.0, 2.0)];
+    let pairs = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 8), (8, 4), (1, 9), (9, 5), (2, 6), (3, 7), (8, 9)];
+    let edges = pairs.iter().map(|&(a, b)| Edge { curve: Curve::Line { a: vertices[a], b: vertices[b] }, start: a, end: b }).collect();
+    let plane = |p: Vec3, n: Vec3, x: Vec3| Surface::Plane { p, n, x };
+    let (x, y, z) = (v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), v(0.0, 0.0, 1.0));
+    let face = |surface, sense, lp: Vec<(usize, bool)>| Face { surface, sense, loops: vec![lp] };
+    let faces = vec![
+        face(plane(v(0.0, 0.0, 0.0), z, x), false, vec![(3, false), (2, false), (1, false), (0, false)]),
+        face(plane(v(0.0, 0.0, 4.0), z, x), true, vec![(4, true), (5, true), (6, true), (7, true)]),
+        face(plane(v(0.0, 0.0, 0.0), y.scale(-1.0), x), true, vec![(0, true), (10, true), (14, false), (8, false)]),
+        face(plane(v(0.0, 0.0, 0.0), y.scale(-1.0), x), true, vec![(14, true), (11, true), (4, false), (9, false)]),
+        face(plane(v(10.0, 0.0, 0.0), x, y), true, vec![(1, true), (12, true), (5, false), (11, false), (10, false)]),
+        face(plane(v(0.0, 8.0, 0.0), y, x), true, vec![(2, true), (13, true), (6, false), (12, false)]),
+        face(plane(v(0.0, 0.0, 0.0), x.scale(-1.0), y), true, vec![(3, true), (8, true), (9, true), (7, false), (13, false)]),
+    ];
+    let body = Body { vertices, edges, faces };
+    check(&body, TOL).unwrap();
+    let m = measure(&body, TOL).unwrap();
+    assert!((m.volume - 320.0).abs() < 1e-12 && (m.area - 304.0).abs() < 1e-12);
+    match rebuild_prism(&body, TOL) {
+        Err(KernelError::Unsupported(m)) => assert!(m.contains("side face"), "{m}"),   // refused by the proof
         other => panic!("{other:?}"),
     }
 }
