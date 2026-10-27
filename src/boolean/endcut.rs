@@ -122,7 +122,13 @@ impl Graph {
         match self {
             Self::Line { m, b } => m * x + b,
             Self::Circle { cx, cv, r, branch } => {
-                cv + branch * (r * r - (x - cx) * (x - cx)).max(0.).sqrt()
+                // Preserve the analytic extremal station exactly: subtracting
+                // cx again can turn (cx+r)-cx into r-1ulp, inventing a root.
+                if x == cx - r || x == cx + r {
+                    cv
+                } else {
+                    cv + branch * (r * r - (x - cx) * (x - cx)).max(0.).sqrt()
+                }
             }
         }
     }
@@ -609,6 +615,16 @@ fn reversed(boundary: Vec<Curve>) -> Vec<Curve> {
     boundary.into_iter().rev().map(|c| c.reversed()).collect()
 }
 
+fn circle_angle(cx: f64, r: f64, x: f64) -> f64 {
+    if x == cx + r {
+        0.
+    } else if x == cx - r {
+        PI
+    } else {
+        ((x - cx) / r).clamp(-1., 1.).acos()
+    }
+}
+
 fn lifted(lo: f64, hi: f64, y: Graph, z: Graph, tol: f64) -> Result<Curve> {
     let (center, u, v, cx, r, slope) = match (y, z) {
         (Graph::Line { .. }, Graph::Line { .. }) => {
@@ -658,8 +674,8 @@ fn lifted(lo: f64, hi: f64, y: Graph, z: Graph, tol: f64) -> Result<Curve> {
                 b: p(0., 1., 0.),
                 r,
                 branch: yb * zb,
-                t0: ((hi - cx) / rho).clamp(-1., 1.).acos(),
-                t1: ((lo - cx) / rho).clamp(-1., 1.).acos(),
+                t0: circle_angle(cx, rho, hi),
+                t1: circle_angle(cx, rho, lo),
             };
             let z_chart = Curve::CylinderPair {
                 c: p(zx, cv, zc),
@@ -670,8 +686,8 @@ fn lifted(lo: f64, hi: f64, y: Graph, z: Graph, tol: f64) -> Result<Curve> {
                 b: p(0., 0., 1.),
                 r: rho,
                 branch: -zb * yb,
-                t0: ((hi - zx) / r).clamp(-1., 1.).acos(),
-                t1: ((lo - zx) / r).clamp(-1., 1.).acos(),
+                t0: circle_angle(zx, r, hi),
+                t1: circle_angle(zx, r, lo),
             };
             // Choose a smooth analytic parameter chart before constructing an
             // intersection edge. Both describe the same two supporting surfaces.
@@ -706,8 +722,8 @@ fn lifted(lo: f64, hi: f64, y: Graph, z: Graph, tol: f64) -> Result<Curve> {
             return Ok(curve.reversed());
         }
     };
-    let t0 = ((hi - cx) / r).clamp(-1., 1.).acos();
-    let t1 = ((lo - cx) / r).clamp(-1., 1.).acos();
+    let t0 = circle_angle(cx, r, hi);
+    let t1 = circle_angle(cx, r, lo);
     let curve = if slope == 0. {
         Curve::Arc {
             c: center,
@@ -1378,6 +1394,41 @@ pub(super) fn cross_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
 }
 pub(super) fn box_cross_cut(body: &Body, tool: &Body, axis: usize, tol: f64) -> Result<Body> {
     cross::cut_along(body, tool, axis, tol)
+}
+
+/// Select a transverse coordinate chart from the planar cutter's normals.
+/// This is geometric admission before construction, with no retry if it fails.
+pub(super) fn planar_cross_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    let mut normals = Vec::new();
+    for face in &tool.faces {
+        let Surface::Plane { p, n, x } = face.surface else {
+            return Err(unsupported("planar section cutter has a curved face"));
+        };
+        if !p.is_finite() || !n.is_finite() || !x.is_finite() || (n.length() - 1.).abs() > 1e-10 {
+            return Err(invalid("invalid planar section cutter frame"));
+        }
+        normals.push(xyz(n));
+    }
+    let mut cylinder_axes = Vec::new();
+    for face in &body.faces {
+        if let Surface::Cylinder { a, .. } = face.surface {
+            let k = axis(a)?;
+            if !cylinder_axes.contains(&k) {
+                cylinder_axes.push(k);
+            }
+        }
+    }
+    let chosen = (0..3)
+        .find(|w| {
+            cylinder_axes.iter().filter(|k| **k != *w).count() == 1
+                && normals.iter().all(|n| {
+                    n[*w] == 0. || ((0..3).all(|k| k == *w || n[k] == 0.) && n[*w].abs() == 1.)
+                })
+        })
+        .ok_or_else(|| {
+            unsupported("no cardinal section chart for the planar cutter and stock cylinders")
+        })?;
+    cross::cut_along(body, tool, chosen, tol)
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {

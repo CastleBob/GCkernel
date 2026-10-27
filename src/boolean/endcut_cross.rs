@@ -643,6 +643,159 @@ mod tests {
         assert_eq!(crate::neutral::write_body(&base), original);
     }
     #[test]
+    fn square_and_exact_planar_miter_ends_match_centroid_integrals() {
+        for (case, area) in [
+            ("pipe_square_end", 0.9375 * PI),
+            ("rect_tube_square_end", 3. + 0.1875 * PI),
+        ] {
+            let base = survey(case, "base");
+            let square = survey(case, "step01");
+            let n = p(1., 0., 1.).unit().unwrap();
+            let u = p(n.z, 0., -n.x);
+            let v = p(0., 1., 0.);
+            let c = p(0., 0., 22.);
+            let corners = [
+                c.sub(u.scale(10.)).sub(v.scale(10.)),
+                c.add(u.scale(10.)).sub(v.scale(10.)),
+                c.add(u.scale(10.)).add(v.scale(10.)),
+                c.sub(u.scale(10.)).add(v.scale(10.)),
+            ];
+            let miter = crate::extrude::extrude(
+                &crate::neutral::Profile {
+                    loops: vec![(0..4)
+                        .map(|i| segment(corners[i], corners[(i + 1) % 4]))
+                        .collect()],
+                    n,
+                    low: 0.,
+                    high: 10.,
+                },
+                1e-6,
+            )
+            .unwrap();
+            for (name, tool, height) in [("square", &square, 23.), ("miter", &miter, 22.)] {
+                let result = operation(&base, tool, 1e-6);
+                let volume = crate::mass::measure(&result, 1e-6).unwrap().volume;
+                eprintln!("{case} {name}: {volume:.14}");
+                assert!((volume - area * height).abs() < 1e-8);
+                assert_eq!(crate::topology::check(&result, 1e-6).unwrap().genus(), 1.);
+                let f = frame_for_axis(&base, if name == "square" { 0 } else { 1 }).unwrap();
+                let local = transform(&result, |q| f.local(q));
+                let xs = stations(events(&local), 1e-6).unwrap();
+                let bs: Vec<_> = xs
+                    .windows(2)
+                    .map(|w| sections(&local, w[0], w[1], 1e-6).unwrap())
+                    .collect();
+                for ix in 0..25 {
+                    for iy in 0..25 {
+                        for iz in 0..21 {
+                            let q = p(
+                                -2.171 + ix as f64 * 0.1813,
+                                -2.137 + iy as f64 * 0.1771,
+                                19.137 + iz as f64 * 0.293,
+                            );
+                            let stock = if case.starts_with("pipe") {
+                                let d = q.x * q.x + q.y * q.y;
+                                d > 1.75_f64.powi(2) && d < 4.
+                            } else {
+                                let d = (q.x.abs() - 1.5).max(0.).powi(2)
+                                    + (q.y.abs() - 1.5).max(0.).powi(2);
+                                d > 0.0625 && d < 0.25
+                            };
+                            let expected =
+                                stock && q.z < height - if name == "miter" { q.x } else { 0. };
+                            let ql = f.local(q);
+                            let actual = xs
+                                .windows(2)
+                                .position(|w| ql.x > w[0] && ql.x < w[1])
+                                .is_some_and(|i| {
+                                    bs[i].iter().any(|b| Rect::at(b, ql.x).contains(ql.y, ql.z))
+                                });
+                            assert_eq!(actual, expected, "{case} {name}: {q:?}");
+                        }
+                    }
+                }
+                let deeper = operation(&result, &placed(tool, 1., p(0., 0., -1.)), 1e-6);
+                assert!(
+                    (crate::mass::measure(&deeper, 1e-6).unwrap().volume - area * (height - 1.))
+                        .abs()
+                        < 1e-8
+                );
+                for (scale, turns) in [(0.1_f64, 0), (1., 1), (25.4, 2)] {
+                    let map = |q: Vec3| {
+                        let a = xyz(q);
+                        p(a[turns], a[(turns + 1) % 3], a[(turns + 2) % 3])
+                    };
+                    let offset = p(1e5, -1e5, 1e5);
+                    // Move the miter down before this test: it must not make a
+                    // numerically ambiguous near-contact with the old end cap.
+                    let shift = if name == "miter" { -1. } else { 0. };
+                    let tool = placed(tool, 1., p(0., 0., shift));
+                    let moved = operation(
+                        &placed(&transform(&base, map), scale, offset),
+                        &placed(&transform(&tool, map), scale, offset),
+                        scale * 1e-6,
+                    );
+                    assert!(
+                        (crate::mass::measure(&moved, scale * 1e-6).unwrap().volume
+                            / scale.powi(3)
+                            - area * (height + shift))
+                            .abs()
+                            < 1e-6
+                    );
+                }
+                if let Ok(folder) = std::env::var("GCKERNEL_ASTRA_END_EXPORT") {
+                    let folder = std::path::PathBuf::from(folder);
+                    std::fs::create_dir_all(&folder).unwrap();
+                    for (suffix, b) in [("base", &base), ("tool", tool), ("result", &result)] {
+                        let bytes: Vec<_> = crate::neutral::write_body(b)
+                            .into_iter()
+                            .flat_map(f64::to_le_bytes)
+                            .collect();
+                        std::fs::write(folder.join(format!("{case}_{name}_{suffix}.f64")), bytes)
+                            .unwrap();
+                    }
+                }
+            }
+            let hole_case = if case.starts_with("pipe") {
+                "pipe_hole_one_wall"
+            } else {
+                "rect_tube_hole_one_wall"
+            };
+            let hole = survey(hole_case, "step01");
+            let removed = if case.starts_with("pipe") {
+                22.5 * PI - 70.48768294431949
+            } else {
+                PI * 0.0625
+            };
+            for out in [
+                operation(&operation(&base, &hole, 1e-6), &square, 1e-6),
+                operation(&operation(&base, &square, 1e-6), &hole, 1e-6),
+            ] {
+                assert!(
+                    (crate::mass::measure(&out, 1e-6).unwrap().volume - (23. * area - removed))
+                        .abs()
+                        < 1e-8
+                );
+            }
+            let tangent = operation(&base, &placed(&square, 1., p(0., 0., 1.)), 1e-6);
+            assert!(
+                (crate::mass::measure(&tangent, 1e-6).unwrap().volume - area * 24.).abs() < 1e-8
+            );
+            assert!(matches!(
+                crate::boolean::cut(&base, &placed(&square, 1., p(0., 0., -14.)), 1e-6),
+                Err(KernelError::Unsupported(_))
+            ));
+        }
+        // The captured miter's cap has a tiny nonzero third normal component;
+        // accepting it would require a declared geometry-normalization contract.
+        for case in ["pipe_miter_45", "rect_tube_miter_45"] {
+            assert!(matches!(
+                crate::boolean::cut(&survey(case, "base"), &survey(case, "step01"), 1e-6),
+                Err(KernelError::Unsupported(_))
+            ));
+        }
+    }
+    #[test]
     fn near_distinct_graphs_and_interior_contacts_are_not_merged() {
         let line = Graph::Line { m: 0., b: 0. };
         assert_eq!(

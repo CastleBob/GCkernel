@@ -100,20 +100,32 @@ Capsules meeting perpendicular cylindrical patches enter the transverse domain
 below before execution; clear passages retain this local splice path. Blind and
 other unsupported interacting cuts are rejected.
 
-### Rectangular through-tools on curved stock
+### Planar tools on curved stock
 
-The cutter must be a verified plain axis-aligned box. Exactly one coordinate
-axis must span the complete stock bounds; a partial-depth or ambiguous sweep
-is rejected. The footprint's enclosing disk selects clear-passage versus
-perpendicular-cylinder intersection admission before execution. A clear passage
-splices the exact rectangular cavity and preserves unrelated geometry; a root
-crossing uses the transverse plane/cylinder construction. No unsupported cut is
-retried. Rotated rectangular tools and locally-through tools that do not span
-the overall stock bounds are outside this bounded admission.
+A verified plain axis-aligned box spanning exactly one complete stock coordinate
+uses the clear-passage or transverse intersection domain, selected from its
+footprint before construction. A clear passage retains unrelated geometry.
+Box tools spanning two or more stock coordinates, oblique planar tools and other
+planar-prism representations instead enter transverse cell admission directly.
+Their normals and the stock cylinder axes select a compatible cardinal section
+chart before any operation runs. The entire cutter is still checked through its
+actual oriented boundary; its shape is not inferred from its bounds. No failed
+admission or operation retries another chart or solver.
 
-Tests cover repeated web slots, a root-crossing rectangle with independent
-analytic volume, all three coordinate sweep axes, a rectangular slot after a
-type-4 fillet circle through the wire protocol, and blind/ambiguous rejection.
+This admits square tube/pipe end trims and compatible tilted cuts, including
+45-degree miters produced by our extrusion. Coincident planar caps are allowed;
+empty results are successful, while disconnected material is refused. The
+captured native 45-degree slab currently has a tiny nonzero third component in
+its cap normals and is explicitly unsupported: no automatic near-axis adjustment
+is made. Exact compatible wedges are a separate admitted representation.
+
+Checks cover web/root rectangles, repeated pipe/tube trims, independent centroid
+volume integrals, 13,125 material probes per end case, transformed/scaled cases,
+complete removal, flush contact and severing rejection. Square trims commute
+with separated wall holes in the tested pipe and rectangular tube. General
+oblique geometry and a box not spanning a stock coordinate remain outside this
+entry's supported domain. Tests can export exact end-cut inputs/results to a
+caller-selected directory with GCKERNEL_ASTRA_END_EXPORT for native review.
 
 ## Admission, errors and representation
 
@@ -255,3 +267,9 @@ independent piecewise dimension integrals, 10,925 material probes per case,
 repeat replay, three axis placements and scales at 1e5 translation. The previous
 outer-edge tangent refusal stays a regression. A 21-hole pipe sequence checks
 all preceding openings via genus and accumulated volume at every protocol step.
+
+Circular extremal stations retain their exact parameter 0 or pi when their
+stored X coordinate equals cx+r or cx-r. Re-subtracting cx can otherwise yield
+r minus one floating-point unit and invent a nonzero radial root. This arithmetic
+fix does not snap near stations or change a supporting circle; a scaled,
+far-translated miter regression exercises the original loss.

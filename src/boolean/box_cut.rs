@@ -1,7 +1,7 @@
-//! Verified box-shaped through cutters on curved stock. A unique globally
-//! through axis selects the geometric domain before construction. Blind and
-//! ambiguous sweeps are rejected; the ordinary rectilinear solver is unchanged.
-use crate::geom::{Curve, Vec3};
+//! Planar cutters on curved stock. Proven boxes with one globally through axis
+//! use passage/intersection admission; other planar prisms and end slabs use a
+//! compatible transverse cell chart selected before construction. No retries.
+use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::{Body, Profile};
 use crate::KernelError;
 type Result<T> = std::result::Result<T, KernelError>;
@@ -20,6 +20,11 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         return Err(KernelError::InvalidInput(
             "rectangular passage tolerance must be positive".into(),
         ));
+    }
+    // Oblique planar prisms enter the analytic section domain directly. No box
+    // admission is attempted and failed operations never select another chart.
+    if tool.vertices.len()!=8 || tool.edges.len()!=12 || tool.faces.len()!=6 || tool.faces.iter().any(|f|matches!(f.surface,Surface::Plane {n,..} if xyz(n).iter().filter(|v|**v!=0.).count()!=1)) {
+        return super::endcut::planar_cross_cut(body,tool,tol);
     }
     let (lo, hi) = super::rectilinear::plain_box_bounds(tool, tol)?;
     if body.faces.len() > 5000 || body.edges.len() > 20000 || body.vertices.len() > 20000 {
@@ -65,7 +70,10 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     let axes: Vec<_> = (0..3)
         .filter(|k| lo[*k] <= base_lo[*k] && hi[*k] >= base_hi[*k])
         .collect();
-    if axes.len() != 1 {
+    if axes.len() >= 2 {
+        return super::endcut::planar_cross_cut(body, tool, tol);
+    }
+    if axes.is_empty() {
         return Err(unsupported(
             "rectangular tool must have one unambiguous axis spanning the complete stock bounds",
         ));
@@ -193,16 +201,15 @@ mod tests {
         );
     }
     #[test]
-    fn blind_and_ambiguous_box_cuts_are_explicitly_refused() {
-        for tool in [
-            tool(3., 7., 5., 7., -2., 1.),
-            tool(-1., 11., -1., 37., -6., 1.),
-        ] {
-            assert!(matches!(
-                crate::boolean::cut(&captured("base"), &tool, 1e-6),
-                Err(KernelError::Unsupported(_))
-            ));
-        }
+    fn blind_box_cut_refuses_and_complete_removal_returns_empty() {
+        assert!(matches!(
+            crate::boolean::cut(&captured("base"), &tool(3., 7., 5., 7., -2., 1.), 1e-6),
+            Err(KernelError::Unsupported(_))
+        ));
+        let empty =
+            crate::boolean::cut(&captured("base"), &tool(-1., 11., -1., 37., -6., 1.), 1e-6)
+                .unwrap();
+        assert!(empty.vertices.is_empty() && empty.edges.is_empty() && empty.faces.is_empty());
     }
     #[test]
     fn rectangular_web_slot_follows_an_analytic_fillet_circle_through_protocol() {
