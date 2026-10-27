@@ -78,39 +78,43 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     if super::endcut::crosses_cylinder(body, axis, center, radius, lo[axis], hi[axis], tol) {
         return super::endcut::box_cross_cut(body, tool, axis, tol);
     }
-    let (bottom, top, bottom_face, top_face) =
-        super::passage::round_passage(body, axis, center, radius, lo[axis], hi[axis], tol)?;
-    let point = |s: f64, t: f64| {
-        let mut q = [0.; 3];
-        q[u] = s;
-        q[v] = t;
-        q[axis] = bottom;
-        vector(q)
-    };
-    let corners = [
-        point(lo[u], lo[v]),
-        point(hi[u], lo[v]),
-        point(hi[u], hi[v]),
-        point(lo[u], hi[v]),
-    ];
-    let boundary = (0..4)
-        .map(|i| Curve::Line {
-            a: corners[i],
-            b: corners[(i + 1) % 4],
-        })
-        .collect();
-    let mut n = [0.; 3];
-    n[axis] = 1.;
-    let cavity = crate::extrude::extrude(
-        &Profile {
-            loops: vec![boundary],
-            n: vector(n),
-            low: 0.,
-            high: top - bottom,
-        },
-        tol,
-    )?;
-    super::passage::splice_cavity(body, cavity, axis, bottom_face, top_face, tol)
+    let passages =
+        super::passage::round_passages(body, axis, center, radius, lo[axis], hi[axis], tol)?;
+    let mut result = body.clone();
+    for (bottom, top, bottom_face, top_face) in passages {
+        let point = |s: f64, t: f64| {
+            let mut q = [0.; 3];
+            q[u] = s;
+            q[v] = t;
+            q[axis] = bottom;
+            vector(q)
+        };
+        let corners = [
+            point(lo[u], lo[v]),
+            point(hi[u], lo[v]),
+            point(hi[u], hi[v]),
+            point(lo[u], hi[v]),
+        ];
+        let boundary = (0..4)
+            .map(|i| Curve::Line {
+                a: corners[i],
+                b: corners[(i + 1) % 4],
+            })
+            .collect();
+        let mut n = [0.; 3];
+        n[axis] = 1.;
+        let cavity = crate::extrude::extrude(
+            &Profile {
+                loops: vec![boundary],
+                n: vector(n),
+                low: 0.,
+                high: top - bottom,
+            },
+            tol,
+        )?;
+        result = super::passage::splice_cavity(&result, cavity, axis, bottom_face, top_face, tol)?;
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

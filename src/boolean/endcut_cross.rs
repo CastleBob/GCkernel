@@ -392,6 +392,113 @@ mod tests {
         crate::neutral::Reader::new(&values).body().unwrap()
     }
     #[test]
+    fn rectangular_tube_multiple_walls_preserve_the_unaffected_stock() {
+        let base = survey("rect_tube_hole_both_walls", "base");
+        let n = p(1., 0., 0.);
+        let slot = vec![
+            segment(p(0., -1., 11.625), p(0., 1., 11.625)),
+            Curve::Arc {
+                c: p(0., 1., 12.),
+                n,
+                x: p(0., 0., -1.),
+                r: 0.375,
+                t0: 0.,
+                t1: PI,
+            },
+            segment(p(0., 1., 12.375), p(0., -1., 12.375)),
+            Curve::Arc {
+                c: p(0., -1., 12.),
+                n,
+                x: p(0., 0., 1.),
+                r: 0.375,
+                t0: 0.,
+                t1: PI,
+            },
+        ];
+        let corners = [
+            p(0., -0.5, 11.),
+            p(0., 0.5, 11.),
+            p(0., 0.5, 13.),
+            p(0., -0.5, 13.),
+        ];
+        let rectangle = (0..4)
+            .map(|i| segment(corners[i], corners[(i + 1) % 4]))
+            .collect();
+        let make = |outline| {
+            crate::extrude::extrude(
+                &crate::neutral::Profile {
+                    loops: vec![outline],
+                    n,
+                    low: -3.,
+                    high: 3.,
+                },
+                1e-6,
+            )
+            .unwrap()
+        };
+        let original_volume = 72. + 4.5 * PI;
+        let original = crate::neutral::write_body(&base);
+        for (tool, removed) in [
+            (survey("rect_tube_hole_both_walls", "step01"), PI * 0.125),
+            (make(slot), 0.5 * (1.5 + PI * 0.375_f64.powi(2))),
+            (make(rectangle), 1.),
+        ] {
+            let out = operation(&base, &tool, 1e-6);
+            assert_eq!(crate::topology::check(&out, 1e-6).unwrap().genus(), 3.);
+            assert!(
+                (crate::mass::measure(&out, 1e-6).unwrap().volume - (original_volume - removed))
+                    .abs()
+                    < 1e-8
+            );
+            assert_eq!(&out.vertices[..base.vertices.len()], &base.vertices);
+            for (i, f) in base.faces.iter().enumerate() {
+                if matches!(f.surface, Surface::Cylinder { .. }) {
+                    assert_eq!(format!("{f:?}"), format!("{:?}", out.faces[i]));
+                }
+            }
+            let next = operation(&out, &placed(&tool, 1., p(0., 0., 6.)), 1e-6);
+            assert_eq!(crate::topology::check(&next, 1e-6).unwrap().genus(), 5.);
+            assert!(
+                (crate::mass::measure(&next, 1e-6).unwrap().volume
+                    - (original_volume - 2. * removed))
+                    .abs()
+                    < 1e-8
+            );
+            assert!(matches!(
+                crate::boolean::cut(&out, &tool, 1e-6),
+                Err(KernelError::Unsupported(_))
+            ));
+            for (scale, turns) in [(0.1_f64, 0), (1., 1), (25.4, 2)] {
+                let map = |q: Vec3| {
+                    let a = xyz(q);
+                    p(a[turns], a[(turns + 1) % 3], a[(turns + 2) % 3])
+                };
+                let offset = p(100., -50., 25.);
+                let moved = operation(
+                    &placed(&transform(&base, map), scale, offset),
+                    &placed(&transform(&tool, map), scale, offset),
+                    scale * 1e-6,
+                );
+                assert!(
+                    (crate::mass::measure(&moved, scale * 1e-6).unwrap().volume / scale.powi(3)
+                        - (original_volume - removed))
+                        .abs()
+                        < 1e-8
+                );
+            }
+        }
+        // Finite tools ending inside one wall or starting inside the other must
+        // not accidentally pair a gap's exit/entry faces as solid material.
+        let tool = survey("rect_tube_hole_one_wall", "step01");
+        for offset in [-3.4, 0.4] {
+            assert!(matches!(
+                crate::boolean::cut(&base, &placed(&tool, 1., p(offset, 0., 0.)), 1e-6),
+                Err(KernelError::Unsupported(_))
+            ));
+        }
+        assert_eq!(crate::neutral::write_body(&base), original);
+    }
+    #[test]
     fn surveyed_pipe_cuts_admit_oriented_annular_sections() {
         let integrate = |f: &dyn Fn(f64) -> f64, lo: f64, hi: f64| {
             let n = 4096;

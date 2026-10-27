@@ -383,7 +383,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         return super::endcut::cross_cut(body, tool, tol);
     }
     if !(body.vertices.len() == 8 && body.edges.len() == 12 && body.faces.len() == 6) {
-        let (low, high, bottom_face, top_face) = super::passage::round_passage(
+        let passages = super::passage::round_passages(
             body,
             axis,
             admitted.enclosing_center,
@@ -392,21 +392,26 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             admitted.high,
             tol,
         )?;
-        let shift = n.scale(low - admitted.low);
-        let outline = boundary(tool, &tool.faces[admitted.lower_face])
-            .into_iter()
-            .map(|c| c.translated(shift))
-            .collect();
-        let cavity = crate::extrude::extrude(
-            &Profile {
-                loops: vec![outline],
-                n,
-                low: 0.,
-                high: high - low,
-            },
-            tol,
-        )?;
-        return super::passage::splice_cavity(body, cavity, axis, bottom_face, top_face, tol);
+        let mut result = body.clone();
+        for (low, high, bottom_face, top_face) in passages {
+            let shift = n.scale(low - admitted.low);
+            let outline = boundary(tool, &tool.faces[admitted.lower_face])
+                .into_iter()
+                .map(|c| c.translated(shift))
+                .collect();
+            let cavity = crate::extrude::extrude(
+                &Profile {
+                    loops: vec![outline],
+                    n,
+                    low: 0.,
+                    high: high - low,
+                },
+                tol,
+            )?;
+            result =
+                super::passage::splice_cavity(&result, cavity, axis, bottom_face, top_face, tol)?;
+        }
+        return Ok(result);
     }
     let (low, high) = super::rectilinear::plain_box_bounds(body, tol)?;
     if admitted.low > low[axis] || admitted.high < high[axis] {

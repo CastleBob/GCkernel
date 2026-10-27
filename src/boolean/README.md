@@ -47,8 +47,8 @@ and cuts outside those explicit domains remain unsupported.
 
 ### Circular passages through planar regions of curved solids
 
-A full cylindrical tool may cross exactly one material interval bounded by two
-axis-normal planar patches. Both patches must contain the entire disk, with
+A full cylindrical tool may cross one to 128 separated material intervals, each
+bounded by two axis-normal planar patches. Every patch must contain the entire disk, with
 clearance from every outer and inner boundary greater than tolerance. Analytic
 line/circle winding and minimum-distance checks establish containment. Analytic
 surface-patch bounds must exclude EVERY other boundary patch from the finite
@@ -67,8 +67,14 @@ curve-on-surface consistency, planar loop orientation and cylindrical patch
 orientation. This is a local cut operation on an input solid, not a general
 self-intersection repair or global B-rep certification service. Work limits
 remain 20,000 faces and 80,000 edges/vertices. Output clones the existing boundary
-and appends two circular cap loops and an inward cylinder; unrelated geometry
+and appends two circular cap loops and an inward cylinder per interval; unrelated geometry
 is retained exactly in its original representation.
+Entry/exit normals must alternate along the cutter, with positive separation,
+and its finite depth must span every intersected wall completely. This supports
+both-wall holes in rectangular tube. Capsule and rectangular through-slots use
+the same admitted intervals and attach their actual extruded profiles to each
+cap pair. No geometry is constructed until all intervals are admitted; an error
+returns no partial body. Repeated cuts preserve the previous holes and fillets.
 
 ### Contained capsule through-slot
 

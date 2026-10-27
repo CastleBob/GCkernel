@@ -1,5 +1,5 @@
 //! Local admission for a round through-passage in an otherwise unchanged solid.
-//! Proves two planar entry/exit patches contain the disk with clearance, and
+//! Proves planar entry/exit patch pairs contain the disk with clearance, and
 //! conservatively excludes EVERY other surface patch from its finite corridor.
 //! Bounds are analytic; rejecting an inconclusive bound never changes geometry.
 use crate::geom::{Curve, Surface, Vec3};
@@ -411,10 +411,11 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
     Ok(bounds)
 }
 
-/// Returns lower height, upper height, lower face, upper face. A circular disk
-/// wholly inside both planar patches plus exclusion of all other boundary
-/// patches proves one constant material interval over the entire disk.
-pub(super) fn round_passage(
+/// Returns ordered (lower height, upper height, lower face, upper face) intervals.
+/// A circular disk wholly inside every planar cap, alternating outward signs,
+/// and exclusion of all other patches prove the material intervals throughout
+/// the entire disk. Every interval must be fully spanned by the finite cutter.
+pub(super) fn round_passages(
     body: &Body,
     axis: usize,
     center: Vec3,
@@ -422,7 +423,7 @@ pub(super) fn round_passage(
     tool_low: f64,
     tool_high: f64,
     tol: f64,
-) -> Result<(f64, f64, usize, usize)> {
+) -> Result<Vec<(f64, f64, usize, usize)>> {
     let bounds = validate(body, tol)?;
     let c = xyz(center);
     let mut corridor_low = c.map(|v| v - radius);
@@ -462,15 +463,25 @@ pub(super) fn round_passage(
         }
     }
     hits.sort_by(|a, b| a.0.total_cmp(&b.0));
-    if hits.len() != 2 || hits[0].1 != -1. || hits[1].1 != 1. || hits[1].0 - hits[0].0 <= tol {
+    if hits.is_empty() || hits.len() % 2 != 0 || hits.len() > 256 {
         return Err(unsupported(
-            "bore must cross exactly one material interval bounded by two planar faces",
+            "passage requires one to 128 complete planar material intervals",
         ));
     }
-    if tool_low > hits[0].0 || tool_high < hits[1].0 {
-        return Err(unsupported("bore must span the full material thickness"));
+    if hits.windows(2).any(|w| w[1].0 - w[0].0 <= tol) {
+        return Err(unsupported("planar passage boundaries are not separated"));
     }
-    Ok((hits[0].0, hits[1].0, hits[0].2, hits[1].2))
+    let mut intervals = Vec::new();
+    for pair in hits.chunks_exact(2) {
+        if pair[0].1 != -1. || pair[1].1 != 1. {
+            return Err(unsupported("planar passage must enter and exit each wall"));
+        }
+        if tool_low > pair[0].0 || tool_high < pair[1].0 {
+            return Err(unsupported("passage must span the full material thickness"));
+        }
+        intervals.push((pair[0].0, pair[1].0, pair[0].2, pair[1].2));
+    }
+    Ok(intervals)
 }
 
 /// Attach the inverted side boundary of a caller-validated cavity, reusing its
