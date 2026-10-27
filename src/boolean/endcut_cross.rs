@@ -907,6 +907,45 @@ mod tests {
             "{actual} expected {expected}"
         );
         eprintln!("large fillet crossing volume {actual:.14}");
+        // Independent stock dimensions across the entire flange depth, not only
+        // the thin web. This detects shape errors that could cancel in volume.
+        for (shape, is_cut) in [(&fixture("base"), false), (&result, true)] {
+            let xs = stations(events(shape), 1e-6).unwrap();
+            let bands: Vec<_> = xs
+                .windows(2)
+                .map(|w| sections(shape, w[0], w[1], 1e-6).unwrap())
+                .collect();
+            for ix in 0..31 {
+                for iy in 0..37 {
+                    for iz in 0..18 {
+                        let q = p(
+                            0.035 + ix as f64 * 0.047,
+                            11.313 + iy as f64 * 0.039,
+                            -3.95 + iz as f64 * 0.233,
+                        );
+                        let (z0, z1) = if q.x < 0.24 {
+                            (-4., 0.)
+                        } else if q.x < 0.74 {
+                            let root = (0.25 - (q.x - 0.74).powi(2)).sqrt();
+                            (-2.615 + root, -1.385 - root)
+                        } else {
+                            (-2.115, -1.885)
+                        };
+                        let expected = q.z > z0
+                            && q.z < z1
+                            && (!is_cut
+                                || (q.x - 0.74).powi(2) + (q.y - 12.).powi(2) > radius * radius);
+                        let inside = xs
+                            .windows(2)
+                            .position(|w| q.x > w[0] && q.x < w[1])
+                            .is_some_and(|i| {
+                                bands[i].iter().any(|b| Rect::at(b, q.x).contains(q.y, q.z))
+                            });
+                        assert_eq!(inside, expected, "large cut={is_cut} probe {q:?}");
+                    }
+                }
+            }
+        }
         let unit = |i| match i {
             0 => p(1., 0., 0.),
             1 => p(0., 1., 0.),
