@@ -104,7 +104,7 @@ fn roots(c: &Curve, x: f64, tol: f64) -> Vec<Vec3> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Graph {
     Line {
         m: f64,
@@ -523,22 +523,33 @@ fn section(body: &Body, lo: f64, hi: f64, tol: f64) -> Result<Option<Band>> {
     Ok(Some(b))
 }
 
-fn below(a: Graph, b: Graph, lo: f64, hi: f64, tol: f64) -> bool {
+// Candidate extrema of the difference of two admitted line/circle graphs.
+// Circle derivatives are -branch*(x-cx)/sqrt(r^2-(x-cx)^2). Equating
+// two and squaring leaves two linear equations; extra candidates are harmless.
+fn difference_stations(a: Graph, b: Graph, lo: f64, hi: f64) -> Vec<f64> {
+    let mut xs = vec![lo, hi];
     match (a, b) {
-        (Graph::Circle { cx, .. }, Graph::Circle { cx: bx, .. }) if cx == bx => {
-            // Concentric-in-X circular graphs: their difference is monotone on
-            // either side of cx (or constant). All extrema are at lo, hi or cx.
-            [lo, hi, cx.clamp(lo, hi)]
-                .into_iter()
-                .all(|x| a.value(x) - b.value(x) <= tol)
+        (Graph::Circle { cx: ac, r: ar, .. }, Graph::Circle { cx: bc, r: br, .. }) => {
+            for sign in [-1., 1.] {
+                let divisor = br + sign * ar;
+                if divisor != 0. {
+                    xs.push((br * ac + sign * ar * bc) / divisor);
+                }
+            }
         }
-        (Graph::Line { m: am, b: ab }, Graph::Line { m: bm, b: bb }) => {
-            [(am - bm) * lo + ab - bb, (am - bm) * hi + ab - bb]
-                .iter()
-                .all(|v| *v <= tol)
+        (Graph::Circle { cx, r, branch, .. }, Graph::Line { m, .. })
+        | (Graph::Line { m, .. }, Graph::Circle { cx, r, branch, .. }) => {
+            xs.push(cx - branch * r * m / m.hypot(1.));
         }
-        _ => a.range(lo, hi).1 <= b.range(lo, hi).0 + tol,
+        _ => {}
     }
+    xs.retain(|x| x.is_finite() && *x >= lo && *x <= hi);
+    xs
+}
+fn below(a: Graph, b: Graph, lo: f64, hi: f64, tol: f64) -> bool {
+    difference_stations(a, b, lo, hi)
+        .into_iter()
+        .all(|x| a.value(x) - b.value(x) <= tol)
 }
 fn subtract(mut body: Band, tool: Option<Band>, tol: f64) -> Result<Option<Band>> {
     let Some(tool) = tool else {
@@ -748,9 +759,17 @@ fn surface(graph: Graph, is_z: bool, positive: bool) -> Result<(Surface, bool)> 
     }
 }
 fn patches(b: &Band, tol: f64) -> Result<Vec<Patch>> {
+    selected_patches(b, [true; 4], tol)
+}
+// Order: lower/upper Z, then lower/upper Y. Internal cell faces are omitted
+// before constructing any curves, so no artificial internal edges are made.
+fn selected_patches(b: &Band, exposed: [bool; 4], tol: f64) -> Result<Vec<Patch>> {
     let mut result = Vec::new();
     let (lo, hi) = (b.lo, b.hi);
-    for (zg, positive) in [(b.z0, false), (b.z1, true)] {
+    for (k, (zg, positive)) in [(b.z0, false), (b.z1, true)].into_iter().enumerate() {
+        if !exposed[k] {
+            continue;
+        }
         let boundary = vec![
             lifted(lo, hi, b.y0, zg, tol)?,
             segment(
@@ -774,7 +793,10 @@ fn patches(b: &Band, tol: f64) -> Result<Vec<Patch>> {
             },
         });
     }
-    for (yg, positive) in [(b.y0, false), (b.y1, true)] {
+    for (k, (yg, positive)) in [(b.y0, false), (b.y1, true)].into_iter().enumerate() {
+        if !exposed[k + 2] {
+            continue;
+        }
         let boundary = vec![
             lifted(lo, hi, yg, b.z0, tol)?,
             segment(

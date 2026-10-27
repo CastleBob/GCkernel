@@ -4,35 +4,62 @@
 use super::*;
 
 fn positive(lower: Graph, upper: Graph, lo: f64, hi: f64, tol: f64) -> bool {
-    if below(lower, upper, lo, hi, -tol) {
-        return true;
-    }
-    // A circle closes to zero width at its extremal stations but has positive
-    // width throughout the open band. This is a proved analytic degeneracy.
-    match (lower, upper) {
-        (
-            Graph::Circle {
-                cx,
-                cv,
-                r,
-                branch: -1.,
-            },
-            Graph::Circle {
-                cx: bx,
-                cv: bv,
-                r: br,
-                branch: 1.,
-            },
-        ) if cx == bx && cv == bv && r == br => {
-            lo >= cx - r - tol
-                && hi <= cx + r + tol
-                && upper.value((lo + hi) * 0.5) - lower.value((lo + hi) * 0.5) > tol
-        }
-        _ => false,
-    }
+    below(lower, upper, lo, hi, 0.)
+        && upper.value((lo + hi) * 0.5) - lower.value((lo + hi) * 0.5) > tol
+        && difference_stations(lower, upper, lo, hi)
+            .into_iter()
+            .filter(|x| *x > lo && *x < hi)
+            .all(|x| upper.value(x) - lower.value(x) > tol)
 }
 
+fn ordered_graphs(mut graphs: Vec<Graph>, lo: f64, hi: f64, tol: f64) -> Result<Vec<Graph>> {
+    let mid = (lo + hi) * 0.5;
+    graphs.sort_by(|a, b| a.value(mid).total_cmp(&b.value(mid)));
+    let mut out: Vec<Graph> = Vec::new();
+    for g in graphs {
+        if let Some(&last) = out.last() {
+            if (g.value(mid) - last.value(mid)).abs() <= tol {
+                if g == last {
+                    continue;
+                }
+                return Err(unsupported("transverse graph coincidence is unresolved"));
+            }
+            if !positive(last, g, lo, hi, tol) {
+                return Err(unsupported(
+                    "transverse graphs cross or touch inside a band",
+                ));
+            }
+        }
+        out.push(g);
+    }
+    if out.len() > 129 {
+        return Err(unsupported(
+            "transverse arrangement has too many coordinates",
+        ));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
 fn sections(body: &Body, lo: f64, hi: f64, tol: f64) -> Result<Vec<Band>> {
+    sections_with_budget(body, lo, hi, tol, &mut 0)
+}
+fn spend(work: &mut usize, amount: usize) -> Result<()> {
+    *work = work.saturating_add(amount);
+    if *work > 2_000_000 {
+        return Err(unsupported(
+            "transverse arrangement exceeds its work budget",
+        ));
+    }
+    Ok(())
+}
+fn sections_with_budget(
+    body: &Body,
+    lo: f64,
+    hi: f64,
+    tol: f64,
+    work: &mut usize,
+) -> Result<Vec<Band>> {
     let mid = lo + (hi - lo) * 0.5;
     let mut hits = Vec::new();
     for face in &body.faces {
@@ -114,119 +141,190 @@ fn sections(body: &Body, lo: f64, hi: f64, tol: f64) -> Result<Vec<Band>> {
     if hits.len() > 1024 {
         return Err(unsupported("too many transverse section segments"));
     }
-    let mut used = vec![false; hits.len()];
-    let mut result = Vec::new();
-    for (i, low) in hits.iter().enumerate().filter(|(_, h)| h.role == 0) {
-        let yl = low.graph.value(mid);
-        let matches: Vec<_> = hits
-            .iter()
-            .enumerate()
-            .filter(|(_, h)| {
-                h.role == 1
-                    && h.graph.value(mid) > yl + tol
-                    && (h.lo - low.lo).abs() <= tol
-                    && (h.hi - low.hi).abs() <= tol
-            })
-            .collect();
-        let (j, high) = matches
-            .into_iter()
-            .min_by(|(_, a), (_, b)| a.graph.value(mid).total_cmp(&b.graph.value(mid)))
-            .ok_or_else(|| invalid("transverse section has no matching upper wall"))?;
-        let yh = high.graph.value(mid);
-        let mut roofs = Vec::new();
-        for (role, z) in [(2, low.lo), (3, low.hi)] {
-            let candidates: Vec<_> = hits
+    if hits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ys = ordered_graphs(
+        hits.iter()
+            .filter(|h| h.role < 2)
+            .map(|h| h.graph)
+            .collect(),
+        lo,
+        hi,
+        tol,
+    )?;
+    let zs = ordered_graphs(
+        hits.iter()
+            .filter(|h| h.role >= 2)
+            .map(|h| h.graph)
+            .collect(),
+        lo,
+        hi,
+        tol,
+    )?;
+    if ys.len() < 2 || zs.len() < 2 || ys.len() * zs.len() > 4096 {
+        return Err(unsupported(
+            "transverse arrangement dimensions exceed limits",
+        ));
+    }
+    let (ny, nz) = (ys.len() - 1, zs.len() - 1);
+    spend(work, ny * nz * 2 + hits.len() * (ny + nz))?;
+    let mut ye = vec![vec![0_i32; nz]; ny + 1];
+    let mut ze = vec![vec![0_i32; nz + 1]; ny];
+    for h in &hits {
+        let (coords, spans) = if h.role < 2 { (&ys, &zs) } else { (&zs, &ys) };
+        let index = |v: f64, graphs: &[Graph]| {
+            graphs
                 .iter()
-                .enumerate()
-                .filter(|(_, h)| {
-                    h.role == role
-                        && (h.graph.value(mid) - z).abs() <= tol
-                        && (h.lo - yl).abs() <= tol
-                        && (h.hi - yh).abs() <= tol
-                })
-                .collect();
-            if candidates.len() != 1 {
-                return Err(unsupported("transverse section roof is split or ambiguous"));
-            }
-            roofs.push(candidates[0]);
-        }
-        for k in [i, j, roofs[0].0, roofs[1].0] {
-            if used[k] {
-                return Err(invalid("overlapping transverse material sections"));
-            }
-            used[k] = true;
-        }
-        let b = Band {
-            lo,
-            hi,
-            y0: low.graph,
-            y1: high.graph,
-            z0: roofs[0].1.graph,
-            z1: roofs[1].1.graph,
+                .position(|g| (g.value(mid) - v).abs() <= tol)
+                .ok_or_else(|| invalid("section boundary misses an arrangement coordinate"))
         };
-        if !positive(b.y0, b.y1, lo, hi, tol) || !positive(b.z0, b.z1, lo, hi, tol) {
-            return Err(unsupported(
-                "cannot prove positive transverse material thickness",
-            ));
+        let k = index(h.graph.value(mid), coords)?;
+        let start = index(h.lo, spans)?;
+        let end = index(h.hi, spans)?;
+        if start >= end {
+            return Err(invalid("section boundary has no positive span"));
         }
-        result.push(b);
+        for j in start..end {
+            let count = if h.role < 2 {
+                &mut ye[k][j]
+            } else {
+                &mut ze[j][k]
+            };
+            if *count != 0 {
+                return Err(invalid("duplicate or overlapping section boundaries"));
+            }
+            *count = if h.role % 2 == 0 { 1 } else { -1 };
+        }
     }
-    if used.iter().any(|u| !u) {
-        return Err(invalid("unpaired transverse boundary segments"));
+    let mut material = vec![vec![false; nz]; ny];
+    for z in 0..nz {
+        let mut winding = 0;
+        for y in 0..=ny {
+            winding += ye[y][z];
+            if winding != 0 && winding != 1 {
+                return Err(invalid("inconsistent transverse Y winding"));
+            }
+            if y < ny {
+                material[y][z] = winding == 1;
+            }
+        }
+        if winding != 0 {
+            return Err(invalid("unclosed transverse Y boundary"));
+        }
     }
-    result.sort_by(|a, b| a.y0.value(mid).total_cmp(&b.y0.value(mid)));
-    for i in 0..result.len() {
-        for j in i + 1..result.len() {
-            let (a, b) = (&result[i], &result[j]);
-            if !(below(a.y1, b.y0, lo, hi, 0.)
-                || below(b.y1, a.y0, lo, hi, 0.)
-                || below(a.z1, b.z0, lo, hi, 0.)
-                || below(b.z1, a.z0, lo, hi, 0.))
-            {
-                return Err(unsupported(
-                    "transverse material intervals must remain separated",
+    for y in 0..ny {
+        let mut winding = 0;
+        for z in 0..=nz {
+            winding += ze[y][z];
+            if winding != 0 && winding != 1 {
+                return Err(invalid("inconsistent transverse Z winding"));
+            }
+            if z < nz && material[y][z] != (winding == 1) {
+                return Err(invalid(
+                    "transverse boundary coverage disagrees between axes",
                 ));
+            }
+        }
+        if winding != 0 {
+            return Err(invalid("unclosed transverse Z boundary"));
+        }
+    }
+    let mut result = Vec::new();
+    for y in 0..ny {
+        for z in 0..nz {
+            if material[y][z] {
+                result.push(Band {
+                    lo,
+                    hi,
+                    y0: ys[y],
+                    y1: ys[y + 1],
+                    z0: zs[z],
+                    z1: zs[z + 1],
+                });
             }
         }
     }
     Ok(result)
 }
 
-fn subtract_interval(body: Band, tool: &Band, tol: f64) -> Result<Vec<Band>> {
-    let (lo, hi) = (body.lo, body.hi);
-    if below(tool.y1, body.y0, lo, hi, 0.)
-        || below(body.y1, tool.y0, lo, hi, 0.)
-        || below(tool.z1, body.z0, lo, hi, 0.)
-        || below(body.z1, tool.z0, lo, hi, 0.)
-    {
-        return Ok(vec![body]);
+fn subtract_sections(
+    body: &[Band],
+    tool: &[Band],
+    lo: f64,
+    hi: f64,
+    tol: f64,
+    work: &mut usize,
+) -> Result<Vec<Band>> {
+    if body.is_empty() {
+        return Ok(Vec::new());
     }
-    if !below(tool.z0, body.z0, lo, hi, 0.) || !below(body.z1, tool.z1, lo, hi, 0.) {
+    let ys = ordered_graphs(
+        body.iter().chain(tool).flat_map(|b| [b.y0, b.y1]).collect(),
+        lo,
+        hi,
+        tol,
+    )?;
+    let zs = ordered_graphs(
+        body.iter().chain(tool).flat_map(|b| [b.z0, b.z1]).collect(),
+        lo,
+        hi,
+        tol,
+    )?;
+    if ys.len() * zs.len() > 4096 {
         return Err(unsupported(
-            "transverse cutter must cover the entire material depth",
+            "transverse subtraction arrangement exceeds limits",
         ));
     }
-    let covers_low = below(tool.y0, body.y0, lo, hi, 0.);
-    let covers_high = below(body.y1, tool.y1, lo, hi, 0.);
-    let inner_low = below(body.y0, tool.y0, lo, hi, -tol) && below(tool.y0, body.y1, lo, hi, -tol);
-    let inner_high = below(body.y0, tool.y1, lo, hi, -tol) && below(tool.y1, body.y1, lo, hi, -tol);
+    spend(work, ys.len() * zs.len() * (body.len() + tool.len() + 1))?;
+    let mid = (lo + hi) * 0.5;
     let mut result = Vec::new();
-    if !(covers_low || inner_low) || !(covers_high || inner_high) {
-        return Err(unsupported(
-            "cutter crosses a material boundary inside a transverse band",
-        ));
+    for y in ys.windows(2) {
+        for z in zs.windows(2) {
+            let (my, mz) = (
+                (y[0].value(mid) + y[1].value(mid)) * 0.5,
+                (z[0].value(mid) + z[1].value(mid)) * 0.5,
+            );
+            if body.iter().any(|b| Rect::at(b, mid).contains(my, mz))
+                && !tool.iter().any(|b| Rect::at(b, mid).contains(my, mz))
+            {
+                result.push(Band {
+                    lo,
+                    hi,
+                    y0: y[0],
+                    y1: y[1],
+                    z0: z[0],
+                    z1: z[1],
+                });
+            }
+        }
     }
-    if inner_low {
-        let mut b = body.clone();
-        b.y1 = tool.y0;
-        result.push(b);
-    }
-    if inner_high {
-        let mut b = body;
-        b.y0 = tool.y1;
-        result.push(b);
+    if result.len() > 128 {
+        return Err(unsupported("too many transverse material cells"));
     }
     Ok(result)
+}
+
+fn neighbors(a: &Band, b: &Band, tol: f64) -> Option<(usize, usize)> {
+    let mid = (a.lo + a.hi) * 0.5;
+    let (a, b) = (Rect::at(a, mid), Rect::at(b, mid));
+    if (a.y0 - b.y0).abs() <= tol && (a.y1 - b.y1).abs() <= tol {
+        if (a.z0 - b.z1).abs() <= tol {
+            return Some((0, 1));
+        }
+        if (a.z1 - b.z0).abs() <= tol {
+            return Some((1, 0));
+        }
+    }
+    if (a.z0 - b.z0).abs() <= tol && (a.z1 - b.z1).abs() <= tol {
+        if (a.y0 - b.y1).abs() <= tol {
+            return Some((2, 3));
+        }
+        if (a.y1 - b.y0).abs() <= tol {
+            return Some((3, 2));
+        }
+    }
+    None
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
@@ -299,20 +397,11 @@ fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
     let mut original = Vec::new();
     let mut cutters = Vec::new();
     let mut bands = Vec::new();
+    let mut arrangement_work = 0;
     for x in xs.windows(2) {
-        let b = sections(&body, x[0], x[1], tol)?;
-        let t = sections(&tool, x[0], x[1], tol)?;
-        let mut remaining = b.clone();
-        for cutter in &t {
-            let mut next = Vec::new();
-            for stock in remaining {
-                next.extend(subtract_interval(stock, cutter, tol)?);
-            }
-            if next.len() > 128 {
-                return Err(unsupported("too many transverse material intervals"));
-            }
-            remaining = next;
-        }
+        let b = sections_with_budget(&body, x[0], x[1], tol, &mut arrangement_work)?;
+        let t = sections_with_budget(&tool, x[0], x[1], tol, &mut arrangement_work)?;
+        let remaining = subtract_sections(&b, &t, x[0], x[1], tol, &mut arrangement_work)?;
         original.push(b);
         cutters.push(t);
         bands.push(remaining);
@@ -347,6 +436,50 @@ fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
             }
         }
     }
+    for (i, cells) in bands.iter().enumerate() {
+        for j in 0..cells.len() {
+            for k in j + 1..cells.len() {
+                if neighbors(&cells[j], &cells[k], tol).is_some() {
+                    let (a, b) = (offsets[i] + j, offsets[i] + k);
+                    adjacency[a].push(b);
+                    adjacency[b].push(a);
+                }
+            }
+        }
+    }
+    // A removed interval collapsing against an exterior X boundary creates
+    // four incident sheets along one edge, not a manifold solid. Detect this
+    // geometric tangency before assembly; ordinary interior hole tips have
+    // material on the opposite side and are unaffected by this check.
+    for i in 0..xs.len() {
+        let left = if i > 0 { bands[i - 1].as_slice() } else { &[] };
+        let right = bands.get(i).map(Vec::as_slice).unwrap_or(&[]);
+        let side = if left.is_empty() {
+            right
+        } else if right.is_empty() {
+            left
+        } else {
+            continue;
+        };
+        for j in 0..side.len() {
+            for k in j + 1..side.len() {
+                let (a, b) = (Rect::at(&side[j], xs[i]), Rect::at(&side[k], xs[i]));
+                let mid = (side[j].lo + side[j].hi) * 0.5;
+                let (am, bm) = (Rect::at(&side[j], mid), Rect::at(&side[k], mid));
+                let y_contact = ((a.y1 - b.y0).abs() <= tol && bm.y0 - am.y1 > tol)
+                    || ((b.y1 - a.y0).abs() <= tol && am.y0 - bm.y1 > tol);
+                let z_contact = ((a.z1 - b.z0).abs() <= tol && bm.z0 - am.z1 > tol)
+                    || ((b.z1 - a.z0).abs() <= tol && am.z0 - bm.z1 > tol);
+                if (y_contact && a.z1.min(b.z1) - a.z0.max(b.z0) > tol)
+                    || (z_contact && a.y1.min(b.y1) - a.y0.max(b.y0) > tol)
+                {
+                    return Err(unsupported(
+                        "cut meets an exterior boundary tangentially along an edge",
+                    ));
+                }
+            }
+        }
+    }
     let mut reached = vec![false; total];
     let mut stack = vec![0];
     reached[0] = true;
@@ -364,8 +497,19 @@ fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
         ));
     }
     let mut result = Vec::new();
-    for b in bands.iter().flatten() {
-        result.extend(patches(b, tol)?);
+    for cells in &bands {
+        let mut exposed = vec![[true; 4]; cells.len()];
+        for i in 0..cells.len() {
+            for j in i + 1..cells.len() {
+                if let Some((a, b)) = neighbors(&cells[i], &cells[j], tol) {
+                    exposed[i][a] = false;
+                    exposed[j][b] = false;
+                }
+            }
+        }
+        for (i, b) in cells.iter().enumerate() {
+            result.extend(selected_patches(b, exposed[i], tol)?);
+        }
     }
     for i in 0..xs.len() {
         let left = if i > 0 { bands[i - 1].as_slice() } else { &[] };
@@ -497,6 +641,208 @@ mod tests {
             ));
         }
         assert_eq!(crate::neutral::write_body(&base), original);
+    }
+    #[test]
+    fn near_distinct_graphs_and_interior_contacts_are_not_merged() {
+        let line = Graph::Line { m: 0., b: 0. };
+        assert_eq!(
+            ordered_graphs(vec![line, line], 0., 1., 1e-6)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            ordered_graphs(vec![line, Graph::Line { m: 0., b: 5e-7 }], 0., 1., 1e-6),
+            Err(KernelError::Unsupported(_))
+        ));
+        let arc = Graph::Circle {
+            cx: 0.,
+            cv: 0.,
+            r: 1.,
+            branch: 1.,
+        };
+        // Both endpoints lie below this line, but the circle rises above it
+        // in the interior. Endpoint ordering alone would miss both crossings.
+        let tilted = Graph::Line { m: 0.1, b: 0.95 };
+        assert!(!below(arc, tilted, -0.5, 0.5, 0.));
+        assert!(matches!(
+            ordered_graphs(vec![arc, tilted], -0.5, 0.5, 1e-6),
+            Err(KernelError::Unsupported(_))
+        ));
+    }
+    #[test]
+    fn corner_cut_and_curved_blind_pockets_match_independent_integrals() {
+        let integral = |f: &dyn Fn(f64) -> f64, lo: f64, hi: f64| {
+            let n = 4096;
+            let h = (hi - lo) / n as f64;
+            let mut sum = f(lo) + f(hi);
+            for i in 1..n {
+                sum += if i % 2 == 0 { 2. } else { 4. } * f(lo + h * i as f64);
+            }
+            sum * h / 3.
+        };
+        let corner_removed = integral(&|t| 0.125 * t.cos().powi(2), -PI / 2., -PI / 6.)
+            + integral(
+                &|t| {
+                    let y = 1.5 + 0.25 * t.sin();
+                    2. * (0.25 - (y - 1.75).powi(2)).sqrt()
+                        * ((0.25 - (y - 1.5).powi(2)).sqrt() - 0.25 * t.cos())
+                        * 0.25
+                        * t.cos()
+                },
+                0.,
+                PI / 2.,
+            )
+            + integral(
+                &|t| {
+                    let y = 1.5 + 0.5 * t.sin();
+                    0.5 * (0.25 - (y - 1.75).powi(2)).sqrt() * t.cos().powi(2)
+                },
+                PI / 6.,
+                PI / 2.,
+            );
+        let pipe_removed = integral(
+            &|t| 0.5 * t.cos().powi(2) * ((4. - 0.25 * t.sin().powi(2)).sqrt() - 1.9),
+            -PI / 2.,
+            PI / 2.,
+        );
+        let beam_expected = (155.58846611769187 + reference_volume()) * 0.5;
+        for (name, base, tool, expected, genus) in [
+            (
+                "corner",
+                survey("rect_tube_hole_over_corner", "base"),
+                survey("rect_tube_hole_over_corner", "step01"),
+                72. + 4.5 * PI - corner_removed,
+                2.,
+            ),
+            (
+                "pipe pocket",
+                survey("pipe_hole_one_wall", "base"),
+                placed(&survey("pipe_hole_one_wall", "step01"), 1., p(0.9, 0., 0.)),
+                22.5 * PI - pipe_removed,
+                1.,
+            ),
+            (
+                "beam pocket",
+                fixture("base"),
+                placed(&fixture("step01"), 1., p(0., 0., 4.)),
+                beam_expected,
+                0.,
+            ),
+        ] {
+            let result = operation(&base, &tool, 1e-6);
+            let actual = crate::mass::measure(&result, 1e-6).unwrap().volume;
+            eprintln!("{name}: {actual:.14}, independent {expected:.14}");
+            assert!((actual - expected).abs() < 1e-8, "{name}");
+            assert_eq!(
+                crate::topology::check(&result, 1e-6).unwrap().genus(),
+                genus
+            );
+            let frame = frame(&base, &tool).unwrap();
+            let local = transform(&result, |q| frame.local(q));
+            let xs = stations(events(&local), 1e-6).unwrap();
+            let bs: Vec<_> = xs
+                .windows(2)
+                .map(|w| sections(&local, w[0], w[1], 1e-6).unwrap())
+                .collect();
+            for ix in 0..23 {
+                for iy in 0..25 {
+                    for iz in 0..19 {
+                        let (q, stock, in_tool) = if name == "corner" {
+                            let q = p(
+                                1.013 + ix as f64 * 0.047,
+                                1.21931 + iy as f64 * 0.04077,
+                                11.413 + iz as f64 * 0.061,
+                            );
+                            let d = (q.x.abs() - 1.5).max(0.).powi(2)
+                                + (q.y.abs() - 1.5).max(0.).powi(2);
+                            (
+                                q,
+                                d > 0.0625 && d < 0.25,
+                                q.x > 1.5 && (q.y - 1.75).powi(2) + (q.z - 12.).powi(2) < 0.25,
+                            )
+                        } else if name == "pipe pocket" {
+                            let q = p(
+                                1.613 + ix as f64 * 0.023,
+                                -0.613 + iy as f64 * 0.051,
+                                11.413 + iz as f64 * 0.061,
+                            );
+                            let r2 = q.x * q.x + q.y * q.y;
+                            (
+                                q,
+                                r2 > 1.75_f64.powi(2) && r2 < 4.,
+                                q.x > 1.9 && q.y * q.y + (q.z - 12.).powi(2) < 0.25,
+                            )
+                        } else {
+                            let q = p(
+                                0.313 + ix as f64 * 0.041,
+                                4.413 + iy as f64 * 0.051,
+                                -2.713 + iz as f64 * 0.081,
+                            );
+                            let (z0, z1) = if q.x < 0.74 {
+                                let root = (0.25 - (q.x - 0.74).powi(2)).sqrt();
+                                (-2.615 + root, -1.385 - root)
+                            } else {
+                                (-2.115, -1.885)
+                            };
+                            (
+                                q,
+                                q.z > z0 && q.z < z1,
+                                q.z > -2. && (q.x - 0.74).powi(2) + (q.y - 5.).powi(2) < 0.16,
+                            )
+                        };
+                        let l = frame.local(q);
+                        let actual_inside = xs
+                            .windows(2)
+                            .position(|w| l.x > w[0] && l.x < w[1])
+                            .is_some_and(|i| {
+                                bs[i].iter().any(|b| Rect::at(b, l.x).contains(l.y, l.z))
+                            });
+                        assert_eq!(actual_inside, stock && !in_tool, "{name} probe {q:?}");
+                    }
+                }
+            }
+            let offset = if name == "beam pocket" {
+                p(0., 10., 0.)
+            } else {
+                p(0., 0., 6.)
+            };
+            let again = operation(&result, &placed(&tool, 1., offset), 1e-6);
+            let original = if name == "corner" {
+                72. + 4.5 * PI
+            } else if name == "pipe pocket" {
+                22.5 * PI
+            } else {
+                155.58846611769187
+            };
+            assert!(
+                (crate::mass::measure(&again, 1e-6).unwrap().volume - (2. * expected - original))
+                    .abs()
+                    < 1e-8
+            );
+            for (scale, turns) in [(0.1_f64, 0), (1., 1), (25.4, 2)] {
+                let map = |q: Vec3| {
+                    let a = xyz(q);
+                    p(a[turns], a[(turns + 1) % 3], a[(turns + 2) % 3])
+                };
+                let offset = p(1e5, -1e5, 1e5);
+                let placed_result = operation(
+                    &placed(&transform(&base, map), scale, offset),
+                    &placed(&transform(&tool, map), scale, offset),
+                    scale * 1e-6,
+                );
+                assert!(
+                    (crate::mass::measure(&placed_result, scale * 1e-6)
+                        .unwrap()
+                        .volume
+                        / scale.powi(3)
+                        - expected)
+                        .abs()
+                        < 1e-6,
+                    "{name} scale {scale}"
+                );
+            }
+        }
     }
     #[test]
     fn twenty_one_pipe_holes_replay_without_losing_prior_openings() {
@@ -707,14 +1053,9 @@ mod tests {
             cap.sense = !cap.sense;
             assert!(crate::boolean::cut(&bad, &tool, 1e-6).is_err());
         }
-        let case = "rect_tube_hole_over_corner";
-        assert!(matches!(
-            crate::boolean::cut(&survey(case, "base"), &survey(case, "step01"), 1e-6),
-            Err(KernelError::Unsupported(_))
-        ));
         let base = survey("pipe_hole_one_wall", "base");
         let original = crate::neutral::write_body(&base);
-        let blind = placed(&survey("pipe_hole_one_wall", "step01"), 1., p(0.9, 0., 0.));
+        let blind = placed(&survey("pipe_hole_one_wall", "step01"), 1., p(0.7, 0., 0.));
         assert!(matches!(
             crate::boolean::cut(&base, &blind, 1e-6),
             Err(KernelError::Unsupported(_))
@@ -746,12 +1087,8 @@ mod tests {
         for x in xs.windows(2) {
             let b = sections(&body, x[0], x[1], 1e-6).unwrap();
             let t = sections(&tool, x[0], x[1], 1e-6).unwrap();
-            for b in &b {
-                for t in &t {
-                    let cut = subtract_interval(b.clone(), t, 1e-6).unwrap();
-                    split += usize::from(cut.len() == 2);
-                }
-            }
+            let cut = subtract_sections(&b, &t, x[0], x[1], 1e-6, &mut 0).unwrap();
+            split += usize::from(cut.len() > b.len());
             bs.push(b);
             ts.push(t);
         }
@@ -1122,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn singular_blind_and_malformed_crossing_cuts_leave_inputs_untouched() {
+    fn singular_and_malformed_crossing_cuts_leave_inputs_untouched() {
         let base = fixture("base");
         let original = crate::neutral::write_body(&base);
         // A concentric radius equal to the root fillet meets a branch singularity.
@@ -1146,11 +1483,6 @@ mod tests {
         .unwrap();
         assert!(matches!(
             crate::boolean::cut(&base, &tangent, 1e-6),
-            Err(KernelError::Unsupported(_))
-        ));
-        let blind = placed(&fixture("step01"), 1., p(0., 0., 4.));
-        assert!(matches!(
-            crate::boolean::cut(&base, &blind, 1e-6),
             Err(KernelError::Unsupported(_))
         ));
         let mut malformed = operation(&base, &fixture("step01"), 1e-6);

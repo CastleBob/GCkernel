@@ -42,8 +42,8 @@ The result preserves the box and adds circular inner cap boundaries and an
 inward-facing cylindrical wall with its seam counted twice. It retains analytic
 circles/cylinder rather than a polygonal approximation. Supported axes are X/Y/Z.
 The original plain-box admission remains. Other closed inputs use the local
-planar passage or transverse intersection domains below. Blind round pockets
-and cuts outside those explicit domains remain unsupported.
+planar passage or transverse intersection domains below. Round blind pockets on
+a plain box and cuts outside those explicit domains remain unsupported.
 
 ### Circular passages through planar regions of curved solids
 
@@ -188,20 +188,37 @@ truth or a substitute execution path.
 
 ## Transverse cylinder intersections
 
-`endcut_cross.rs` extends the transverse construction to multiple separated Y
-material intervals per X band. Input sections come from the current oriented
-B-rep. Whole-depth cutters split/remove intervals; positive-area connectivity
-between adjacent bands proves that one material component remains. Existing
-material holes are retained. Input interface coverage, analytic surface checks,
-bounded work and final oriented closed topology are still required.
+`endcut_cross.rs` uses a bounded arrangement of analytic Y/Z coordinates in each
+X band. Input face intervals come from oriented B-rep crossings. Winding in BOTH
+section directions must agree, with each boundary present exactly once. Whole-
+band graph ordering proves that the cell membership remains valid throughout
+that band. Only identical graph representations share a coordinate; distinct
+ones closer than the input tolerance are refused, never shifted together.
+Subtraction keeps stock cells outside the finite cutter. Internal cell faces
+are omitted before constructing boundary curves. Connectivity includes shared
+faces within each band and positive-area overlap between bands. Existing holes
+remain; disconnected output components remain unsupported. Input interface
+coverage, analytic surface checks and closed oriented topology are required.
+
+The graph ordering bound checks all candidate extrema of a difference of two
+line/circle graphs. Equating their derivatives gives a closed-form critical point
+for line/circle and two linear candidate equations for circle/circle. An interior
+crossing or tangency without a partition event is refused; zero width at a band
+endpoint is admitted only when the interior is strictly positive. A collapsed
+void interval meeting an exterior X boundary is refused as nonmanifold contact.
+The arrangement has at most 129 coordinates per direction, 4096 grid entries,
+128 retained cells per band and two million charged arrangement operations per
+cut, alongside the existing global patch/assembly limits.
 
 Validated round/capsule tools whose finite clearance corridor meets a
 perpendicular cylindrical patch enter this domain before a cut runs. Bodies
 already containing cylinder-pair edges also enter it. Inconclusive classification
 may reject an otherwise feasible cut; a failed operation never invokes another
 solver. Supports cardinal perpendicular cylinder axes, provable rectangular
-sections and positive intersection discriminants throughout each edge. Tangent
-branches, blind curved cuts, unresolved crossings within a band and multiple
+sections and positive intersection discriminants throughout each edge. Finite
+cut caps can lie inside the material when the complete cell arrangement is
+proved: this admits the surveyed tube-corner cut and bounded pipe/I-beam blind
+pockets. Tangent branches, unresolved crossings within a band and multiple
 result solids remain unsupported. At most 128 intervals per band and 4096 total
 intervals are permitted, alongside the existing transverse work limits.
 
@@ -212,9 +229,8 @@ are two possible parameter charts for each intersection edge. Construction
 chooses a chart whose discriminant stays positive over the entire trim, so a
 large hole can cross the vertical end of a smaller fillet without a singular
 parameterization. If neither chart is smooth, the cut remains unsupported.
-This is an analytic coordinate choice before edge construction.
-There
-is no polygonal geometry substitution. Their mass integrals are numerical
+This is an analytic coordinate choice before edge construction. There is no
+polygonal geometry substitution. Their mass integrals are numerical
 quadrature, explicitly distinguished from the closed-form plane/conic cases.
 The GCmaker display adapter separately owns tolerance-bounded spline conversion.
 
@@ -229,6 +245,13 @@ Annular caps and separated tube walls use oriented boundary crossings to
 identify each face interval. Material sections may be separated in Y or Z;
 concentric circular graphs have analytic ordering bounds across each X band.
 This admits one-wall and both-wall pipe holes and pipe capsule slots whose
-finite tool spans each intersected wall completely. Partial-depth wall cuts
-remain unsupported. Independent pipe wall integrals, material probes, protocol
+finite tool and all supporting section graphs can be ordered over each band.
+Partial wall depth with unresolved crossings still refuses. Independent pipe
+wall integrals, material probes, protocol
 replay, six frames and far-translated/scaled cases verify this domain.
+
+The tube-corner cut and two curved blind pockets are also checked against
+independent piecewise dimension integrals, 10,925 material probes per case,
+repeat replay, three axis placements and scales at 1e5 translation. The previous
+outer-edge tangent refusal stays a regression. A 21-hole pipe sequence checks
+all preceding openings via genus and accumulated volume at every protocol step.
