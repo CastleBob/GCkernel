@@ -14,6 +14,9 @@ fn boundary_volume(body: &Body) -> f64 {
                 for (i, forward) in face.loops.iter().flatten() {
                     let curve = &body.edges[*i].curve;
                     let integral = match *curve {
+                        Curve::CylinderPair { .. } => {
+                            panic!("this independent prism integral excludes cylinder pairs")
+                        }
                         Curve::Conic { c, u, v, t0, t1 } => c
                             .cross(curve.end().sub(curve.start()))
                             .add(u.cross(v).scale(t1 - t0)),

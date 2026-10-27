@@ -228,6 +228,17 @@ pub(super) fn cut(body: &Body, tool: &Body, tolerance: f64) -> Result<Body> {
     let axis = cutter.axis;
     let center = xyz(cutter.center);
     let radius = cutter.radius;
+    if super::endcut::crosses_cylinder(
+        body,
+        axis,
+        cutter.center,
+        radius,
+        cutter.low,
+        cutter.high,
+        tolerance,
+    ) {
+        return super::endcut::cross_cut(body, tool, tolerance);
+    }
     // Admission is selected by the operand representation before execution.
     // A failed box admission never retries against the general passage checker.
     let (low, high, bottom_face, top_face) =
@@ -332,7 +343,7 @@ mod tests {
                         for (index, forward) in lp {
                             let travel = if *forward { 1. } else { -1. };
                             match body.edges[*index].curve {
-                                Curve::Conic { .. } => {
+                                Curve::Conic { .. } | Curve::CylinderPair { .. } => {
                                     panic!("round-bore fixture unexpectedly contains a conic")
                                 }
                                 Curve::Line { a, b } => {

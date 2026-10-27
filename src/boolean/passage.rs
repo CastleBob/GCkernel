@@ -37,7 +37,7 @@ fn sign(forward: bool) -> f64 {
 
 fn harmonic(curve: &Curve) -> Option<(Vec3, Vec3, Vec3, f64, f64)> {
     match *curve {
-        Curve::Line { .. } => None,
+        Curve::Line { .. } | Curve::CylinderPair { .. } => None,
         Curve::Arc { c, n, x, r, t0, t1 } => Some((c, x.scale(r), n.cross(x).scale(r), t0, t1)),
         Curve::Conic { c, u, v, t0, t1 } => Some((c, u, v, t0, t1)),
     }
@@ -51,7 +51,7 @@ fn parameters(base: f64, lo: f64, hi: f64) -> Vec<f64> {
         .collect()
 }
 
-fn curve_bounds(curve: &Curve) -> ([f64; 3], [f64; 3]) {
+pub(super) fn curve_bounds(curve: &Curve) -> ([f64; 3], [f64; 3]) {
     let mut points = vec![curve.start(), curve.end()];
     if let Some((c, u, v, t0, t1)) = harmonic(curve) {
         let a = xyz(u);
@@ -78,6 +78,7 @@ fn curve_bounds(curve: &Curve) -> ([f64; 3], [f64; 3]) {
 
 fn distance(curve: &Curve, q: Vec3) -> f64 {
     match *curve {
+        Curve::CylinderPair { .. } => unreachable!("pair edges are refused by passage admission"),
         Curve::Conic { .. } => {
             // A lower distance bound is sufficient for clearance admission.
             // An inconclusive box rejects the cut; it never substitutes a curve.
@@ -111,6 +112,9 @@ fn loop_area(body: &Body, lp: &[(usize, bool)], n: Vec3) -> f64 {
         .map(|(i, fwd)| {
             let c = &body.edges[*i].curve;
             let integral = match *c {
+                Curve::CylinderPair { .. } => {
+                    unreachable!("pair edges are refused by passage admission")
+                }
                 Curve::Conic {
                     c: center,
                     u,
@@ -233,6 +237,11 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
     }
     for edge in &body.edges {
         match edge.curve {
+            Curve::CylinderPair { .. } => {
+                return Err(unsupported(
+                    "cylinder-pair trims require transverse admission",
+                ))
+            }
             Curve::Conic { c, u, v, t0, t1 } => {
                 if !c.is_finite()
                     || !u.is_finite()

@@ -1,6 +1,6 @@
 //! Independent boolean operations. Owner: Astra/Codex.
-//! Supported domains are rectilinear solids, clear circular passages in planar
-//! regions of solids, and capsule through-slots in plain axis-aligned boxes. Admission selects one operation before execution;
+//! Supported domains are rectilinear solids, clear planar passages, and bounded
+//! transverse intersections of analytic plane/cylinder solids. Admission selects one operation before execution;
 //! failure never triggers another algorithm.
 mod bore;
 mod capsule;

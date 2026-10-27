@@ -165,10 +165,12 @@ fn fillet_crossing_edge_crossing_blind_and_interacting_bores_remain_explicit() {
         bore(5., 0., 1., -4., 4.),
         bore(5., 10., 1., 0., 4.),
     ] {
-        assert!(matches!(
-            crate::boolean::cut(&ibeam(), &tool, TOL),
-            Err(KernelError::Unsupported(_))
-        ));
+        let result = crate::boolean::cut(&ibeam(), &tool, TOL);
+        assert!(
+            matches!(result, Err(KernelError::Unsupported(_))),
+            "{:?}",
+            result.as_ref().map(|b| b.faces.len())
+        );
     }
     let body = crate::boolean::cut(&ibeam(), &bore(5., 10., 1., -4., 4.), TOL).unwrap();
     for z in [10., 11., 12.] {
@@ -272,6 +274,7 @@ fn permute(body: &Body, shift: usize) -> Body {
                 *u = map(*u);
                 *v = map(*v);
             }
+            Curve::CylinderPair { .. } => panic!("pair edges are outside these passage fixtures"),
             Curve::Line { a, b } => {
                 *a = map(*a);
                 *b = map(*b);

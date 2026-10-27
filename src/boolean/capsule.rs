@@ -38,13 +38,8 @@ fn near(a: Vec3, b: Vec3, tol: f64) -> bool {
     a.distance(b) <= tol
 }
 fn middle(c: &Curve) -> Vec3 {
-    match c {
-        Curve::Conic { c, u, v, t0, t1 } => Curve::conic_point(*c, *u, *v, (t0 + t1) * 0.5),
-        Curve::Line { a, b } => a.add(b.sub(*a).scale(0.5)),
-        Curve::Arc { c, n, x, r, t0, t1 } => {
-            Curve::point_at_angle(*c, *n, *x, *r, t0 + (t1 - t0) * 0.5)
-        }
-    }
+    let (lo, hi) = c.domain();
+    c.eval((lo + hi) * 0.5).0
 }
 fn same_curve(a: &Curve, b: &Curve, tol: f64) -> bool {
     if !near(a.start(), b.start(), tol)
@@ -376,6 +371,17 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     let admitted = admit(tool, tol)?;
     let axis = admitted.axis;
     let n = admitted.n;
+    if super::endcut::crosses_cylinder(
+        body,
+        axis,
+        admitted.enclosing_center,
+        admitted.enclosing_radius,
+        admitted.low,
+        admitted.high,
+        tol,
+    ) {
+        return super::endcut::cross_cut(body, tool, tol);
+    }
     if !(body.vertices.len() == 8 && body.edges.len() == 12 && body.faces.len() == 6) {
         let (low, high, bottom_face, top_face) = super::passage::round_passage(
             body,
@@ -413,7 +419,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     // vertices. A semicircle can leave the box between its endpoints.
     for curve in &hole {
         let (minimum, maximum) = match curve {
-            Curve::Conic { .. } => {
+            Curve::Conic { .. } | Curve::CylinderPair { .. } => {
                 return Err(unsupported("capsule cutters require circular end arcs"))
             }
             Curve::Line { a, b } => {

@@ -8,6 +8,9 @@ use crate::neutral::{Body, Edge, Face};
 use crate::KernelError;
 use std::f64::consts::{PI, TAU};
 
+#[path = "endcut_cross.rs"]
+mod cross;
+
 type Result<T> = std::result::Result<T, KernelError>;
 fn unsupported(s: &str) -> KernelError {
     KernelError::Unsupported(s.into())
@@ -29,23 +32,34 @@ fn sign(b: bool) -> f64 {
     }
 }
 fn eval(c: &Curve, t: f64) -> Vec3 {
-    match *c {
-        Curve::Line { a, b } => a.add(b.sub(a).scale(t)),
-        Curve::Arc { c, n, x, r, .. } => Curve::point_at_angle(c, n, x, r, t),
-        Curve::Conic { c, u, v, .. } => Curve::conic_point(c, u, v, t),
-    }
+    c.eval(t).0
 }
 fn domain(c: &Curve) -> (f64, f64) {
-    match *c {
-        Curve::Line { .. } => (0., 1.),
-        Curve::Arc { t0, t1, .. } | Curve::Conic { t0, t1, .. } => (t0, t1),
-    }
+    c.domain()
 }
 fn conic(c: &Curve) -> Option<(Vec3, Vec3, Vec3, f64, f64)> {
     match *c {
-        Curve::Line { .. } => None,
+        Curve::Line { .. } | Curve::CylinderPair { .. } => None,
         Curve::Arc { c, n, x, r, t0, t1 } => Some((c, x.scale(r), n.cross(x).scale(r), t0, t1)),
         Curve::Conic { c, u, v, t0, t1 } => Some((c, u, v, t0, t1)),
+    }
+}
+// Only the X coordinate is used for partition intersections. For admitted
+// cylinder pairs a.x=0, so the axial root cannot change X.
+fn section_projection(curve: &Curve) -> Option<(Vec3, Vec3, Vec3, f64, f64)> {
+    if let Curve::CylinderPair {
+        c,
+        a,
+        x,
+        rho,
+        t0,
+        t1,
+        ..
+    } = *curve
+    {
+        Some((c, x.scale(rho), a.cross(x).scale(rho), t0, t1))
+    } else {
+        conic(curve)
     }
 }
 fn parameters(t: f64, lo: f64, hi: f64) -> Vec<f64> {
@@ -65,7 +79,7 @@ fn roots(c: &Curve, x: f64, tol: f64) -> Vec<Vec3> {
             vec![eval(c, ((x - a.x) / (b.x - a.x)).clamp(0., 1.))]
         }
         _ => {
-            let (center, u, v, t0, t1) = conic(c).unwrap();
+            let (center, u, v, t0, t1) = section_projection(c).unwrap();
             let amplitude = u.x.hypot(v.x);
             if amplitude <= 1e-14 {
                 return vec![];
@@ -160,7 +174,7 @@ fn stations(mut values: Vec<f64>, tol: f64) -> Result<Vec<f64>> {
 fn events(body: &Body) -> Vec<f64> {
     let mut values: Vec<f64> = body.vertices.iter().map(|p| p.x).collect();
     for edge in &body.edges {
-        if let Some((_, u, v, t0, t1)) = conic(&edge.curve) {
+        if let Some((_, u, v, t0, t1)) = section_projection(&edge.curve) {
             let phase = v.x.atan2(u.x);
             for angle in [phase, phase + PI] {
                 for t in parameters(angle, t0, t1) {
@@ -193,6 +207,58 @@ fn validate(body: &Body, tol: f64) -> Result<()> {
     for e in &body.edges {
         if !e.curve.start().is_finite() || !e.curve.end().is_finite() {
             return Err(invalid("nonfinite end-cut curve"));
+        }
+        if let Curve::CylinderPair {
+            c,
+            a,
+            x,
+            rho,
+            p: host,
+            b,
+            r,
+            branch,
+            t0,
+            t1,
+        } = e.curve
+        {
+            let unit = |v: Vec3| v.is_finite() && (v.length() - 1.).abs() < 1e-10;
+            if !c.is_finite()
+                || !host.is_finite()
+                || !unit(a)
+                || !unit(x)
+                || !unit(b)
+                || a.dot(x).abs() > 1e-10
+                || !rho.is_finite()
+                || rho <= tol
+                || !r.is_finite()
+                || r <= tol
+                || branch.abs() != 1.
+                || !t0.is_finite()
+                || !t1.is_finite()
+                || t1 <= t0
+                || t1 - t0 > TAU + 1e-12
+                || t0.abs() > 1e5
+                || t1.abs() > 1e5
+            {
+                return Err(invalid("invalid cylinder-pair trim frame"));
+            }
+            if a.x != 0.
+                || a.y != 0.
+                || a.z.abs() != 1.
+                || b.x != 0.
+                || b.z != 0.
+                || b.y.abs() != 1.
+            {
+                return Err(unsupported(
+                    "transverse cylinder-pair trim axes must match the section frame",
+                ));
+            }
+            let k = crate::geom::pair_disc_coefficients(c, a, x, rho, host, b, r);
+            if crate::geom::pair_disc_lower_bound(&k, t0, t1, 4096) <= tol * tol {
+                return Err(unsupported(
+                    "cylinder-pair trim approaches a tangency or branch singularity",
+                ));
+            }
         }
         if let Some((c, u, v, t0, t1)) = conic(&e.curve) {
             if !c.is_finite()
@@ -227,6 +293,31 @@ fn validate(body: &Body, tol: f64) -> Result<()> {
         }
         for (i, _) in face.loops.iter().flatten() {
             let c = &body.edges[*i].curve;
+            if let Curve::CylinderPair {
+                c: cp,
+                a: ca,
+                rho,
+                p: hp,
+                b: ha,
+                r: hr,
+                ..
+            } = *c
+            {
+                let Surface::Cylinder { p, a, r, .. } = face.surface else {
+                    return Err(unsupported(
+                        "cylinder-pair trim must belong to its two supporting cylinders",
+                    ));
+                };
+                let same = |q: Vec3, d: Vec3, radius: f64| {
+                    a.cross(d).length() < 1e-10
+                        && p.sub(q).cross(a).length() <= tol
+                        && (r - radius).abs() <= tol
+                };
+                if !same(cp, ca, rho) && !same(hp, ha, hr) {
+                    return Err(invalid("cylinder-pair trim is off its supporting surface"));
+                }
+                continue;
+            }
             match face.surface {
                 Surface::Plane { p, n, .. } => {
                     let miss = if let Some((center, u, v, _, _)) = conic(c) {
@@ -502,7 +593,7 @@ fn reversed(boundary: Vec<Curve>) -> Vec<Curve> {
     boundary.into_iter().rev().map(|c| c.reversed()).collect()
 }
 
-fn lifted(lo: f64, hi: f64, y: Graph, z: Graph) -> Result<Curve> {
+fn lifted(lo: f64, hi: f64, y: Graph, z: Graph, tol: f64) -> Result<Curve> {
     let (center, u, v, cx, r, slope) = match (y, z) {
         (Graph::Line { .. }, Graph::Line { .. }) => {
             return Ok(segment(
@@ -526,10 +617,55 @@ fn lifted(lo: f64, hi: f64, y: Graph, z: Graph) -> Result<Curve> {
             r,
             m,
         ),
-        _ => {
-            return Err(unsupported(
-                "cylinder/cylinder trim needs a new curve representation",
-            ))
+        (
+            Graph::Circle {
+                cx,
+                cv,
+                r: rho,
+                branch: yb,
+            },
+            Graph::Circle {
+                cx: zx,
+                cv: zc,
+                r,
+                branch: zb,
+            },
+        ) => {
+            let curve = Curve::CylinderPair {
+                // Choose the cutter axis anchor near this actual intersection,
+                // rather than an arbitrary world-zero height.
+                c: p(cx, cv, zc),
+                a: p(0., 0., yb),
+                x: p(1., 0., 0.),
+                rho,
+                p: p(zx, 0., zc),
+                b: p(0., 1., 0.),
+                r,
+                branch: yb * zb,
+                t0: ((hi - cx) / rho).clamp(-1., 1.).acos(),
+                t1: ((lo - cx) / rho).clamp(-1., 1.).acos(),
+            };
+            if let Curve::CylinderPair {
+                c,
+                a,
+                x,
+                rho,
+                p,
+                b,
+                r,
+                t0,
+                t1,
+                ..
+            } = curve
+            {
+                let k = crate::geom::pair_disc_coefficients(c, a, x, rho, p, b, r);
+                if crate::geom::pair_disc_lower_bound(&k, t0, t1, 4096) <= tol * tol {
+                    return Err(unsupported(
+                        "cylinder intersection meets an unsupported tangent or branch singularity",
+                    ));
+                }
+            }
+            return Ok(curve.reversed());
         }
     };
     let t0 = ((hi - cx) / r).clamp(-1., 1.).acos();
@@ -584,17 +720,17 @@ fn surface(graph: Graph, is_z: bool, positive: bool) -> Result<(Surface, bool)> 
         }
     }
 }
-fn patches(b: &Band) -> Result<Vec<Patch>> {
+fn patches(b: &Band, tol: f64) -> Result<Vec<Patch>> {
     let mut result = Vec::new();
     let (lo, hi) = (b.lo, b.hi);
     for (zg, positive) in [(b.z0, false), (b.z1, true)] {
         let boundary = vec![
-            lifted(lo, hi, b.y0, zg)?,
+            lifted(lo, hi, b.y0, zg, tol)?,
             segment(
                 p(hi, b.y0.value(hi), zg.value(hi)),
                 p(hi, b.y1.value(hi), zg.value(hi)),
             ),
-            lifted(lo, hi, b.y1, zg)?.reversed(),
+            lifted(lo, hi, b.y1, zg, tol)?.reversed(),
             segment(
                 p(lo, b.y1.value(lo), zg.value(lo)),
                 p(lo, b.y0.value(lo), zg.value(lo)),
@@ -613,12 +749,12 @@ fn patches(b: &Band) -> Result<Vec<Patch>> {
     }
     for (yg, positive) in [(b.y0, false), (b.y1, true)] {
         let boundary = vec![
-            lifted(lo, hi, yg, b.z0)?,
+            lifted(lo, hi, yg, b.z0, tol)?,
             segment(
                 p(hi, yg.value(hi), b.z0.value(hi)),
                 p(hi, yg.value(hi), b.z1.value(hi)),
             ),
-            lifted(lo, hi, yg, b.z1)?.reversed(),
+            lifted(lo, hi, yg, b.z1, tol)?.reversed(),
             segment(
                 p(lo, yg.value(lo), b.z1.value(lo)),
                 p(lo, yg.value(lo), b.z0.value(lo)),
@@ -657,12 +793,12 @@ impl Rect {
         y > self.y0 && y < self.y1 && z > self.z0 && z < self.z1
     }
 }
-fn end_patches(left: Option<&Band>, right: Option<&Band>, x: f64, tol: f64) -> Result<Vec<Patch>> {
-    let left = left.map(|b| Rect::at(b, x));
-    let right = right.map(|b| Rect::at(b, x));
+fn end_patches(left: &[Band], right: &[Band], x: f64, tol: f64) -> Result<Vec<Patch>> {
+    let left: Vec<_> = left.iter().map(|b| Rect::at(b, x)).collect();
+    let right: Vec<_> = right.iter().map(|b| Rect::at(b, x)).collect();
     let mut ys = Vec::new();
     let mut zs = Vec::new();
-    for r in [left, right].into_iter().flatten() {
+    for r in left.iter().chain(&right) {
         ys.extend([r.y0, r.y1]);
         zs.extend([r.z0, r.z1]);
     }
@@ -673,8 +809,8 @@ fn end_patches(left: Option<&Band>, right: Option<&Band>, x: f64, tol: f64) -> R
         for z in zs.windows(2) {
             let midy = (y[0] + y[1]) * 0.5;
             let midz = (z[0] + z[1]) * 0.5;
-            let l = left.is_some_and(|r| r.contains(midy, midz));
-            let r = right.is_some_and(|r| r.contains(midy, midz));
+            let l = left.iter().any(|r| r.contains(midy, midz));
+            let r = right.iter().any(|r| r.contains(midy, midz));
             if l == r {
                 continue;
             }
@@ -702,7 +838,7 @@ fn end_patches(left: Option<&Band>, right: Option<&Band>, x: f64, tol: f64) -> R
 /// Verify the faces parallel to the partition planes too: their oriented
 /// coverage must equal the difference of the adjoining material rectangles.
 /// Cross-section sampling alone would otherwise miss duplicate/internal caps.
-fn verify_interfaces(body: &Body, xs: &[f64], bands: &[Option<Band>], tol: f64) -> Result<()> {
+fn verify_interfaces(body: &Body, xs: &[f64], bands: &[Vec<Band>], tol: f64) -> Result<()> {
     for face in &body.faces {
         if matches!(face.surface,Surface::Plane {n,..} if n.y==0.&&n.z==0.) {
             continue;
@@ -779,15 +915,17 @@ fn verify_interfaces(body: &Body, xs: &[f64], bands: &[Option<Band>], tol: f64) 
     }
     let mut work = 0usize;
     for (i, x) in xs.iter().enumerate() {
-        let left = if i > 0 {
-            bands[i - 1].as_ref().map(|b| Rect::at(b, *x))
+        let left: Vec<_> = if i > 0 {
+            bands[i - 1].iter().map(|b| Rect::at(b, *x)).collect()
         } else {
-            None
+            Vec::new()
         };
-        let right = bands
+        let right: Vec<_> = bands
             .get(i)
-            .and_then(Option::as_ref)
-            .map(|b| Rect::at(b, *x));
+            .into_iter()
+            .flatten()
+            .map(|b| Rect::at(b, *x))
+            .collect();
         let patches: Vec<(Rect, i32)> = faces
             .iter()
             .filter(|(station, _, _)| *station == i)
@@ -795,9 +933,10 @@ fn verify_interfaces(body: &Body, xs: &[f64], bands: &[Option<Band>], tol: f64) 
             .collect();
         let mut ys = Vec::new();
         let mut zs = Vec::new();
-        for r in [left, right]
-            .into_iter()
-            .flatten()
+        for r in left
+            .iter()
+            .chain(&right)
+            .copied()
             .chain(patches.iter().map(|(r, _)| *r))
         {
             ys.extend([r.y0, r.y1]);
@@ -815,8 +954,8 @@ fn verify_interfaces(body: &Body, xs: &[f64], bands: &[Option<Band>], tol: f64) 
                 }
                 let my = (y[0] + y[1]) * 0.5;
                 let mz = (z[0] + z[1]) * 0.5;
-                let expected = left.is_some_and(|r| r.contains(my, mz)) as i32
-                    - right.is_some_and(|r| r.contains(my, mz)) as i32;
+                let expected = left.iter().any(|r| r.contains(my, mz)) as i32
+                    - right.iter().any(|r| r.contains(my, mz)) as i32;
                 let actual: Vec<i32> = patches
                     .iter()
                     .filter_map(|(r, s)| r.contains(my, mz).then_some(*s))
@@ -851,6 +990,14 @@ fn parameter(curve: &Curve, q: Vec3, tol: f64) -> Option<f64> {
             (t >= -1e-12 && t <= 1. + 1e-12 && q.distance(eval(curve, t.clamp(0., 1.))) <= tol)
                 .then_some(t.clamp(0., 1.))
         }
+        Curve::CylinderPair {
+            c, a, x, t0, t1, ..
+        } => {
+            let d = q.sub(c);
+            parameters(d.dot(a.cross(x)).atan2(d.dot(x)), t0, t1)
+                .into_iter()
+                .find(|t| eval(curve, *t).distance(q) <= tol)
+        }
         _ => {
             let (c, u, v, t0, t1) = conic(curve).unwrap();
             let d = q.sub(c);
@@ -871,6 +1018,28 @@ fn slice(curve: &Curve, t0: f64, t1: f64) -> Curve {
         Curve::Line { .. } => segment(eval(curve, t0), eval(curve, t1)),
         Curve::Arc { c, n, x, r, .. } => Curve::Arc { c, n, x, r, t0, t1 },
         Curve::Conic { c, u, v, .. } => Curve::Conic { c, u, v, t0, t1 },
+        Curve::CylinderPair {
+            c,
+            a,
+            x,
+            rho,
+            p,
+            b,
+            r,
+            branch,
+            ..
+        } => Curve::CylinderPair {
+            c,
+            a,
+            x,
+            rho,
+            p,
+            b,
+            r,
+            branch,
+            t0,
+            t1,
+        },
     }
 }
 fn same_curve(a: &Curve, b: &Curve, reverse: bool, tol: f64) -> bool {
@@ -922,6 +1091,14 @@ fn assemble(patches: Vec<Patch>, tol: f64) -> Result<Body> {
                 .filter_map(|(i, q)| parameter(&curve, *q, tol).map(|t| (t, i)))
                 .collect();
             cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // At a circle extremum a ruled patch can have a collapsed generator.
+            // Its endpoint is already represented by the two adjacent curves.
+            if cuts.len() == 1
+                && matches!(curve, Curve::Line { .. })
+                && curve.start().distance(curve.end()) <= tol
+            {
+                continue;
+            }
             if cuts.len() < 2 {
                 return Err(KernelError::Internal(format!(
                     "end-cut edge lost an endpoint: {curve:?}; matches {cuts:?}"
@@ -1069,6 +1246,13 @@ fn transform(body: &Body, map: impl Fn(Vec3) -> Vec3) -> Body {
                 *u = map(*u);
                 *v = map(*v);
             }
+            Curve::CylinderPair { c, a, x, p, b, .. } => {
+                *c = map(*c);
+                *a = map(*a);
+                *x = map(*x);
+                *p = map(*p);
+                *b = map(*b);
+            }
         }
     }
     for f in &mut result.faces {
@@ -1086,6 +1270,59 @@ fn transform(body: &Body, map: impl Fn(Vec3) -> Vec3) -> Body {
         }
     }
     result
+}
+
+/// Geometric domain selection, before either cut executes. A cutter corridor
+/// overlapping a perpendicular cylindrical patch needs transverse intersections.
+/// No operation error is caught or retried through another algorithm.
+pub(super) fn crosses_cylinder(
+    body: &Body,
+    axis: usize,
+    center: Vec3,
+    radius: f64,
+    low: f64,
+    high: f64,
+    tol: f64,
+) -> bool {
+    if body
+        .edges
+        .iter()
+        .any(|e| matches!(e.curve, Curve::CylinderPair { .. }))
+    {
+        return true;
+    }
+    let center = xyz(center);
+    let mut clo = center.map(|c| c - radius);
+    let mut chi = center.map(|c| c + radius);
+    clo[axis] = low;
+    chi[axis] = high;
+    for face in &body.faces {
+        let Surface::Cylinder { a, .. } = face.surface else {
+            continue;
+        };
+        if xyz(a)[axis] != 0. {
+            continue;
+        }
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for (i, _) in face.loops.iter().flatten() {
+            let Some(e) = body.edges.get(*i) else {
+                return true;
+            };
+            let (l, h) = super::passage::curve_bounds(&e.curve);
+            for k in 0..3 {
+                lo[k] = lo[k].min(l[k]);
+                hi[k] = hi[k].max(h[k]);
+            }
+        }
+        if (0..3).all(|k| hi[k] >= clo[k] - tol && lo[k] <= chi[k] + tol) {
+            return true;
+        }
+    }
+    false
+}
+pub(super) fn cross_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    cross::cut(body, tool, tol)
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
@@ -1109,8 +1346,8 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     for pair in xs.windows(2) {
         let b = section(&body, pair[0], pair[1], tol)?;
         let t = section(&tool, pair[0], pair[1], tol)?;
-        original.push(b.clone());
-        tools.push(t.clone());
+        original.push(b.iter().cloned().collect());
+        tools.push(t.iter().cloned().collect());
         bands.push(if let Some(b) = b {
             subtract(b, t, tol)?
         } else {
@@ -1139,7 +1376,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             } else {
                 runs += 1;
             }
-            all_patches.extend(patches(b)?);
+            all_patches.extend(patches(b, tol)?);
             previous = Some(b);
         } else {
             previous = None;
@@ -1151,8 +1388,8 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         ));
     }
     for i in 0..xs.len() {
-        let left = if i > 0 { bands[i - 1].as_ref() } else { None };
-        let right = bands.get(i).and_then(Option::as_ref);
+        let left = if i > 0 { bands[i - 1].as_slice() } else { &[] };
+        let right = bands.get(i).map(Option::as_slice).unwrap_or(&[]);
         all_patches.extend(end_patches(left, right, xs[i], tol)?);
     }
     let result = assemble(all_patches, tol)?;
@@ -1163,13 +1400,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
 mod tests {
     use super::*;
     fn derivative(curve: &Curve, t: f64) -> Vec3 {
-        match *curve {
-            Curve::Line { a, b } => b.sub(a),
-            _ => {
-                let (_, u, v, _, _) = conic(curve).unwrap();
-                u.scale(-t.sin()).add(v.scale(t.cos()))
-            }
-        }
+        curve.eval(t).1
     }
     // Divergence theorem on the RETURNED boundary. Planar Green integrals are
     // exact; cylinder patches use a boundary integral in angle/axial coordinates.
@@ -1455,6 +1686,12 @@ mod tests {
                     *c = c.scale(scale).add(offset);
                     *u = u.scale(scale);
                     *v = v.scale(scale);
+                }
+                Curve::CylinderPair { c, p, rho, r, .. } => {
+                    *c = c.scale(scale).add(offset);
+                    *p = p.scale(scale).add(offset);
+                    *rho *= scale;
+                    *r *= scale;
                 }
             }
         }

@@ -41,9 +41,9 @@ side-wall clearance greater than the supplied tolerance.
 The result preserves the box and adds circular inner cap boundaries and an
 inward-facing cylindrical wall with its seam counted twice. It retains analytic
 circles/cylinder rather than a polygonal approximation. Supported axes are X/Y/Z.
-The original plain-box admission remains. Other closed inputs can use the
-local planar passage domain below. Blind round pockets, side-wall contact/
-crossing and fillet-crossing cuts remain unsupported.
+The original plain-box admission remains. Other closed inputs use the local
+planar passage or transverse intersection domains below. Blind round pockets
+and cuts outside those explicit domains remain unsupported.
 
 ### Circular passages through planar regions of curved solids
 
@@ -90,7 +90,9 @@ is a conservative clearance bound only; the actual original slot curves define
 the cavity. Its inverted side faces and cap loops are spliced into the existing
 body. This supports separated slot/hole sequences and retains existing fillets.
 The enclosing disk can reject a slot that would fit in a narrower region.
-Blind, side-wall touching/crossing and interacting curved cuts remain unsupported.
+Capsules meeting perpendicular cylindrical patches enter the transverse domain
+below before execution; clear passages retain this local splice path. Blind and
+other unsupported interacting cuts are rejected.
 
 ## Admission, errors and representation
 
@@ -160,3 +162,36 @@ construction, circle geometry and the divergence theorem. No third-party kernel
 source was translated or used. OCCT comparison, where performed by the GCmaker
 integration owner, is evidence alongside independent checks, not authoritative
 truth or a substitute execution path.
+
+## Transverse cylinder intersections
+
+`endcut_cross.rs` extends the transverse construction to multiple separated Y
+material intervals per X band. Input sections come from the current oriented
+B-rep. Whole-depth cutters split/remove intervals; positive-area connectivity
+between adjacent bands proves that one material component remains. Existing
+material holes are retained. Input interface coverage, analytic surface checks,
+bounded work and final oriented closed topology are still required.
+
+Validated round/capsule tools whose finite clearance corridor meets a
+perpendicular cylindrical patch enter this domain before a cut runs. Bodies
+already containing cylinder-pair edges also enter it. Inconclusive classification
+may reject an otherwise feasible cut; a failed operation never invokes another
+solver. Supports cardinal perpendicular cylinder axes, provable rectangular
+sections and positive intersection discriminants throughout each edge. Tangent
+branches, blind curved cuts, unresolved crossings within a band and multiple
+result solids remain unsupported. At most 128 intervals per band and 4096 total
+intervals are permitted, alongside the existing transverse work limits.
+
+Cylinder/cylinder edges remain analytic `Curve::CylinderPair` (neutral type 4),
+parameterized on one cylinder with the algebraic axial root on the other.
+Supporting cylinders, branch and angular range survive worker replay. There
+is no polygonal geometry substitution. Their mass integrals are numerical
+quadrature, explicitly distinguished from the closed-form plane/conic cases.
+The GCmaker display adapter separately owns tolerance-bounded spline conversion.
+
+Checks include the actual circle-over-fillet capture, all 315 production probes,
+an independent dimension-based volume integral, repeated separated circles via
+the public protocol, six cardinal frames, and a capsule crossing the root fillet.
+Scaled/translated cases (including offsets of 1e5), nonconcentric circles, and
+rat holes followed by a fillet circle, web slot and bore also pass. Native
+acceptance of the complete new cuts remains separate in the shared handoff.
