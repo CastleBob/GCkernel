@@ -85,8 +85,41 @@ unsupported for slots; capsule cuts still require a plain uncut box as their bas
 
 ## Admission, errors and representation
 
+### Transverse analytic end cuts
+
+A separate bounded domain handles the captured I-beam rat-hole pair, without
+hardcoded I-beam dimensions. In a right-handed cardinal frame, each admitted
+transverse band contains one rectangular material interval bounded by plane or
+cylinder graphs. The input is reconstructed from its CURRENT oriented B-rep;
+it does not regenerate an uncut stock recipe. Whole-depth cutters can remove
+one end interval. The second rat-hole therefore preserves the first cut.
+
+Admission checks every surface against its analytic boundary, the rectangular
+sections between all vertex/extremum stations, and the complete oriented
+coverage of transverse faces. Interval bounds prove cutter coverage across the
+whole band. No input patch may disappear below partition resolution. A finite
+end skin is never silently treated as a flush cut. Coordinate coincidence and
+shared vertices use the declared B-rep tolerance; original supporting surfaces
+remain analytic. Assembly splits shared boundary edges before enforcing closed
+occurrence topology. Coplanar partition seams remain in the result.
+
+Plane/cylinder trims use analytic circular or conic arcs, including genuinely
+oblique planes. Cylinder/cylinder trims, interior transverse pockets/holes,
+multiple material components, and cases without a provable rectangular section
+remain Unsupported in this domain. Circular web holes still use passage
+admission. End cuts currently require a cutter with one cylindrical side wall
+and a base with a perpendicular longitudinal cylinder axis. Limits: 256 stations,
+5,000 faces / 20,000 edges / 20,000 vertices, and explicit recognition/assembly
+work bounds. This is not a general surface-intersection Boolean solver.
+
+Verification includes both GCmaker-captured rat-hole tools in order, type-3
+conic replay, 630 production material probes, all six cardinal frames, scales
+0.1 and 25.4 with translation, input preservation, malformed/unsupported cases,
+and returned-boundary volume against an independent dimension-based formula.
+
 The public entry selects a supported input domain BEFORE execution: tools with
-one cylindrical face enter bore admission, two enter capsule admission, none
+one cylindrical face and the full-circle seam topology enter bore admission;
+other one-cylinder tools enter transverse-end-cut admission; two enter capsule admission, none
 enter rectilinear admission, and other cylinder counts are unsupported.
 An error never triggers another algorithm. A malformed model reports InvalidInput;
 unsupported geometry, resolution or resource requirements report Unsupported.
