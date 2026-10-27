@@ -56,3 +56,21 @@ fn a_non_prism_is_refused() {
     let cut = gc_kernel::boolean::cut(&block, &pocket, TOL).unwrap();
     assert!(matches!(rebuild_prism(&cut, TOL), Err(KernelError::Unsupported(_))));
 }
+
+/// The structural proof, not the measures, catches a bottom edge that is not the top edge moved: one bottom line of a
+/// block replaced by a half circle between the same two points.
+#[test]
+fn a_bottom_edge_that_is_not_the_moved_top_edge_is_refused_by_the_proof() {
+    let z = Vec3::new(0.0, 0.0, 1.0);
+    let rect = vec![line((0.0, 0.0), (10.0, 0.0)), line((10.0, 0.0), (10.0, 8.0)), line((10.0, 8.0), (0.0, 8.0)), line((0.0, 8.0), (0.0, 0.0))];
+    let mut block = extrude(&Profile { loops: vec![rect], n: z, low: 0.0, high: 4.0 }, TOL).unwrap();
+    let bottom = block.edges.iter().position(|e| matches!(e.curve, Curve::Line { a, b } if a.z == 0.0 && b.z == 0.0)).unwrap();
+    let Curve::Line { a, b } = block.edges[bottom].curve else { unreachable!() };
+    let (mid, r) = (a.add(b).scale(0.5), a.distance(b) / 2.0);
+    block.edges[bottom].curve = Curve::Arc { c: mid, n: z, x: a.sub(mid).scale(1.0 / r), r, t0: 0.0, t1: PI };
+    assert!(block.edges[bottom].curve.end().distance(b) < 1e-12);
+    match rebuild_prism(&block, TOL) {
+        Err(KernelError::Unsupported(m)) => assert!(m.contains("bottom edge is not its top edge moved"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
