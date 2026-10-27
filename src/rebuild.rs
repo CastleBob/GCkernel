@@ -19,8 +19,10 @@ const AGREE: f64 = 1e-9;
 
 fn unsupported<T>(m: &str) -> Result<T, KernelError> { Err(KernelError::Unsupported(format!("rebuild: {m}"))) }
 
-/// The rebuilt prism.
+/// The rebuilt prism. The input is checked first (topology and every edge on its faces), whoever calls this:
+/// a malformed body is reported, never rebuilt into a sound one (Astra).
 pub fn rebuild_prism(body: &Body, tolerance: f64) -> Result<Body, KernelError> {
+    crate::topology::check(body, tolerance)?;
     let outward = |i: usize| match body.faces[i].surface {
         Surface::Plane { n, .. } => Some(if body.faces[i].sense { n } else { n.scale(-1.0) }),
         _ => None,

@@ -94,4 +94,6 @@ fn planes_moved_off_their_edges_are_reported_not_rebuilt() {
     assert!(matches!(check(&block, TOL), Err(KernelError::InvalidInput(m)) if m.contains("leaves face")));
     let reply = handle(&parse_request(&encode_request(OP_REBUILD_PRISM, TOL, &write_body(&block))).unwrap());
     assert!(matches!(reply, Err(KernelError::InvalidInput(_))), "{reply:?}");
+    // The Rust function itself, not only the protocol, refuses it.
+    assert!(matches!(rebuild_prism(&block, TOL), Err(KernelError::InvalidInput(m)) if m.contains("leaves face")));
 }
