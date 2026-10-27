@@ -94,6 +94,21 @@ Capsules meeting perpendicular cylindrical patches enter the transverse domain
 below before execution; clear passages retain this local splice path. Blind and
 other unsupported interacting cuts are rejected.
 
+### Rectangular through-tools on curved stock
+
+The cutter must be a verified plain axis-aligned box. Exactly one coordinate
+axis must span the complete stock bounds; a partial-depth or ambiguous sweep
+is rejected. The footprint's enclosing disk selects clear-passage versus
+perpendicular-cylinder intersection admission before execution. A clear passage
+splices the exact rectangular cavity and preserves unrelated geometry; a root
+crossing uses the transverse plane/cylinder construction. No unsupported cut is
+retried. Rotated rectangular tools and locally-through tools that do not span
+the overall stock bounds are outside this bounded admission.
+
+Tests cover repeated web slots, a root-crossing rectangle with independent
+analytic volume, all three coordinate sweep axes, a rectangular slot after a
+type-4 fillet circle through the wire protocol, and blind/ambiguous rejection.
+
 ## Admission, errors and representation
 
 ### Transverse analytic end cuts
@@ -130,8 +145,10 @@ and returned-boundary volume against an independent dimension-based formula.
 
 The public entry selects a supported input domain BEFORE execution: tools with
 one cylindrical face and the full-circle seam topology enter bore admission;
-other one-cylinder tools enter transverse-end-cut admission; two enter capsule admission, none
-enter rectilinear admission, and other cylinder counts are unsupported.
+other one-cylinder tools enter transverse-end-cut admission; two enter capsule
+admission. Zero-cylinder tools on curved stock enter rectangular-through
+admission; otherwise they enter rectilinear admission. Other cylinder counts
+are unsupported.
 An error never triggers another algorithm. A malformed model reports InvalidInput;
 unsupported geometry, resolution or resource requirements report Unsupported.
 The worker catches unexpected faults separately. Validation includes oriented

@@ -1195,6 +1195,9 @@ fn frame(body: &Body, tool: &Body) -> Result<Frame> {
     let w = tool_axis.ok_or_else(|| {
         unsupported("end-cut sweep axis is not specified by a cylindrical tool wall")
     })?;
+    frame_for_axis(body, w)
+}
+fn frame_for_axis(body: &Body, w: usize) -> Result<Frame> {
     let mut beam_axis = None;
     for f in &body.faces {
         if let Surface::Cylinder { a, .. } = f.surface {
@@ -1323,6 +1326,9 @@ pub(super) fn crosses_cylinder(
 }
 pub(super) fn cross_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     cross::cut(body, tool, tol)
+}
+pub(super) fn box_cross_cut(body: &Body, tool: &Body, axis: usize, tol: f64) -> Result<Body> {
+    cross::cut_along(body, tool, axis, tol)
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {

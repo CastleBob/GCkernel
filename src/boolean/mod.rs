@@ -3,6 +3,7 @@
 //! transverse intersections of analytic plane/cylinder solids. Admission selects one operation before execution;
 //! failure never triggers another algorithm.
 mod bore;
+mod box_cut;
 mod capsule;
 mod endcut;
 mod passage;
@@ -19,6 +20,13 @@ pub fn cut(
         .filter(|f| matches!(f.surface, crate::geom::Surface::Cylinder { .. }))
         .count();
     match cylinders {
+        0 if body
+            .faces
+            .iter()
+            .any(|f| matches!(f.surface, crate::geom::Surface::Cylinder { .. })) =>
+        {
+            box_cut::cut(body, tool, tolerance)
+        }
         0 => rectilinear::cut(body, tool, tolerance),
         1 if tool.vertices.len() == 2 && tool.edges.len() == 3 && tool.faces.len() == 3 => {
             bore::cut(body, tool, tolerance)

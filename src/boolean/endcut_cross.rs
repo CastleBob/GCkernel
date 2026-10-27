@@ -189,10 +189,15 @@ fn subtract_interval(body: Band, tool: &Band, tol: f64) -> Result<Vec<Band>> {
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    cut_in_frame(body, tool, tol, frame(body, tool)?)
+}
+pub(super) fn cut_along(body: &Body, tool: &Body, axis: usize, tol: f64) -> Result<Body> {
+    cut_in_frame(body, tool, tol, frame_for_axis(body, axis)?)
+}
+fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
     if !tol.is_finite() || tol <= 0. {
         return Err(invalid("invalid transverse cut tolerance"));
     }
-    let f = frame(body, tool)?;
     // Translate geometry, never directions, to a nearby computation origin.
     // This avoids evaluating tiny circular roofs against world coordinates.
     let origin = body.vertices.first().copied().unwrap_or(p(0., 0., 0.));
