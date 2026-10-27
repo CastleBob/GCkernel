@@ -40,11 +40,30 @@ fn sections(body: &Body, lo: f64, hi: f64, tol: f64) -> Result<Vec<Band>> {
             continue;
         }
         let mut points = Vec::new();
-        for (i, _) in face.loops.iter().flatten() {
-            for q in roots(&body.edges[*i].curve, mid, tol) {
-                if points.iter().all(|p: &Vec3| p.distance(q) > tol) {
-                    points.push(q);
+        for (i, forward) in face.loops.iter().flatten() {
+            let curve = &body.edges[*i].curve;
+            for q in roots(curve, mid, tol) {
+                let t = parameter(curve, q, tol)
+                    .ok_or_else(|| unsupported("cannot locate oriented section crossing"))?;
+                let tangent = curve.eval(t).1.scale(sign(*forward));
+                let normal = match face.surface {
+                    Surface::Plane { n, .. } => n,
+                    Surface::Cylinder { p, a, .. } => {
+                        let d = q.sub(p);
+                        d.sub(a.scale(d.dot(a)))
+                            .unit()
+                            .map_err(|_| invalid("section on cylinder axis"))?
+                    }
                 }
+                .scale(sign(face.sense));
+                let inward = normal.cross(tangent);
+                if points
+                    .iter()
+                    .any(|(p, _): &(Vec3, Vec3)| p.distance(q) <= tol)
+                {
+                    return Err(unsupported("coincident oriented section crossings"));
+                }
+                points.push((q, inward));
             }
         }
         if points.is_empty() {
@@ -57,10 +76,10 @@ fn sections(body: &Body, lo: f64, hi: f64, tol: f64) -> Result<Vec<Band>> {
             Surface::Cylinder { a, .. } if a.z.abs() == 1. => Some(1),
             _ => None,
         };
-        let mut groups: Vec<Vec<Vec3>> = Vec::new();
+        let mut groups: Vec<Vec<(Vec3, Vec3)>> = Vec::new();
         for point in points {
             let found = groups.iter().position(|g| {
-                coordinate.is_none_or(|k| (xyz(g[0])[k] - xyz(point)[k]).abs() <= tol)
+                coordinate.is_none_or(|k| (xyz(g[0].0)[k] - xyz(point.0)[k]).abs() <= tol)
             });
             if let Some(i) = found {
                 groups[i].push(point);
@@ -68,13 +87,28 @@ fn sections(body: &Body, lo: f64, hi: f64, tol: f64) -> Result<Vec<Band>> {
                 groups.push(vec![point]);
             }
         }
-        for group in groups {
-            if group.len() != 2 {
+        for mut group in groups {
+            let span = match face.surface {
+                Surface::Plane { n, .. } if n.y == 0. => 1,
+                Surface::Plane { n, .. } if n.z == 0. => 2,
+                Surface::Cylinder { a, .. } if a.y.abs() == 1. => 1,
+                Surface::Cylinder { a, .. } if a.z.abs() == 1. => 2,
+                _ => return Err(unsupported("section surface has no axial span")),
+            };
+            group.sort_by(|a, b| xyz(a.0)[span].total_cmp(&xyz(b.0)[span]));
+            if group.len() % 2 != 0 {
                 return Err(unsupported(
-                    "transverse section needs one segment per surface branch",
+                    "transverse section has an odd number of oriented boundaries",
                 ));
             }
-            hits.push(hit(face, &group, tol)?);
+            for pair in group.chunks_exact(2) {
+                if xyz(pair[0].1)[span] <= 0. || xyz(pair[1].1)[span] >= 0. {
+                    return Err(invalid(
+                        "transverse face interval orientation is inconsistent",
+                    ));
+                }
+                hits.push(hit(face, &[pair[0].0, pair[1].0], tol)?);
+            }
         }
     }
     if hits.len() > 1024 {
@@ -141,11 +175,18 @@ fn sections(body: &Body, lo: f64, hi: f64, tol: f64) -> Result<Vec<Band>> {
         return Err(invalid("unpaired transverse boundary segments"));
     }
     result.sort_by(|a, b| a.y0.value(mid).total_cmp(&b.y0.value(mid)));
-    for pair in result.windows(2) {
-        if !below(pair[0].y1, pair[1].y0, lo, hi, 0.) {
-            return Err(unsupported(
-                "transverse material intervals must remain separated",
-            ));
+    for i in 0..result.len() {
+        for j in i + 1..result.len() {
+            let (a, b) = (&result[i], &result[j]);
+            if !(below(a.y1, b.y0, lo, hi, 0.)
+                || below(b.y1, a.y0, lo, hi, 0.)
+                || below(a.z1, b.z0, lo, hi, 0.)
+                || below(b.z1, a.z0, lo, hi, 0.))
+            {
+                return Err(unsupported(
+                    "transverse material intervals must remain separated",
+                ));
+            }
         }
     }
     Ok(result)
@@ -338,6 +379,171 @@ fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn survey(case: &str, name: &str) -> Body {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/fixtures/survey/{case}/{name}.f64")),
+        )
+        .unwrap();
+        let values: Vec<_> = bytes
+            .chunks_exact(8)
+            .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        crate::neutral::Reader::new(&values).body().unwrap()
+    }
+    #[test]
+    fn surveyed_pipe_cuts_admit_oriented_annular_sections() {
+        let integrate = |f: &dyn Fn(f64) -> f64, lo: f64, hi: f64| {
+            let n = 4096;
+            let h = (hi - lo) / n as f64;
+            let mut sum = f(lo) + f(hi);
+            for i in 1..n {
+                sum += if i % 2 == 0 { 2. } else { 4. } * f(lo + h * i as f64);
+            }
+            sum * h / 3.
+        };
+        // Independent radial wall thickness of the dimensioned 4 OD x .25 pipe.
+        let wall = |y: f64| (4. - y * y).sqrt() - (1.75_f64.powi(2) - y * y).sqrt();
+        let hole = integrate(
+            &|t| 0.5 * t.cos().powi(2) * wall(0.5 * t.sin()),
+            -PI / 2.,
+            PI / 2.,
+        );
+        let slot = 0.75 * integrate(&wall, -1., 1.)
+            + 4. * 0.375_f64.powi(2)
+                * integrate(
+                    &|t| t.cos().powi(2) * wall(1. + 0.375 * t.sin()),
+                    0.,
+                    PI / 2.,
+                );
+        let original_volume = 22.5 * PI;
+        for (case, removed, holes) in [
+            ("pipe_hole_one_wall", hole, 1),
+            ("pipe_hole_both_walls", 2. * hole, 2),
+            ("pipe_slot_one_wall", slot, 1),
+        ] {
+            let base = survey(case, "base");
+            let tool = survey(case, "step01");
+            let out = operation(&base, &tool, 1e-6);
+            let expected = original_volume - removed;
+            assert!(
+                (crate::mass::measure(&out, 1e-6).unwrap().volume - expected).abs() < 1e-8,
+                "{case}"
+            );
+            assert_eq!(
+                crate::topology::check(&out, 1e-6).unwrap().genus(),
+                (1 + holes) as f64
+            );
+            let f = frame(&base, &tool).unwrap();
+            let local = transform(&out, |q| f.local(q));
+            let xs = stations(events(&local), 1e-6).unwrap();
+            let bs: Vec<_> = xs
+                .windows(2)
+                .map(|w| sections(&local, w[0], w[1], 1e-6).unwrap())
+                .collect();
+            for ix in 0..23 {
+                for iy in 0..21 {
+                    for z in [10.1, 10.8, 11.3, 11.8, 12.13, 12.7, 13.3, 13.9] {
+                        let q = p(-2.15 + ix as f64 * 0.19, -2.13 + iy as f64 * 0.21, z);
+                        let radial = q.x * q.x + q.y * q.y;
+                        let mut expected_inside = radial > 1.75_f64.powi(2) && radial < 4.;
+                        let in_profile = if case == "pipe_slot_one_wall" {
+                            (q.y.abs() - 1.).max(0.).powi(2) + (q.z - 12.).powi(2)
+                                < 0.375_f64.powi(2)
+                        } else {
+                            q.y * q.y + (q.z - 12.).powi(2) < 0.25
+                        };
+                        if in_profile && (holes == 2 || q.x > 1.) {
+                            expected_inside = false;
+                        }
+                        let qlocal = f.local(q);
+                        let actual_inside = xs
+                            .windows(2)
+                            .position(|w| qlocal.x > w[0] && qlocal.x < w[1])
+                            .is_some_and(|i| {
+                                bs[i]
+                                    .iter()
+                                    .any(|b| Rect::at(b, qlocal.x).contains(qlocal.y, qlocal.z))
+                            });
+                        assert_eq!(actual_inside, expected_inside, "{case} probe {q:?}");
+                    }
+                }
+            }
+            let next = operation(&out, &placed(&tool, 1., p(0., 0., 6.)), 1e-6);
+            assert_eq!(
+                crate::topology::check(&next, 1e-6).unwrap().genus(),
+                (1 + 2 * holes) as f64
+            );
+            assert!(
+                (crate::mass::measure(&next, 1e-6).unwrap().volume
+                    - (original_volume - 2. * removed))
+                    .abs()
+                    < 1e-8
+            );
+            for scale in [0.1_f64, 1., 25.4] {
+                let offset = p(1e5, -1e5, 1e5);
+                let moved = operation(
+                    &placed(&base, scale, offset),
+                    &placed(&tool, scale, offset),
+                    scale * 1e-6,
+                );
+                assert!(
+                    (crate::mass::measure(&moved, scale * 1e-6).unwrap().volume / scale.powi(3)
+                        - expected)
+                        .abs()
+                        < 1e-6,
+                    "{case} scale {scale}"
+                );
+            }
+            let unit = |i| match i {
+                0 => p(1., 0., 0.),
+                1 => p(0., 1., 0.),
+                _ => p(0., 0., 1.),
+            };
+            for w in 0..3 {
+                for v in 0..3 {
+                    if v == w {
+                        continue;
+                    }
+                    let f = Frame {
+                        u: unit(v).cross(unit(w)),
+                        v: unit(v),
+                        w: unit(w),
+                    };
+                    let rotated = operation(
+                        &transform(&base, |q| f.world(q)),
+                        &transform(&tool, |q| f.world(q)),
+                        1e-6,
+                    );
+                    assert!(
+                        (crate::mass::measure(&rotated, 1e-6).unwrap().volume - expected).abs()
+                            < 1e-8
+                    );
+                }
+            }
+            let mut bad = base.clone();
+            let cap = bad
+                .faces
+                .iter_mut()
+                .find(|f| matches!(f.surface, Surface::Plane { .. }))
+                .unwrap();
+            cap.sense = !cap.sense;
+            assert!(crate::boolean::cut(&bad, &tool, 1e-6).is_err());
+        }
+        let case = "rect_tube_hole_over_corner";
+        assert!(matches!(
+            crate::boolean::cut(&survey(case, "base"), &survey(case, "step01"), 1e-6),
+            Err(KernelError::Unsupported(_))
+        ));
+        let base = survey("pipe_hole_one_wall", "base");
+        let original = crate::neutral::write_body(&base);
+        let blind = placed(&survey("pipe_hole_one_wall", "step01"), 1., p(0.9, 0., 0.));
+        assert!(matches!(
+            crate::boolean::cut(&base, &blind, 1e-6),
+            Err(KernelError::Unsupported(_))
+        ));
+        assert_eq!(crate::neutral::write_body(&base), original);
+    }
     fn fixture(name: &str) -> Body {
         let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("tests/fixtures/circle_over_fillet/{name}.f64"));

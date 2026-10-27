@@ -218,3 +218,11 @@ the public protocol, six cardinal frames, and a capsule crossing the root fillet
 Scaled/translated cases (including offsets of 1e5), nonconcentric circles, and
 rat holes followed by a fillet circle, web slot and bore also pass. Native
 acceptance of the complete new cuts remains separate in the shared handoff.
+
+Annular caps and separated tube walls use oriented boundary crossings to
+identify each face interval. Material sections may be separated in Y or Z;
+concentric circular graphs have analytic ordering bounds across each X band.
+This admits one-wall and both-wall pipe holes and pipe capsule slots whose
+finite tool spans each intersected wall completely. Partial-depth wall cuts
+remain unsupported. Independent pipe wall integrals, material probes, protocol
+replay, six frames and far-translated/scaled cases verify this domain.

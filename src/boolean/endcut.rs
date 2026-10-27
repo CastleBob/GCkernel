@@ -525,6 +525,13 @@ fn section(body: &Body, lo: f64, hi: f64, tol: f64) -> Result<Option<Band>> {
 
 fn below(a: Graph, b: Graph, lo: f64, hi: f64, tol: f64) -> bool {
     match (a, b) {
+        (Graph::Circle { cx, .. }, Graph::Circle { cx: bx, .. }) if cx == bx => {
+            // Concentric-in-X circular graphs: their difference is monotone on
+            // either side of cx (or constant). All extrema are at lo, hi or cx.
+            [lo, hi, cx.clamp(lo, hi)]
+                .into_iter()
+                .all(|x| a.value(x) - b.value(x) <= tol)
+        }
         (Graph::Line { m: am, b: ab }, Graph::Line { m: bm, b: bb }) => {
             [(am - bm) * lo + ab - bb, (am - bm) * hi + ab - bb]
                 .iter()
