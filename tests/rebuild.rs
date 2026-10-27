@@ -74,3 +74,24 @@ fn a_bottom_edge_that_is_not_the_moved_top_edge_is_refused_by_the_proof() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Astra's probe: both X-side planes of a box moved one inch off their edges. Topology closes and the measures
+/// cancel (volume 320, area 304), but the planes no longer hold their boundaries: reported, never repaired.
+#[test]
+fn planes_moved_off_their_edges_are_reported_not_rebuilt() {
+    let z = Vec3::new(0.0, 0.0, 1.0);
+    let rect = vec![line((0.0, 0.0), (10.0, 0.0)), line((10.0, 0.0), (10.0, 8.0)), line((10.0, 8.0), (0.0, 8.0)), line((0.0, 8.0), (0.0, 0.0))];
+    let mut block = extrude(&Profile { loops: vec![rect], n: z, low: 0.0, high: 4.0 }, TOL).unwrap();
+    let mut moved = 0;
+    for f in &mut block.faces {
+        if let gc_kernel::geom::Surface::Plane { p, n, .. } = &mut f.surface {
+            if n.x.abs() > 0.5 { p.x += 1.0; moved += 1; }
+        }
+    }
+    assert_eq!(moved, 2);
+    let m = measure(&block, TOL).unwrap();
+    assert!((m.volume - 320.0).abs() < 1e-9 && (m.area - 304.0).abs() < 1e-9);   // why measures cannot admit
+    assert!(matches!(check(&block, TOL), Err(KernelError::InvalidInput(m)) if m.contains("leaves face")));
+    let reply = handle(&parse_request(&encode_request(OP_REBUILD_PRISM, TOL, &write_body(&block))).unwrap());
+    assert!(matches!(reply, Err(KernelError::InvalidInput(_))), "{reply:?}");
+}

@@ -1,7 +1,7 @@
 //! Checks that a body is a closed, consistently oriented solid. Occurrence based (Astra's review): a seam
 //! edge appears in one face's loop twice, once each way, and every occurrence is counted.
 
-use crate::geom::Curve;
+use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::Body;
 use crate::KernelError;
 
@@ -25,7 +25,8 @@ impl TopologyReport {
 fn bad<T>(message: String) -> Result<T, KernelError> { Err(KernelError::InvalidInput(message)) }
 
 /// Every edge used exactly once forward and once reversed; every loop connects head to tail and closes;
-/// every edge's curve runs from its start vertex to its end vertex (within `tolerance`).
+/// every edge's curve runs from its start vertex to its end vertex, and lies on the surface of every face it bounds
+/// (all within `tolerance`; Astra's review: a plane moved off its boundary must be reported, never repaired).
 pub fn check(body: &Body, tolerance: f64) -> Result<TopologyReport, KernelError> {
     if body.faces.is_empty() { return bad("the body has no faces".into()); }
     for (i, e) in body.edges.iter().enumerate() {
@@ -63,5 +64,32 @@ pub fn check(body: &Body, tolerance: f64) -> Result<TopologyReport, KernelError>
             return bad(format!("edge {i} is used {} times forward and {} times reversed (a closed solid uses each once each way)", forward[i], backward[i]));
         }
     }
+    for (f, face) in body.faces.iter().enumerate() {
+        for &(e, _) in face.loops.iter().flatten() {
+            if let Some(miss) = off_surface(&body.edges[e].curve, &face.surface, tolerance) {
+                return bad(format!("edge {e} leaves face {f}'s surface by {miss}"));
+            }
+        }
+    }
     Ok(TopologyReport { vertices: body.vertices.len(), edges: body.edges.len(), faces: body.faces.len(), loops })
+}
+
+/// Distance from a point to a surface.
+fn distance(q: Vec3, surface: &Surface) -> f64 {
+    match *surface {
+        Surface::Plane { p, n, .. } => q.sub(p).dot(n).abs(),
+        Surface::Cylinder { p, a, r, .. } => {
+            let w = q.sub(p);
+            (w.sub(a.scale(w.dot(a))).length() - r).abs()
+        }
+    }
+}
+
+/// The largest distance from the surface over the curve's ends and 15 interior points, when beyond `tolerance`.
+/// Samples, not a proof: lines in planes and circles in planes or on cylinders are fixed by their ends and middle,
+/// and the kernel's other curves are smooth on the scale of the samples.
+fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> {
+    let (t0, t1) = curve.domain();
+    let worst = (0..=16).map(|i| distance(curve.eval(t0 + (t1 - t0) * i as f64 / 16.0).0, surface)).fold(0.0, f64::max);
+    (worst > tolerance).then_some(worst)
 }
