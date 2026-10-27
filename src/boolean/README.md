@@ -41,8 +41,30 @@ side-wall clearance greater than the supplied tolerance.
 The result preserves the box and adds circular inner cap boundaries and an
 inward-facing cylindrical wall with its seam counted twice. It retains analytic
 circles/cylinder rather than a polygonal approximation. Supported axes are X/Y/Z.
-Only one bore into a plain box is currently supported. Repeated round bores,
-blind round pockets, side-wall contact/crossing and fillet cuts are unsupported.
+The original plain-box admission remains. Other closed inputs can use the
+local planar passage domain below. Blind round pockets, side-wall contact/
+crossing and fillet-crossing cuts remain unsupported.
+
+### Circular passages through planar regions of curved solids
+
+A full cylindrical tool may cross exactly one material interval bounded by two
+axis-normal planar patches. Both patches must contain the entire disk, with
+clearance from every outer and inner boundary greater than tolerance. Analytic
+line/circle winding and minimum-distance checks establish containment. Analytic
+surface-patch bounds must exclude EVERY other boundary patch from the finite
+cutter corridor; inconclusive bounds reject the cut. Thus a clear web hole in
+a filleted I-beam is admitted without changing its fillets. Separated repeated
+bores are supported; overlapping, tangent or identical existing holes are not.
+
+Accepted surrounding geometry consists of planar faces with line/arc loops and
+simple axial cylindrical patches with two circular trims and two generators.
+Checks cover finite coordinates/frames, references, closed oriented topology,
+curve-on-surface consistency, planar loop orientation and cylindrical patch
+orientation. This is a local cut operation on an input solid, not a general
+self-intersection repair or global B-rep certification service. Work limits
+remain 20,000 faces and 80,000 edges/vertices. Output clones the existing boundary
+and appends two circular cap loops and an inward cylinder; unrelated geometry
+is retained exactly in its original representation.
 
 ### Contained capsule through-slot
 
@@ -59,7 +81,7 @@ uses the ORIGINAL cap curves as a hole in the box cross-section, swept through
 the box thickness by our own extrusion code. Cap curves and cylindrical walls
 remain analytic. It does not replace an unsupported cutter with a capsule.
 Blind, side-wall touching/crossing and repeated/interacting curved cuts remain
-unsupported; curved cuts currently require a plain uncut box as their base.
+unsupported for slots; capsule cuts still require a plain uncut box as their base.
 
 ## Admission, errors and representation
 

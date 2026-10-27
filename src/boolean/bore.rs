@@ -1,6 +1,6 @@
-//! Exact, bounded through-bore construction on a proven plain box. A full
-//! cylindrical cutter must span the box and lie strictly within its side walls.
-//! The output retains the box's six faces, adds circular inner cap boundaries,
+//! Bounded through-bore construction on a proven plain box or an admitted local
+//! planar passage in a curved solid. A full cylindrical cutter must span one
+//! material interval and clear unrelated surfaces. The output retains existing faces, adds circular inner cap boundaries,
 //! and introduces one inward-facing analytic cylinder. No mesh or offsets.
 use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::{Body, Edge, Face};
@@ -180,11 +180,7 @@ fn cylinder(tool: &Body, tolerance: f64) -> Result<Cylinder> {
     })
 }
 
-pub(super) fn cut(body: &Body, tool: &Body, tolerance: f64) -> Result<Body> {
-    if !tolerance.is_finite() || tolerance <= 0. {
-        return Err(invalid("bore tolerance must be finite and positive"));
-    }
-    let cutter = cylinder(tool, tolerance)?;
+fn box_passage(body: &Body, cutter: &Cylinder, tolerance: f64) -> Result<(f64, f64, usize, usize)> {
     let (low, high) = super::rectilinear::plain_box_bounds(body, tolerance)?;
     let axis = cutter.axis;
     let center = xyz(cutter.center);
@@ -221,6 +217,33 @@ pub(super) fn cut(body: &Body, tool: &Body, tolerance: f64) -> Result<Body> {
     let [Some(bottom_face), Some(top_face)] = caps else {
         return Err(invalid("box is missing a bore cap"));
     };
+    Ok((low[axis], high[axis], bottom_face, top_face))
+}
+
+pub(super) fn cut(body: &Body, tool: &Body, tolerance: f64) -> Result<Body> {
+    if !tolerance.is_finite() || tolerance <= 0. {
+        return Err(invalid("bore tolerance must be finite and positive"));
+    }
+    let cutter = cylinder(tool, tolerance)?;
+    let axis = cutter.axis;
+    let center = xyz(cutter.center);
+    let radius = cutter.radius;
+    // Admission is selected by the operand representation before execution.
+    // A failed box admission never retries against the general passage checker.
+    let (low, high, bottom_face, top_face) =
+        if body.vertices.len() == 8 && body.edges.len() == 12 && body.faces.len() == 6 {
+            box_passage(body, &cutter, tolerance)?
+        } else {
+            super::passage::round_passage(
+                body,
+                axis,
+                cutter.center,
+                radius,
+                cutter.low,
+                cutter.high,
+                tolerance,
+            )?
+        };
     let mut result = body.clone();
     let mut normal = [0.; 3];
     normal[axis] = 1.;
@@ -229,10 +252,10 @@ pub(super) fn cut(body: &Body, tool: &Body, tolerance: f64) -> Result<Body> {
     reference[(axis + 1) % 3] = 1.;
     let reference = vec(reference);
     let mut bottom = center;
-    bottom[axis] = low[axis];
+    bottom[axis] = low;
     let bottom = vec(bottom);
     let mut top = center;
-    top[axis] = high[axis];
+    top[axis] = high;
     let top = vec(top);
     let vb = result.vertices.len();
     let vt = vb + 1;
@@ -483,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_axial_caps_work_but_multiple_bores_are_not_yet_admitted() {
+    fn flush_axial_caps_work_but_recutting_the_same_hole_is_not_yet_admitted() {
         let (body, tool) = fixture(2, [5., 4., 0.], 1., (0., 4.));
         let result = crate::boolean::cut(&body, &tool, 1e-7).unwrap();
         assert!((boundary_volume(&result) - (320. - 4. * std::f64::consts::PI)).abs() < 1e-9);
