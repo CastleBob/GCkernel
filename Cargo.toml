@@ -1,0 +1,9 @@
+[package]
+name = "gc_kernel"
+version = "0.1.0"
+edition = "2021"
+description = "GC Kernel: GCmaker's own solid-modelling kernel (clean-room, no third-party geometry code)."
+publish = false
+
+[profile.release]
+opt-level = 3
