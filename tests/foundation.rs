@@ -238,10 +238,18 @@ fn protocol_extrude_check_and_cut() {
     let result = Reader::new(cut.as_ref().unwrap()).body().unwrap();
     check(&result, TOL).unwrap();
 
-    // A round tool is outside the boolean's supported domain and says so.
+    // A contained round through-bore is supported (Astra, bd93e97): a valid solid comes back.
     let round = Profile { loops: vec![vec![circle(5.0, 4.0, 1.0)]], n: Z, low: -1.0, high: 5.0 };
     let mut two = body.to_vec();
     two.extend_from_slice(&write_body(&extrude(&round, TOL).unwrap()));
+    let cut = handle(&parse_request(&encode_request(OP_CUT, TOL, &two)).unwrap());
+    assert_eq!(reply_status(&gc_kernel::protocol::encode_reply(&cut)), 0, "{cut:?}");
+    check(&Reader::new(cut.as_ref().unwrap()).body().unwrap(), TOL).unwrap();
+
+    // A round tool crossing the box's boundary is outside the supported domain and says so.
+    let crossing = Profile { loops: vec![vec![circle(0.0, 4.0, 1.0)]], n: Z, low: -1.0, high: 5.0 };
+    let mut two = body.to_vec();
+    two.extend_from_slice(&write_body(&extrude(&crossing, TOL).unwrap()));
     let cut = handle(&parse_request(&encode_request(OP_CUT, TOL, &two)).unwrap());
     assert_eq!(reply_status(&gc_kernel::protocol::encode_reply(&cut)), 1, "{cut:?}");
 }
