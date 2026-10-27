@@ -472,6 +472,107 @@ mod tests {
         }
     }
 
+    #[test]
+    fn large_circle_crosses_the_vertical_fillet_end_with_a_smooth_chart() {
+        let n = p(0., 0., 1.);
+        let radius = 0.7;
+        let tool = crate::extrude::extrude(
+            &crate::neutral::Profile {
+                loops: vec![vec![Curve::Arc {
+                    c: p(0.74, 12., 0.),
+                    n,
+                    x: p(1., 0., 0.),
+                    r: radius,
+                    t0: 0.,
+                    t1: TAU,
+                }]],
+                n,
+                low: -6.,
+                high: 1.,
+            },
+            1e-6,
+        )
+        .unwrap();
+        let result = operation(&fixture("base"), &tool, 1e-6);
+        assert_eq!(crate::topology::check(&result, 1e-6).unwrap().genus(), 1.);
+        assert!(result
+            .edges
+            .iter()
+            .any(|e| matches!(e.curve,Curve::CylinderPair {a,..} if a.y.abs()==1.)));
+        // Independent stock-section integral. Use the host circle angle in the
+        // fillet strip, avoiding the square-root endpoint in x coordinates.
+        let flange_area = -0.5 * (radius * radius - 0.25).sqrt()
+            + radius * radius * (-0.5 / radius).asin()
+            + radius * radius * PI / 2.;
+        let web_area = radius * radius * PI / 2.;
+        let f = |t: f64| {
+            2. * (radius * radius - 0.25 * t.cos().powi(2)).sqrt()
+                * 0.5
+                * t.sin()
+                * (1.23 - t.sin())
+        };
+        let steps = 4096;
+        let h = PI / 2. / steps as f64;
+        let mut sum = f(PI / 2.) + f(PI);
+        for i in 1..steps {
+            sum += if i % 2 == 0 { 2. } else { 4. } * f(PI / 2. + h * i as f64);
+        }
+        let expected = 155.58846611769187 - 4. * flange_area - 0.23 * web_area - sum * h / 3.;
+        let actual = crate::mass::measure(&result, 1e-6).unwrap().volume;
+        assert!(
+            (actual - expected).abs() < 1e-8,
+            "{actual} expected {expected}"
+        );
+        eprintln!("large fillet crossing volume {actual:.14}");
+        let unit = |i| match i {
+            0 => p(1., 0., 0.),
+            1 => p(0., 1., 0.),
+            _ => p(0., 0., 1.),
+        };
+        for w in 0..3 {
+            for v in 0..3 {
+                if w == v {
+                    continue;
+                }
+                let frame = Frame {
+                    u: unit(v).cross(unit(w)),
+                    v: unit(v),
+                    w: unit(w),
+                };
+                let rotated = operation(
+                    &transform(&fixture("base"), |q| frame.world(q)),
+                    &transform(&tool, |q| frame.world(q)),
+                    1e-6,
+                );
+                assert!(
+                    (crate::mass::measure(&rotated, 1e-6).unwrap().volume - expected).abs() < 1e-8
+                );
+            }
+        }
+        for scale in [0.1_f64, 1., 25.4] {
+            let offset = p(1e5, -1e5, 1e5);
+            let moved = operation(
+                &placed(&fixture("base"), scale, offset),
+                &placed(&tool, scale, offset),
+                scale * 1e-6,
+            );
+            assert!(
+                (crate::mass::measure(&moved, scale * 1e-6).unwrap().volume / scale.powi(3)
+                    - expected)
+                    .abs()
+                    < 1e-6
+            );
+        }
+        let second = operation(&result, &placed(&tool, 1., p(0., 10., 0.)), 1e-6);
+        assert_eq!(crate::topology::check(&second, 1e-6).unwrap().genus(), 2.);
+        assert!(
+            (crate::mass::measure(&second, 1e-6).unwrap().volume
+                - (2. * expected - 155.58846611769187))
+                .abs()
+                < 1e-8
+        );
+    }
+
     fn operation(body: &Body, tool: &Body, tol: f64) -> Body {
         let mut data = crate::neutral::write_body(body);
         data.extend(crate::neutral::write_body(tool));

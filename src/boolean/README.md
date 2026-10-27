@@ -202,6 +202,12 @@ intervals are permitted, alongside the existing transverse work limits.
 Cylinder/cylinder edges remain analytic `Curve::CylinderPair` (neutral type 4),
 parameterized on one cylinder with the algebraic axial root on the other.
 Supporting cylinders, branch and angular range survive worker replay. There
+are two possible parameter charts for each intersection edge. Construction
+chooses a chart whose discriminant stays positive over the entire trim, so a
+large hole can cross the vertical end of a smaller fillet without a singular
+parameterization. If neither chart is smooth, the cut remains unsupported.
+This is an analytic coordinate choice before edge construction.
+There
 is no polygonal geometry substitution. Their mass integrals are numerical
 quadrature, explicitly distinguished from the closed-form plane/conic cases.
 The GCmaker display adapter separately owns tolerance-bounded spline conversion.

@@ -159,12 +159,10 @@ fn separated_web_bores_accumulate_without_changing_previous_geometry() {
 }
 
 #[test]
-fn fillet_crossing_edge_crossing_blind_and_interacting_bores_remain_explicit() {
-    for tool in [
-        bore(1.5, 10., 1., -4., 4.),
-        bore(5., 0., 1., -4., 4.),
-        bore(5., 10., 1., 0., 4.),
-    ] {
+fn larger_fillet_crossing_succeeds_but_blind_and_interacting_bores_remain_explicit() {
+    let crossing = crate::boolean::cut(&ibeam(), &bore(1.5, 10., 1., -4., 4.), TOL).unwrap();
+    assert_eq!(crate::topology::check(&crossing, TOL).unwrap().genus(), 1.);
+    for tool in [bore(5., 0., 1., -4., 4.), bore(5., 10., 1., 0., 4.)] {
         let result = crate::boolean::cut(&ibeam(), &tool, TOL);
         assert!(
             matches!(result, Err(KernelError::Unsupported(_))),

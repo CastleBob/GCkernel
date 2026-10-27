@@ -242,13 +242,11 @@ fn validate(body: &Body, tol: f64) -> Result<()> {
             {
                 return Err(invalid("invalid cylinder-pair trim frame"));
             }
-            if a.x != 0.
-                || a.y != 0.
-                || a.z.abs() != 1.
-                || b.x != 0.
-                || b.z != 0.
-                || b.y.abs() != 1.
-            {
+            let yz = a.x == 0.
+                && b.x == 0.
+                && ((a.y == 0. && a.z.abs() == 1. && b.z == 0. && b.y.abs() == 1.)
+                    || (a.z == 0. && a.y.abs() == 1. && b.y == 0. && b.z.abs() == 1.));
+            if !yz {
                 return Err(unsupported(
                     "transverse cylinder-pair trim axes must match the section frame",
                 ));
@@ -631,40 +629,62 @@ fn lifted(lo: f64, hi: f64, y: Graph, z: Graph, tol: f64) -> Result<Curve> {
                 branch: zb,
             },
         ) => {
-            let curve = Curve::CylinderPair {
+            let y_chart = Curve::CylinderPair {
                 // Choose the cutter axis anchor near this actual intersection,
                 // rather than an arbitrary world-zero height.
                 c: p(cx, cv, zc),
                 a: p(0., 0., yb),
                 x: p(1., 0., 0.),
                 rho,
-                p: p(zx, 0., zc),
+                p: p(zx, cv, zc),
                 b: p(0., 1., 0.),
                 r,
                 branch: yb * zb,
                 t0: ((hi - cx) / rho).clamp(-1., 1.).acos(),
                 t1: ((lo - cx) / rho).clamp(-1., 1.).acos(),
             };
-            if let Curve::CylinderPair {
-                c,
-                a,
-                x,
-                rho,
-                p,
-                b,
-                r,
-                t0,
-                t1,
-                ..
-            } = curve
-            {
+            let z_chart = Curve::CylinderPair {
+                c: p(zx, cv, zc),
+                a: p(0., -zb, 0.),
+                x: p(1., 0., 0.),
+                rho: r,
+                p: p(cx, cv, zc),
+                b: p(0., 0., 1.),
+                r: rho,
+                branch: -zb * yb,
+                t0: ((hi - zx) / r).clamp(-1., 1.).acos(),
+                t1: ((lo - zx) / r).clamp(-1., 1.).acos(),
+            };
+            // Choose a smooth analytic parameter chart before constructing an
+            // intersection edge. Both describe the same two supporting surfaces.
+            let smooth = |curve: &Curve| {
+                let Curve::CylinderPair {
+                    c,
+                    a,
+                    x,
+                    rho,
+                    p,
+                    b,
+                    r,
+                    t0,
+                    t1,
+                    ..
+                } = *curve
+                else {
+                    unreachable!()
+                };
                 let k = crate::geom::pair_disc_coefficients(c, a, x, rho, p, b, r);
-                if crate::geom::pair_disc_lower_bound(&k, t0, t1, 4096) <= tol * tol {
-                    return Err(unsupported(
-                        "cylinder intersection meets an unsupported tangent or branch singularity",
-                    ));
-                }
-            }
+                crate::geom::pair_disc_lower_bound(&k, t0, t1, 4096) > tol * tol
+            };
+            let curve = if smooth(&y_chart) {
+                y_chart
+            } else if smooth(&z_chart) {
+                z_chart
+            } else {
+                return Err(unsupported(
+                    "neither analytic cylinder-intersection chart excludes tangency",
+                ));
+            };
             return Ok(curve.reversed());
         }
     };
