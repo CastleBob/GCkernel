@@ -85,11 +85,11 @@ integration tests; Rust-only tests do not prove Eyeshot display compatibility.
 include independently calculated volume, a divergence-theorem integral of the
 returned bore and slot boundaries, material probes, 60 deterministic box-cut cases,
 scale/translation, existing face holes, repeated rectangular cuts, exact and
-near contact, unsupported cases, malformed inputs and empty results. The
-slot rotations and all three sweep axes, curve/index/loop ordering changes. The
+near contact, unsupported cases, malformed inputs and empty results, slot
+rotations and all three sweep axes, and curve/index/loop ordering changes. The
 foundation integration tests additionally exercise protocol/neutral-format
 interoperability. The local source commits introducing capabilities are 9614fe8
-(rectilinear) and bd93e97 (contained circular bore).
+(rectilinear), bd93e97 (contained circular bore) and 08544a5 (capsule slot).
 
 Methods are elementary coordinate-plane arrangements, oriented boundary
 construction, circle geometry and the divergence theorem. No third-party kernel
