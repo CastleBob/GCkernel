@@ -56,8 +56,12 @@ cutter corridor; inconclusive bounds reject the cut. Thus a clear web hole in
 a filleted I-beam is admitted without changing its fillets. Separated repeated
 bores are supported; overlapping, tangent or identical existing holes are not.
 
-Accepted surrounding geometry consists of planar faces with line/arc loops and
-simple axial cylindrical patches with two circular trims and two generators.
+Accepted surrounding geometry consists of planar faces with line/arc/conic loops
+and simple cylindrical strips with two conic trims and axial generators. The
+trims must cover the same angular interval, have nonoverlapping axial ranges,
+and agree with their supporting cylinder over the entire curve. Thus separated
+web holes and slots can follow the rat-hole cuts. Conic boundary-distance checks
+use conservative analytic boxes; inconclusive clearance is rejected.
 Checks cover finite coordinates/frames, references, closed oriented topology,
 curve-on-surface consistency, planar loop orientation and cylindrical patch
 orientation. This is a local cut operation on an input solid, not a general
@@ -87,7 +91,6 @@ the cavity. Its inverted side faces and cap loops are spliced into the existing
 body. This supports separated slot/hole sequences and retains existing fillets.
 The enclosing disk can reject a slot that would fit in a narrower region.
 Blind, side-wall touching/crossing and interacting curved cuts remain unsupported.
-Conic-trimmed bodies are not yet admitted by the local passage validator.
 
 ## Admission, errors and representation
 

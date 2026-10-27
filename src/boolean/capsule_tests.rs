@@ -290,14 +290,76 @@ fn capsule_cut_succeeds_through_protocol() {
 }
 
 fn captured_ibeam() -> Body {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rat_hole/base.f64");
+    captured_rat_hole("base")
+}
+fn captured_rat_hole(name: &str) -> Body {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("tests/fixtures/rat_hole/{name}.f64"));
     let bytes = std::fs::read(path).unwrap();
     let data: Vec<f64> = bytes
         .chunks_exact(8)
         .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
         .collect();
     crate::neutral::Reader::new(&data).body().unwrap()
+}
+
+#[test]
+fn web_slot_after_both_rat_holes_retains_previous_conic_boundaries() {
+    let mut base = captured_ibeam();
+    for step in ["step01", "step02"] {
+        base = crate::boolean::cut(&base, &captured_rat_hole(step), 1e-6).unwrap();
+        base = crate::neutral::Reader::new(&crate::neutral::write_body(&base))
+            .body()
+            .unwrap();
+    }
+    assert!(base
+        .edges
+        .iter()
+        .any(|e| matches!(e.curve, Curve::Conic { .. })));
+    let saved = crate::neutral::write_body(&base);
+    let (_, tool) = fixture(2, 0., 0., (-6., 1.));
+    let result = crate::boolean::cut(&base, &tool, 1e-6).unwrap();
+    assert_eq!(crate::topology::check(&result, 1e-6).unwrap().genus(), 1.);
+    let expected = 153.57573395171957 - 0.23 * (8. + PI);
+    assert!((crate::mass::measure(&result, 1e-6).unwrap().volume - expected).abs() < 1e-8);
+    let n = Vec3::new(0., 0., 1.);
+    let bore = crate::extrude::extrude(
+        &Profile {
+            loops: vec![vec![Curve::Arc {
+                c: Vec3::new(5., 14., 0.),
+                n,
+                x: Vec3::new(1., 0., 0.),
+                r: 0.5,
+                t0: 0.,
+                t1: 2. * PI,
+            }]],
+            n,
+            low: -6.,
+            high: 1.,
+        },
+        1e-6,
+    )
+    .unwrap();
+    let two = crate::boolean::cut(&result, &bore, 1e-6).unwrap();
+    assert_eq!(crate::topology::check(&two, 1e-6).unwrap().genus(), 2.);
+    assert!(
+        (crate::mass::measure(&two, 1e-6).unwrap().volume - (expected - 0.23 * PI * 0.25)).abs()
+            < 1e-8
+    );
+    for (i, edge) in base.edges.iter().enumerate() {
+        assert_eq!(format!("{edge:?}"), format!("{:?}", result.edges[i]));
+    }
+    assert_eq!(saved, crate::neutral::write_body(&base));
+    let mut broken = base.clone();
+    let edge = broken
+        .edges
+        .iter_mut()
+        .find(|e| matches!(e.curve, Curve::Conic { .. }))
+        .unwrap();
+    if let Curve::Conic { u, .. } = &mut edge.curve {
+        *u = u.scale(1.1);
+    }
+    assert!(crate::boolean::cut(&broken, &tool, 1e-6).is_err());
 }
 fn translate(body: &Body, offset: Vec3) -> Body {
     let mut out = body.clone();

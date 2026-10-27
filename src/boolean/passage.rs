@@ -35,6 +35,14 @@ fn sign(forward: bool) -> f64 {
     }
 }
 
+fn harmonic(curve: &Curve) -> Option<(Vec3, Vec3, Vec3, f64, f64)> {
+    match *curve {
+        Curve::Line { .. } => None,
+        Curve::Arc { c, n, x, r, t0, t1 } => Some((c, x.scale(r), n.cross(x).scale(r), t0, t1)),
+        Curve::Conic { c, u, v, t0, t1 } => Some((c, u, v, t0, t1)),
+    }
+}
+
 fn parameters(base: f64, lo: f64, hi: f64) -> Vec<f64> {
     let first = base + ((lo - base) / TAU).ceil() * TAU;
     [first, first + TAU]
@@ -45,13 +53,13 @@ fn parameters(base: f64, lo: f64, hi: f64) -> Vec<f64> {
 
 fn curve_bounds(curve: &Curve) -> ([f64; 3], [f64; 3]) {
     let mut points = vec![curve.start(), curve.end()];
-    if let Curve::Arc { c, n, x, r, t0, t1 } = *curve {
-        let a = xyz(x);
-        let b = xyz(n.cross(x));
+    if let Some((c, u, v, t0, t1)) = harmonic(curve) {
+        let a = xyz(u);
+        let b = xyz(v);
         for k in 0..3 {
             for root in [b[k].atan2(a[k]), b[k].atan2(a[k]) + PI] {
                 for t in parameters(root, t0, t1) {
-                    points.push(Curve::point_at_angle(c, n, x, r, t));
+                    points.push(Curve::conic_point(c, u, v, t));
                 }
             }
         }
@@ -70,7 +78,16 @@ fn curve_bounds(curve: &Curve) -> ([f64; 3], [f64; 3]) {
 
 fn distance(curve: &Curve, q: Vec3) -> f64 {
     match *curve {
-        Curve::Conic { .. } => unreachable!("conics are refused by passage admission"),
+        Curve::Conic { .. } => {
+            // A lower distance bound is sufficient for clearance admission.
+            // An inconclusive box rejects the cut; it never substitutes a curve.
+            let (lo, hi) = curve_bounds(curve);
+            let point = xyz(q);
+            (0..3)
+                .map(|k| (lo[k] - point[k]).max(point[k] - hi[k]).max(0.).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        }
         Curve::Line { a, b } => {
             let d = b.sub(a);
             let t = (q.sub(a).dot(d) / d.dot(d)).clamp(0., 1.);
@@ -150,9 +167,6 @@ fn inside(body: &Body, face: &Face, q: Vec3, n: Vec3, tol: f64) -> Result<bool> 
             source.reversed()
         };
         match c {
-            Curve::Conic { .. } => {
-                return Err(unsupported("conic-trimmed passages are not admitted yet"))
-            }
             Curve::Line { a, b } => {
                 let ay = a.sub(q).dot(v);
                 let by = b.sub(q).dot(v);
@@ -164,9 +178,10 @@ fn inside(body: &Body, face: &Face, q: Vec3, n: Vec3, tol: f64) -> Result<bool> 
                     }
                 }
             }
-            Curve::Arc { c, n, x, r, t0, t1 } => {
-                let a = r * x.dot(v);
-                let b = r * n.cross(x).dot(v);
+            _ => {
+                let (c, cu, cv, t0, t1) = harmonic(&c).unwrap();
+                let a = cu.dot(v);
+                let b = cv.dot(v);
                 let height = c.sub(q).dot(v);
                 let amplitude = a.hypot(b);
                 let ratio = -height / amplitude;
@@ -177,7 +192,7 @@ fn inside(body: &Body, face: &Face, q: Vec3, n: Vec3, tol: f64) -> Result<bool> 
                 let angle = ratio.acos();
                 for root in [phase - angle, phase + angle] {
                     for t in parameters(root, t0, t1) {
-                        let hit = Curve::point_at_angle(c, n, x, r, t);
+                        let hit = Curve::conic_point(c, cu, cv, t);
                         if hit.sub(q).dot(u) > 0. {
                             winding += if -a * t.sin() + b * t.cos() > 0. {
                                 1
@@ -218,8 +233,22 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
     }
     for edge in &body.edges {
         match edge.curve {
-            Curve::Conic { .. } => {
-                return Err(unsupported("conic-trimmed passages are not admitted yet"))
+            Curve::Conic { c, u, v, t0, t1 } => {
+                if !c.is_finite()
+                    || !u.is_finite()
+                    || !v.is_finite()
+                    || u.length() <= tol
+                    || v.length() <= tol
+                    || u.cross(v).length() <= 1e-10 * u.length() * v.length()
+                    || !t0.is_finite()
+                    || !t1.is_finite()
+                    || t1 <= t0
+                    || t1 - t0 > TAU + 1e-12
+                    || t0.abs() > 1e5
+                    || t1.abs() > 1e5
+                {
+                    return Err(bad("invalid passage conic frame"));
+                }
             }
             Curve::Line { a, b } => {
                 if !a.is_finite() || !b.is_finite() || a.distance(b) <= tol {
@@ -271,9 +300,9 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
                     {
                         return Err(bad("passage edge is off its plane"));
                     }
-                    if let Curve::Arc { c, n: an, .. } = *curve {
-                        if c.sub(p).dot(n).abs() > tol || an.cross(n).length() > 1e-10 {
-                            return Err(bad("passage arc is not in its plane"));
+                    if let Some((c, u, v, _, _)) = harmonic(curve) {
+                        if c.sub(p).dot(n).abs() + u.dot(n).abs() + v.dot(n).abs() > tol {
+                            return Err(bad("passage conic is not in its plane"));
                         }
                     }
                 }
@@ -292,7 +321,7 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
                 }
             }
             Surface::Cylinder { p, a, r, .. } => {
-                if !r.is_finite() || r <= tol || face.loops.len() != 1 || face.loops[0].len() != 4 {
+                if !r.is_finite() || r <= tol || face.loops.len() != 1 || face.loops[0].len() < 4 {
                     return Err(unsupported(
                         "passage requires simple axial cylindrical patches",
                     ));
@@ -301,9 +330,6 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
                 let mut lines = 0;
                 for (i, fwd) in &face.loops[0] {
                     match body.edges[*i].curve {
-                        Curve::Conic { .. } => {
-                            return Err(unsupported("conic-trimmed passages are not admitted yet"))
-                        }
                         Curve::Line { a: from, b: to } => {
                             if to.sub(from).cross(a).length() > tol
                                 || (from.sub(p).cross(a).length() - r).abs() > tol
@@ -312,33 +338,53 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
                             }
                             lines += 1;
                         }
-                        Curve::Arc {
-                            c,
-                            n,
-                            x,
-                            r: cr,
-                            t0,
-                            t1,
-                        } => {
-                            if c.sub(p).cross(a).length() > tol
-                                || n.cross(a).length() > 1e-10
-                                || (cr - r).abs() > tol
+                        _ => {
+                            let (c, u, v, t0, t1) = harmonic(&body.edges[*i].curve).unwrap();
+                            let radial = |q: Vec3| q.sub(a.scale(q.dot(a)));
+                            let q = radial(c.sub(p));
+                            let ur = radial(u);
+                            let vr = radial(v);
+                            // Exact harmonic coefficients bound squared radial error
+                            // for the entire trim, not merely at selected samples.
+                            let error = (q.dot(q) + (ur.dot(ur) + vr.dot(vr)) * 0.5 - r * r).abs()
+                                + 2. * q.dot(ur).abs()
+                                + 2. * q.dot(vr).abs()
+                                + ((ur.dot(ur) - vr.dot(vr)) * 0.5).abs()
+                                + ur.dot(vr).abs();
+                            if error > tol * (2. * r + tol)
+                                || q.length() > tol
+                                || (ur.length() - r).abs() > tol
+                                || (vr.length() - r).abs() > tol
+                                || ur.dot(vr).abs() > tol * r
                             {
-                                return Err(bad("cylindrical trim arc is off its surface"));
+                                return Err(bad("cylindrical trim is off its surface"));
                             }
-                            arcs.push((c.dot(a), n.dot(a) * sign(*fwd), c, n, x, cr, t0, t1));
+                            let axial = |t: f64| Curve::conic_point(c, u, v, t).dot(a);
+                            let mut low = axial(t0).min(axial(t1));
+                            let mut high = axial(t0).max(axial(t1));
+                            let phase = v.dot(a).atan2(u.dot(a));
+                            for angle in [phase, phase + PI] {
+                                for t in parameters(angle, t0, t1) {
+                                    low = low.min(axial(t));
+                                    high = high.max(axial(t));
+                                }
+                            }
+                            let direction = ur.cross(vr).dot(a) / (r * r) * sign(*fwd);
+                            let midpoint =
+                                radial(Curve::conic_point(c, u, v, (t0 + t1) * 0.5).sub(p));
+                            arcs.push((low, high, direction, midpoint, t1 - t0));
                         }
                     }
                 }
-                if arcs.len() != 2 || lines != 2 {
+                if arcs.len() != 2 || lines < 2 {
                     return Err(unsupported(
-                        "cylinder patch must have two circular trims and two generators",
+                        "cylinder patch must have two conic trims and axial generators",
                     ));
                 }
                 arcs.sort_by(|a, b| a.0.total_cmp(&b.0));
-                if arcs[1].0 - arcs[0].0 <= tol
-                    || arcs[0].1 * sign(face.sense) < 0.999999
-                    || arcs[1].1 * sign(face.sense) > -0.999999
+                if arcs[1].0 - arcs[0].1 <= tol
+                    || arcs[0].2 * sign(face.sense) < 0.999999
+                    || arcs[1].2 * sign(face.sense) > -0.999999
                 {
                     return Err(bad(
                         "cylinder patch axial ordering or orientation is invalid",
@@ -346,23 +392,7 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
                 }
                 let first = &arcs[0];
                 let second = &arcs[1];
-                let m1 = Curve::point_at_angle(
-                    first.2,
-                    first.3,
-                    first.4,
-                    first.5,
-                    (first.6 + first.7) * 0.5,
-                );
-                let m2 = Curve::point_at_angle(
-                    second.2,
-                    second.3,
-                    second.4,
-                    second.5,
-                    (second.6 + second.7) * 0.5,
-                );
-                if ((first.7 - first.6) - (second.7 - second.6)).abs() > 1e-10
-                    || m2.sub(m1).cross(a).length() > tol
-                {
+                if (first.4 - second.4).abs() > 1e-10 || second.3.distance(first.3) > tol {
                     return Err(unsupported("cylinder trims do not bound one axial strip"));
                 }
             }
