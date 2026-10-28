@@ -69,7 +69,7 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
     }
     let tol = request.tolerance;
     if !tol.is_finite() || tol <= 0.0 { return Err(KernelError::InvalidInput("the tolerance must be positive".into())); }
-    let mut reader = Reader::new(&request.data);
+    let mut reader = Reader::with_tolerance(&request.data, tol);
     match request.op {
         OP_CHECK => {
             let body = reader.body()?;

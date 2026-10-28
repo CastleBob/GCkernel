@@ -63,6 +63,15 @@ pub enum Curve {
 /// tangent, and the discriminant S(t).
 #[allow(clippy::too_many_arguments)]
 pub fn pair_eval(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t: f64) -> (Vec3, Vec3, f64) {
+    pair_eval_sided(c, a, x, rho, p, b, r, branch, t, 0.0)
+}
+
+/// `pair_eval` near a trim end where the two cylinders touch (S has a double root there, `pair_trim_touches`): with
+/// S tiny, S' / (2 sqrt S) is 0/0 in floating point, so it takes its one-sided limit sign(t - t*) sqrt(S'' / 2),
+/// `side` being that sign (+1 near t0, -1 near t1; 0 = never).
+#[allow(clippy::too_many_arguments)]
+fn pair_eval_sided(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t: f64, side: f64)
+    -> (Vec3, Vec3, f64) {
     let y = a.cross(x);
     let perp = |w: Vec3| w.sub(b.scale(w.dot(b)));
     let round = x.scale(rho * t.cos()).add(y.scale(rho * t.sin()));
@@ -80,7 +89,14 @@ pub fn pair_eval(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, 
     let ds = -2.0 * cross.dot(ddp.cross(ap));
     let root = s.max(0.0).sqrt();
     let h = (-beta + branch * root) / alpha;
-    let dh = (-dbeta + branch * ds / (2.0 * root)) / alpha;
+    let slope = if side != 0.0 && s <= 1e-12 * alpha * r * r {
+        // S'' = -2 (|C'|^2 + C . C''), C' = perp(Q') x a', C'' = perp(Q'') x a' = -perp(Q - c) x a'.
+        let (dc, ddc) = (ddp.cross(ap), perp(round).scale(-1.0).cross(ap));
+        side * (-(dc.dot(dc) + cross.dot(ddc))).max(0.0).sqrt()
+    } else {
+        ds / (2.0 * root)
+    };
+    let dh = (-dbeta + branch * slope) / alpha;
     (round.add(a.scale(h)), dq.add(a.scale(dh)), s)
 }
 
@@ -111,6 +127,38 @@ pub fn pair_disc_lower_bound(k: &[f64; 5], t0: f64, t1: f64, n: usize) -> f64 {
     least - bend * step * step / 8.0
 }
 
+/// Bob 2026-10-28: what agrees within the tolerance is the same. So a CylinderPair trim may END where its two
+/// cylinders touch (S has a double root there: a hole's wall meeting a fillet at the fillet's tangent line), when
+/// - S stays above -2 alpha r tol over the whole trim (alpha = |a'|^2): with S clamped at 0 no point is more than
+///   tol off the root cylinder (|D' + h a'|^2 = r^2 - S / alpha); and
+/// - S is proved above tol^2 everywhere except in end neighbourhoods, each at most a quarter of the trim, at an
+///   end where S is within that bound of zero AND flat: S'^2 <= 4 floor max|S''|, a double root (a touch). A simple
+///   root there is the parameter cylinder's ruling grazing the root cylinder while the surfaces cross: the curve's
+///   speed is unbounded in this chart, so it is refused (the writer uses the other chart).
+/// Nearing tangency inside the trim (a corner within the edge) is refused: the edge must be split there.
+/// Returns whether the trim touches at t0 and at t1 (both false: the ordinary positive trim).
+#[allow(clippy::too_many_arguments)]
+pub fn pair_trim_touches(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, t0: f64, t1: f64, tol: f64)
+    -> Option<(bool, bool)> {
+    let k = pair_disc_coefficients(c, a, x, rho, p, b, r);
+    if pair_disc_lower_bound(&k, t0, t1, 4096) > tol * tol { return Some((false, false)); }
+    if !(tol > 0.0) { return None; }
+    let ap = a.sub(b.scale(a.dot(b)));
+    let floor = 2.0 * ap.dot(ap) * r * tol;
+    if pair_disc_lower_bound(&k, t0, t1, 4096) < -floor { return None; }
+    let s = |t: f64| k[0] + k[1] * t.cos() + k[2] * t.sin() + k[3] * (2.0 * t).cos() + k[4] * (2.0 * t).sin();
+    let ds = |t: f64| -k[1] * t.sin() + k[2] * t.cos() - 2.0 * k[3] * (2.0 * t).sin() + 2.0 * k[4] * (2.0 * t).cos();
+    let bend = k[1].abs() + k[2].abs() + 4.0 * (k[3].abs() + k[4].abs());
+    let touches = |t: f64| s(t) <= floor && ds(t).powi(2) <= 4.0 * floor * bend;
+    let (touch0, touch1) = (touches(t0), touches(t1));
+    if !touch0 && !touch1 { return None; }
+    // The narrowest end neighbourhoods outside which S is proved above tol^2.
+    (2..=40).rev().map(|n| (t1 - t0) / 2f64.powi(n)).find_map(|d| {
+        let (lo, hi) = (if touch0 { t0 + d } else { t0 }, if touch1 { t1 - d } else { t1 });
+        (pair_disc_lower_bound(&k, lo, hi, 4096) > tol * tol).then_some((touch0, touch1))
+    })
+}
+
 impl Curve {
     pub fn point_at_angle(c: Vec3, n: Vec3, x: Vec3, r: f64, t: f64) -> Vec3 {
         let y = n.cross(x);
@@ -133,8 +181,8 @@ impl Curve {
                 (Self::point_at_angle(c, n, x, r, t), x.scale(-r * t.sin()).add(y.scale(r * t.cos())))
             }
             Curve::Conic { c, u, v, .. } => (Self::conic_point(c, u, v, t), u.scale(-t.sin()).add(v.scale(t.cos()))),
-            Curve::CylinderPair { c, a, x, rho, p, b, r, branch, .. } => {
-                let (offset, d, _) = pair_eval(c, a, x, rho, p, b, r, branch, t);
+            Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => {
+                let (offset, d, _) = pair_eval_sided(c, a, x, rho, p, b, r, branch, t, Self::pair_side(t, t0, t1));
                 (c.add(offset), d)
             }
         }
@@ -143,13 +191,15 @@ impl Curve {
     /// so a curve far from the world origin evaluates near `o` without noise (mass quadrature).
     pub fn eval_from(&self, o: Vec3, t: f64) -> (Vec3, Vec3) {
         match *self {
-            Curve::CylinderPair { c, a, x, rho, p, b, r, branch, .. } => {
-                let (offset, d, _) = pair_eval(c, a, x, rho, p, b, r, branch, t);
+            Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => {
+                let (offset, d, _) = pair_eval_sided(c, a, x, rho, p, b, r, branch, t, Self::pair_side(t, t0, t1));
                 (c.sub(o).add(offset), d)
             }
             _ => { let (q, d) = self.eval(t); (q.sub(o), d) }
         }
     }
+    /// Which way a touching end lies from t: +1 nearer t0 (the trim runs on past it), -1 nearer t1.
+    fn pair_side(t: f64, t0: f64, t1: f64) -> f64 { if t - t0 <= t1 - t { 1.0 } else { -1.0 } }
     pub fn start(&self) -> Vec3 {
         match self {
             Curve::Line { a, .. } => *a,

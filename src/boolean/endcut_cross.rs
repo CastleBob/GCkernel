@@ -1944,7 +1944,13 @@ mod tests {
     fn singular_and_malformed_crossing_cuts_leave_inputs_untouched() {
         let base = fixture("base");
         let original = crate::neutral::write_body(&base);
-        // A concentric radius equal to the root fillet meets a branch singularity.
+        // A concentric radius equal to the root fillet reaches the flange face at the fillets' tangent line: hole and
+        // fillets touch there. Claude 2026-10-28 (Bob's rule: within tolerance it touches) admits it; removed, by an
+        // independent integral, .23 pi / 4 + 2 (pi / 16 - 1 / 6) = .1825 pi - 1 / 3. Within 1e-7, not 1e-9: the
+        // fillet's tangent line (x .24000000000000044) and the hole's extreme (.24) are one station, and the hole's
+        // angle at it is acos(-1 + 9e-16) = pi - 4e-8, so its edges end 2e-8 short of the exact touch point (the
+        // kernel's points stay within 5e-16 of both cylinders). Bob's captured hole, whose extreme is the station,
+        // matches its integral within 1e-13 (tests/touch.rs).
         let n = p(0., 0., 1.);
         let tangent = crate::extrude::extrude(
             &crate::neutral::Profile {
@@ -1963,10 +1969,11 @@ mod tests {
             1e-6,
         )
         .unwrap();
-        assert!(matches!(
-            crate::boolean::cut(&base, &tangent, 1e-6),
-            Err(KernelError::Unsupported(_))
-        ));
+        let touching = crate::boolean::cut(&base, &tangent, 1e-6).unwrap();
+        crate::topology::check(&touching, 1e-6).unwrap();
+        let removed = crate::mass::measure(&base, 1e-6).unwrap().volume
+            - crate::mass::measure(&touching, 1e-6).unwrap().volume;
+        assert!((removed - (0.1825 * PI - 1. / 3.)).abs() < 1e-7, "{removed}");
         let mut malformed = operation(&base, &fixture("step01"), 1e-6);
         let e = malformed
             .edges

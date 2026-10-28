@@ -258,8 +258,8 @@ fn validate(body: &Body, tol: f64) -> Result<()> {
                     "transverse cylinder-pair trim axes must match the section frame",
                 ));
             }
-            let k = crate::geom::pair_disc_coefficients(c, a, x, rho, host, b, r);
-            if crate::geom::pair_disc_lower_bound(&k, t0, t1, 4096) <= tol * tol {
+            // Bob 2026-10-28: a trim may end where its cylinders touch within tolerance.
+            if crate::geom::pair_trim_touches(c, a, x, rho, host, b, r, t0, t1, tol).is_none() {
                 return Err(unsupported(
                     "cylinder-pair trim approaches a tangency or branch singularity",
                 ));
@@ -712,8 +712,8 @@ fn lifted(lo: f64, hi: f64, y: Graph, z: Graph, tol: f64) -> Result<Curve> {
                 else {
                     unreachable!()
                 };
-                let k = crate::geom::pair_disc_coefficients(c, a, x, rho, p, b, r);
-                crate::geom::pair_disc_lower_bound(&k, t0, t1, 4096) > tol * tol
+                // Smooth over the trim; ending where the cylinders touch within tolerance is allowed (Bob 2026-10-28).
+                crate::geom::pair_trim_touches(c, a, x, rho, p, b, r, t0, t1, tol).is_some()
             };
             let curve = if smooth(&y_chart) {
                 y_chart

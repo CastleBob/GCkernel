@@ -3,7 +3,7 @@
 //! counts that are not whole or exceed the data present, bad references, degenerate frames, truncated and
 //! trailing data are all errors. Nothing is repaired.
 
-use crate::geom::{pair_disc_coefficients, pair_disc_lower_bound, Curve, Surface, Vec3};
+use crate::geom::{pair_trim_touches, Curve, Surface, Vec3};
 use crate::KernelError;
 
 #[derive(Clone, Debug)]
@@ -46,10 +46,15 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, KernelError> { Err(Kernel
 pub struct Reader<'a> {
     data: &'a [f64],
     at: usize,
+    tolerance: f64,
 }
 
 impl<'a> Reader<'a> {
-    pub fn new(data: &'a [f64]) -> Self { Self { data, at: 0 } }
+    /// Strict: every CylinderPair trim must have a proved positive discriminant.
+    pub fn new(data: &'a [f64]) -> Self { Self { data, at: 0, tolerance: 0.0 } }
+    /// The request's tolerance also admits a CylinderPair trim that ends where its cylinders touch
+    /// (`geom::pair_trim_touches`, Bob 2026-10-28).
+    pub fn with_tolerance(data: &'a [f64], tolerance: f64) -> Self { Self { data, at: 0, tolerance } }
 
     pub fn next(&mut self) -> Result<f64, KernelError> {
         let Some(&v) = self.data.get(self.at) else { return invalid("neutral data ended early") };
@@ -141,9 +146,9 @@ impl<'a> Reader<'a> {
                 if t1 <= t0 || t1 - t0 > 2.0 * std::f64::consts::PI + 1e-12 {
                     return invalid("a cylinder pair needs t0 < t1 <= t0 + 2 pi");
                 }
-                // The curve exists, and its two branches stay apart, only where the discriminant is positive.
-                let k = pair_disc_coefficients(c, a, x, rho, p, b, r);
-                if pair_disc_lower_bound(&k, t0, t1, 4096) <= 0.0 {
+                // The curve exists, and its two branches stay apart, only where the discriminant is positive (or, within
+                // the tolerance, where the trim ends at a touch).
+                if pair_trim_touches(c, a, x, rho, p, b, r, t0, t1, self.tolerance).is_none() {
                     return invalid("a cylinder pair's discriminant is not proved positive over its interval");
                 }
                 Ok(Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 })
