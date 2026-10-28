@@ -3,7 +3,7 @@
 GCmaker's own solid-modelling kernel, in Rust (Bob, 2026-10-27). Clean room: our own code from public
 mathematics; no third-party geometry source read, copied or translated. No dependencies.
 
-Ownership: foundation (geom, neutral, topology, extrude, mass, rebuild, tessellate, protocol, worker,
+Ownership: foundation (geom, frame, neutral, topology, extrude, mass, rebuild, tessellate, protocol, worker,
 tests/fixtures) Claude; `src/boolean/` written by Astra, maintained by Claude since 2026-10-28 (Bob put Claude on
 the modeler and cuts, Astra on the GC Kernel viewport). Plan and coordination: GCm `GCmaker/Handoff/Claude-GcKernel-BattlePlan.md`,
 `Claude-GcKernel-Status.md`, `Claude-GcKernel-FilletCuts-Request.md`.
@@ -26,7 +26,12 @@ Reply `GCKR`, u32 version 1, u32 status (0 ok, 1 unsupported, 2 invalid input, 3
 then count f64 (ok) or count UTF-8 message bytes.
 
 Ops: 1 check, 2 extrude, 3 cut, 4 measure ([volume, area, 1 closed form | 0 quadrature]),
-5 rebuild prism, 6 tessellate ([chord, body] -> display mesh and edge polylines, `src/tessellate.rs`; display only). Curves: 0 line, 1 arc, 2 B-spline (refused), 3 conic, 4 cylinder pair.
+5 rebuild prism, 6 tessellate ([chord, body] -> display mesh and edge polylines, `src/tessellate.rs`; display only),
+7 transform (one rigid motion and a batch of items -> the items moved; `src/frame.rs`, `protocol::transform`):
+`[1, mode (0 T, 1 T inverse), T (m row-major 9, t 3), N, N x [kind, len, data]]` -> `[1, N, N x [kind, len, data]]`;
+kinds 0 point, 1 vector, 2 frame (o x y), 3 rigid (reply: T after it), 4 curve, 5 body, 6 frame-local point
+(frame, x, y; reply kind 0), 7 surface. One bad item fails the batch with its index.
+Curves: 0 line, 1 arc, 2 B-spline (refused), 3 conic, 4 cylinder pair.
 Surfaces: 0 plane, 1 cylinder. See `src/protocol.rs`, `src/neutral.rs`, `src/geom.rs`.
 
 Display polylines omit internal same-plane/same-cylinder divisions and periodic seams. Their IDs remain the
@@ -40,6 +45,11 @@ Floating point with explicit tolerances and whole-interval mathematical bounds w
 arithmetic and not interval-certified. Valid input outside a supported domain is refused (Unsupported),
 never approximated, repaired or retried another way. `mass::measure` integrates whatever body it is
 given; every protocol path checks the body first.
+
+Geometry primitives (`src/frame.rs`): Vec2 / Point2, Point3 beside Vec3 (explicit conversions; bodies keep Vec3),
+Frame (right-handed, z = x cross y) and Rigid (rotation + translation; points move, vectors only turn). Supplied
+unit lengths, right angles and rotation matrices are admitted within `frame::ADMIT` (1e-12) and otherwise refused,
+never normalized; no mirror, scale or shear is representable. Angles in radians.
 
 ## Precision rule (Bob 2026-10-28)
 

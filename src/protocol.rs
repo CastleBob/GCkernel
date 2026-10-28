@@ -12,9 +12,12 @@
 //!      4 measure (a body -> its volume, surface area, and 1 when both are closed form, 0 when by quadrature),
 //!      5 rebuild prism (a body -> the kernel's own extrusion of it, when it is a straight prism; rebuild.rs),
 //!      6 tessellate (a chord tolerance then a body -> its display mesh and edge polylines; tessellate.rs, the
-//!        contract with Astra's viewport).
+//!        contract with Astra's viewport),
+//!      7 transform (one rigid motion and a batch of items -> the items moved; frame.rs, `transform`).
 
-use crate::neutral::{write_body, Reader};
+use crate::frame::{Frame, Point2, Point3, Rigid};
+use crate::geom::Vec3;
+use crate::neutral::{put_curve, put_surface, write_body, Reader};
 use crate::{boolean, extrude, mass, rebuild, tessellate, topology, KernelError};
 
 pub const VERSION: u32 = 1;
@@ -26,6 +29,7 @@ pub const OP_CUT: u32 = 3;
 pub const OP_MEASURE: u32 = 4;
 pub const OP_REBUILD_PRISM: u32 = 5;
 pub const OP_TESSELLATE: u32 = 6;
+pub const OP_TRANSFORM: u32 = 7;
 
 pub struct Request {
     pub op: u32,
@@ -126,6 +130,7 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             topology::check(&body, tol)?;
             Ok(tessellate::write_mesh(&tessellate::tessellate(&body, chord)?))
         }
+        OP_TRANSFORM => transform(&request.data, tol),
         op => Err(KernelError::Unsupported(format!("op {op}"))),
     }
 }
@@ -151,4 +156,113 @@ pub fn encode_reply(result: &Result<Vec<f64>, KernelError>) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Op 7 TRANSFORM (contract with Astra, GCm Handoff/Claude-GcKernel-FilletCuts-Request.md, 2026-10-28).
+/// Request: [1, mode (0 apply T, 1 apply T inverse), T (m row-major 9, t 3), N, N items of [kind, len, data[len]]].
+/// Kinds: 0 point (3), 1 vector (3), 2 frame (o x y, 9), 3 rigid (12; reply: T applied after it), 4 curve (neutral),
+/// 5 body (neutral v1), 6 frame-local point (frame 9, x, y; reply kind 0), 7 surface (neutral).
+/// Reply: [1, N, N items of [kind, len, data]]. Any bad item fails the whole batch with its index.
+pub fn transform(data: &[f64], tol: f64) -> Result<Vec<f64>, KernelError> {
+    let bad = |m: String| KernelError::InvalidInput(m);
+    let mut at = 0usize;
+    fn take(data: &[f64], at: &mut usize, what: &str) -> Result<f64, KernelError> {
+        let v = *data.get(*at).ok_or_else(|| KernelError::InvalidInput(format!("transform data ended early ({what})")))?;
+        *at += 1;
+        if v.is_finite() { Ok(v) } else { Err(KernelError::InvalidInput(format!("transform data is not finite ({what})"))) }
+    }
+    let next = |at: &mut usize, what: &str| take(data, at, what);
+    if next(&mut at, "version")? != 1.0 { return Err(bad("unsupported transform version".into())); }
+    let mode = next(&mut at, "mode")?;
+    if mode != 0.0 && mode != 1.0 { return Err(bad(format!("transform mode must be 0 or 1, not {mode}"))); }
+    let mut t = [0.0; 12];
+    for v in t.iter_mut() { *v = next(&mut at, "transform")?; }
+    let mut motion = rigid(&t).map_err(|e| bad(format!("the transform: {e}")))?;
+    if mode == 1.0 { motion = motion.inverse(); }
+    let count = next(&mut at, "item count")?;
+    if count < 0.0 || count != count.floor() || count > 1e7 { return Err(bad(format!("bad item count {count}"))); }
+    let mut out = vec![1.0, count];
+    for index in 0..count as usize {
+        let kind = next(&mut at, "item kind")?;
+        let len = next(&mut at, "item length")?;
+        if len < 0.0 || len != len.floor() { return Err(bad(format!("item {index}: bad length {len}"))); }
+        let len = len as usize;
+        let end = at.checked_add(len).filter(|&e| e <= data.len())
+            .ok_or_else(|| bad(format!("item {index}: its length {len} runs past the data")))?;
+        let item = &data[at..end];
+        at = end;
+        let (kind, reply) = transform_item(&motion, kind, item, tol).map_err(|e| bad(format!("item {index}: {e}")))?;
+        out.push(kind);
+        out.push(reply.len() as f64);
+        out.extend_from_slice(&reply);
+    }
+    if at != data.len() { return Err(bad(format!("transform data has {} values left over", data.len() - at))); }
+    Ok(out)
+}
+
+fn rigid(v: &[f64]) -> Result<Rigid, KernelError> {
+    Rigid::from_rows([[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]], Vec3::new(v[9], v[10], v[11]))
+}
+
+fn frame(v: &[f64]) -> Result<Frame, KernelError> {
+    Frame::new(Point3::new(v[0], v[1], v[2]), Vec3::new(v[3], v[4], v[5]), Vec3::new(v[6], v[7], v[8]))
+}
+
+fn transform_item(motion: &Rigid, kind: f64, item: &[f64], tol: f64) -> Result<(f64, Vec<f64>), KernelError> {
+    let exact = |n: usize| -> Result<(), KernelError> {
+        if item.len() == n { Ok(()) } else { Err(KernelError::InvalidInput(format!("kind {kind} needs {n} values, not {}", item.len()))) }
+    };
+    if item.iter().any(|v| !v.is_finite()) { return Err(KernelError::InvalidInput("not finite".into())); }
+    let p3 = |p: Point3| vec![p.x, p.y, p.z];
+    let v3 = |v: Vec3| vec![v.x, v.y, v.z];
+    match kind {
+        k if k == 0.0 => { exact(3)?; Ok((0.0, p3(motion.point(Point3::new(item[0], item[1], item[2]))))) }
+        k if k == 1.0 => { exact(3)?; Ok((1.0, v3(motion.vector(Vec3::new(item[0], item[1], item[2]))))) }
+        k if k == 2.0 => {
+            exact(9)?;
+            let f = motion.frame(&frame(item)?);
+            let mut o = p3(f.origin());
+            o.extend(v3(f.x()));
+            o.extend(v3(f.y()));
+            Ok((2.0, o))
+        }
+        k if k == 3.0 => {
+            exact(12)?;
+            let (m, t) = rigid(item)?.then(motion).rows();
+            let mut o: Vec<f64> = m.iter().flatten().copied().collect();
+            o.extend(v3(t));
+            Ok((3.0, o))
+        }
+        k if k == 4.0 => {
+            let mut r = Reader::with_tolerance(item, tol);
+            let c = r.curve()?;
+            r.finish()?;
+            let mut o = Vec::new();
+            put_curve(&mut o, &motion.curve(&c));
+            Ok((4.0, o))
+        }
+        k if k == 5.0 => {
+            let mut r = Reader::with_tolerance(item, tol);
+            let body = r.body()?;
+            r.finish()?;
+            topology::check(&body, tol)?;
+            let moved = motion.body(&body);
+            topology::check(&moved, tol).map_err(|e| KernelError::Internal(format!("the moved body is not valid: {e}")))?;
+            Ok((5.0, write_body(&moved)))
+        }
+        k if k == 6.0 => {
+            exact(11)?;
+            let p = frame(&item[..9])?.point2(Point2::new(item[9], item[10]));
+            Ok((0.0, p3(motion.point(p))))
+        }
+        k if k == 7.0 => {
+            let mut r = Reader::with_tolerance(item, tol);
+            let s = r.surface()?;
+            r.finish()?;
+            let mut o = Vec::new();
+            put_surface(&mut o, &motion.surface(&s));
+            Ok((7.0, o))
+        }
+        k => Err(KernelError::InvalidInput(format!("unknown item kind {k}"))),
+    }
 }

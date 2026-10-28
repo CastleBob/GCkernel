@@ -7,6 +7,7 @@
 
 pub mod boolean;
 pub mod extrude;
+pub mod frame;
 pub mod geom;
 pub mod mass;
 pub mod neutral;

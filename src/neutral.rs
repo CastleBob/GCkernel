@@ -248,6 +248,13 @@ pub fn put_curve(out: &mut Vec<f64>, c: &Curve) {
     }
 }
 
+pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
+    match s {
+        Surface::Plane { p, n, x } => { out.push(0.0); put(out, *p); put(out, *n); put(out, *x); }
+        Surface::Cylinder { p, a, x, r } => { out.push(1.0); put(out, *p); put(out, *a); put(out, *x); out.push(*r); }
+    }
+}
+
 pub fn write_body(body: &Body) -> Vec<f64> {
     let mut out = vec![1.0, body.vertices.len() as f64, body.edges.len() as f64, body.faces.len() as f64];
     for v in &body.vertices { put(&mut out, *v); }
@@ -257,10 +264,7 @@ pub fn write_body(body: &Body) -> Vec<f64> {
         out.push(e.end as f64);
     }
     for f in &body.faces {
-        match &f.surface {
-            Surface::Plane { p, n, x } => { out.push(0.0); put(&mut out, *p); put(&mut out, *n); put(&mut out, *x); }
-            Surface::Cylinder { p, a, x, r } => { out.push(1.0); put(&mut out, *p); put(&mut out, *a); put(&mut out, *x); out.push(*r); }
-        }
+        put_surface(&mut out, &f.surface);
         out.push(if f.sense { 1.0 } else { 0.0 });
         out.push(f.loops.len() as f64);
         for lp in &f.loops {
