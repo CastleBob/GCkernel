@@ -1,0 +1,9 @@
+GC Kernel display fixture (Claude 2026-10-28), first joint case for Astra's viewport (GCm Claude-GcKernel-Status.md Log 30).
+Part: plate 10 x 8 x 0.5 in (z 0..0.5) less a through-hole, centre (5, 4), radius 1. Exact volume 40 - pi/2 = 38.42920367320511 in^3.
+body.f64: the kernel's exact B-rep (neutral body v1).
+mesh.f64: worker op 6 TESSELLATE reply for chord 0.001 in: [1, chord, V, T, E, positions 3V, normals 3V,
+  triangles 4T (i, j, k, face index), then per edge: edge index, n, 3n points]. Inches, part-local, right-handed;
+  triangles counter-clockwise about the outward normal; vertices repeated per face; indices revision-local.
+Checks (tests/tessellate.rs): every directed triangle edge met by its reverse; triangle normals agree with vertex
+normals; mesh volume within chord x curved area of the exact volume (inscribed: a little above it here).
+Regenerate: GCKERNEL_WRITE_DISPLAY=1 cargo test --release --test tessellate

@@ -10,10 +10,12 @@
 //!      2 extrude (a profile -> the prism body, followed by its exact volume),
 //!      3 cut (two bodies back to back -> body less tool),
 //!      4 measure (a body -> its volume, surface area, and 1 when both are closed form, 0 when by quadrature),
-//!      5 rebuild prism (a body -> the kernel's own extrusion of it, when it is a straight prism; rebuild.rs).
+//!      5 rebuild prism (a body -> the kernel's own extrusion of it, when it is a straight prism; rebuild.rs),
+//!      6 tessellate (a chord tolerance then a body -> its display mesh and edge polylines; tessellate.rs, the
+//!        contract with Astra's viewport).
 
 use crate::neutral::{write_body, Reader};
-use crate::{boolean, extrude, mass, rebuild, topology, KernelError};
+use crate::{boolean, extrude, mass, rebuild, tessellate, topology, KernelError};
 
 pub const VERSION: u32 = 1;
 pub const UNITS_INCH: u32 = 1;
@@ -23,6 +25,7 @@ pub const OP_EXTRUDE: u32 = 2;
 pub const OP_CUT: u32 = 3;
 pub const OP_MEASURE: u32 = 4;
 pub const OP_REBUILD_PRISM: u32 = 5;
+pub const OP_TESSELLATE: u32 = 6;
 
 pub struct Request {
     pub op: u32,
@@ -115,6 +118,13 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             let rebuilt = rebuild::rebuild_prism(&body, tol)?;
             topology::check(&rebuilt, tol).map_err(|e| KernelError::Internal(format!("rebuild built an invalid solid: {e}")))?;
             Ok(write_body(&rebuilt))
+        }
+        OP_TESSELLATE => {
+            let chord = reader.next()?;
+            let body = reader.body()?;
+            reader.finish()?;
+            topology::check(&body, tol)?;
+            Ok(tessellate::write_mesh(&tessellate::tessellate(&body, chord)?))
         }
         op => Err(KernelError::Unsupported(format!("op {op}"))),
     }

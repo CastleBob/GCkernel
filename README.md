@@ -3,8 +3,9 @@
 GCmaker's own solid-modelling kernel, in Rust (Bob, 2026-10-27). Clean room: our own code from public
 mathematics; no third-party geometry source read, copied or translated. No dependencies.
 
-Ownership: foundation (geom, neutral, topology, extrude, mass, rebuild, protocol, worker, tests/fixtures)
-Claude; `src/boolean/` Astra. Plan and coordination: GCm `GCmaker/Handoff/Claude-GcKernel-BattlePlan.md`,
+Ownership: foundation (geom, neutral, topology, extrude, mass, rebuild, tessellate, protocol, worker,
+tests/fixtures) Claude; `src/boolean/` written by Astra, maintained by Claude since 2026-10-28 (Bob put Claude on
+the modeler and cuts, Astra on the GC Kernel viewport). Plan and coordination: GCm `GCmaker/Handoff/Claude-GcKernel-BattlePlan.md`,
 `Claude-GcKernel-Status.md`, `Claude-GcKernel-FilletCuts-Request.md`.
 
 ## Build and test
@@ -25,7 +26,7 @@ Reply `GCKR`, u32 version 1, u32 status (0 ok, 1 unsupported, 2 invalid input, 3
 then count f64 (ok) or count UTF-8 message bytes.
 
 Ops: 1 check, 2 extrude, 3 cut, 4 measure ([volume, area, 1 closed form | 0 quadrature]),
-5 rebuild prism. Curves: 0 line, 1 arc, 2 B-spline (refused), 3 conic, 4 cylinder pair.
+5 rebuild prism, 6 tessellate ([chord, body] -> display mesh and edge polylines, `src/tessellate.rs`; display only). Curves: 0 line, 1 arc, 2 B-spline (refused), 3 conic, 4 cylinder pair.
 Surfaces: 0 plane, 1 cylinder. See `src/protocol.rs`, `src/neutral.rs`, `src/geom.rs`.
 
 ## Precision
@@ -34,6 +35,11 @@ Floating point with explicit tolerances and whole-interval mathematical bounds w
 arithmetic and not interval-certified. Valid input outside a supported domain is refused (Unsupported),
 never approximated, repaired or retried another way. `mass::measure` integrates whatever body it is
 given; every protocol path checks the body first.
+
+## Precision rule (Bob 2026-10-28)
+
+What agrees within the request tolerance is the same, and the status says so (for example a hole whose wall
+touches a fillet exactly at its tangent line: `geom::pair_trim_touches`). Dimensions are never nudged to dodge a case.
 
 ## Fixtures
 

@@ -12,6 +12,7 @@ pub mod mass;
 pub mod neutral;
 pub mod protocol;
 pub mod rebuild;
+pub mod tessellate;
 pub mod topology;
 
 /// Why an operation produced no result. Nothing partial is ever returned with an error.
