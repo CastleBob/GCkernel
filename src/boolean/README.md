@@ -105,8 +105,9 @@ other unsupported interacting cuts are rejected.
 A verified plain axis-aligned box spanning exactly one complete stock coordinate
 uses the clear-passage or transverse intersection domain, selected from its
 footprint before construction. A clear passage retains unrelated geometry.
-Box tools spanning two or more stock coordinates, oblique planar tools and other
-planar-prism representations instead enter transverse cell admission directly.
+Box tools spanning two or more stock coordinates enter transverse cell admission.
+Other planar-prism representations select the convex-profile passage below when
+their finite corridor avoids cylindrical patches, otherwise transverse admission.
 Their normals and the stock cylinder axes select a compatible cardinal section
 chart before any operation runs. The entire cutter is still checked through its
 actual oriented boundary; its shape is not inferred from its bounds. No failed
@@ -157,8 +158,9 @@ one cylindrical face and full-circle seam topology enter bore admission;
 other one-cylinder tools enter transverse cell admission. Two-cylinder tools
 with distinct stored radii enter that same general profile domain without
 changing either radius; equal-radius tools enter capsule admission. Zero-cylinder
-tools on curved stock enter the planar tool domains described above; otherwise
-they enter rectilinear admission. Other cylinder counts are unsupported.
+tools on curved stock, and polygonal tools with oblique planar walls, enter the
+planar tool domains described above; remaining planar tools enter rectilinear
+admission. Other cylinder counts are unsupported.
 An error never triggers another algorithm. A malformed model reports InvalidInput;
 unsupported geometry, resolution or resource requirements report Unsupported.
 The worker catches unexpected faults separately. Validation includes oriented
@@ -292,7 +294,41 @@ checked against Claude's independent Eyeshot mesh references (absolute allowance
 0.001 in^3 for tessellation; see tests/fixtures/parts/*/reference.md). Native
 returned-body acceptance is recorded separately by the GCmaker owner.
 STR-1's next wedge retains an explicit near-coincident-line refusal. Rect Tube's
-fifth, arbitrary side-profile cut is not yet admitted by this whole-body chart.
+fifth, arbitrary side-profile cut uses the local passage below; the whole-body
+chart still cannot represent all three cylinder axes together.
 A pipe hole whose finite bottom crosses the inner wall is independently checked
 by a piecewise wall integral, 10,925 material probes, repeat cuts and transformed
 scale/translation tests; its volume is 70.48824992315208 in^3.
+
+
+## Convex planar profile passages and exact coplanar patch union
+
+A bounded, straight-edged convex prism can pass through planar wall intervals
+without changing remote curved faces. Two exact cardinal caps and perpendicular
+side planes select its axis. The complete input B-rep must match our own
+extrusion of its original cap lines; the bounding disk is only a clearance
+proof, never the removed shape. Three to 32 profile edges, one loop per face,
+and the existing passage work limits are enforced. Examples include triangular
+punches through a flat plate or a filleted web and a side cut after top holes.
+
+Before this local passage proof, connected axis-normal cap patches on EXACTLY
+the same stored plane and with the same outward direction are joined. Only
+shared, opposite topological edge occurrences are cancelled. Surviving edges
+must assemble into one outer loop and resolved holes without branching. Unused
+seam edges/vertices are removed and references remapped; analytic surfaces and
+surviving curves are unchanged. Near planes are never merged. Oriented analytic
+validation runs before and after the union. This is a deterministic exact-plane
+boundary union, not a retry after an unsuccessful Boolean or tolerance healing.
+The entire finite passage is admitted before cavity construction; every actual
+profile line is extruded through the proven wall depths and spliced into the
+joined caps. Failures return no partial body and never mutate the input.
+
+All FIVE captured Rect Tube tools now replay, final volume54.34233932006709in^3.
+The fifth cut removes the independently computed triangle area times the0.25in
+wall depth;15,283 independent local ray/material probes agree. Union preserves
+volume/area, is idempotent, keeps near planes separate and rejects malformed
+input. Previous non-cap faces remain unchanged after reference remapping.
+The fifth cut is tested on three axes and at1e5 translation. General convex
+profile checks cover a plain plate, two separated I-beam web triangles on all
+three axes, repeated-hole and partial-depth refusal. Native completion remains
+a separate handoff result, not implied by these Rust tests.

@@ -113,7 +113,7 @@ fn cyclic_equal(a: &[(usize, bool)], b: &[(usize, bool)]) -> bool {
 /// Match complete finite B-reps, up to indexing, curve direction, loop start,
 /// and equivalent surface frame conventions. This is admission verification,
 /// not a conversion: output later uses the original input cap curves.
-fn match_prism(actual: &Body, expected: &Body, tol: f64) -> Result<Vec<usize>> {
+pub(super) fn match_prism(actual: &Body, expected: &Body, tol: f64) -> Result<Vec<usize>> {
     let mut vertices = Vec::new();
     let mut seen = vec![false; expected.vertices.len()];
     for p in &actual.vertices {

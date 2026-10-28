@@ -15,16 +15,142 @@ fn vector(v: [f64; 3]) -> Vec3 {
     Vec3::new(v[0], v[1], v[2])
 }
 
+// A polygonal prism can also punch a clear planar wall after earlier cuts have
+// introduced several cylinder axes. Select by the finite cutter corridor before
+// either local passage construction or transverse admission; never retry errors.
+fn planar_profile_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    if tool.faces.len() > 34 || tool.edges.len() > 96 || tool.vertices.len() > 64 {
+        return Err(unsupported("planar profile cutter exceeds its work limit"));
+    }
+    crate::topology::check(tool, tol)?;
+    if tool.faces.iter().any(|f| f.loops.len() != 1) {
+        return super::endcut::planar_cross_cut(body, tool, tol);
+    }
+    let axes: Vec<_> = (0..3)
+        .filter(|axis| {
+            let mut caps = 0;
+            tool.faces.iter().all(|f| match f.surface {
+                Surface::Plane { n, .. } => {
+                    let n = xyz(n);
+                    if n[*axis].abs() == 1. && (0..3).all(|k| k == *axis || n[k] == 0.) {
+                        caps += 1;
+                        true
+                    } else {
+                        n[*axis] == 0.
+                    }
+                }
+                _ => false,
+            }) && caps == 2
+        })
+        .collect();
+    if axes.len() != 1
+        || tool
+            .edges
+            .iter()
+            .any(|e| !matches!(e.curve, Curve::Line { .. }))
+    {
+        return super::endcut::planar_cross_cut(body, tool, tol);
+    }
+    let axis = axes[0];
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for v in &tool.vertices {
+        for k in 0..3 {
+            lo[k] = lo[k].min(xyz(*v)[k]);
+            hi[k] = hi[k].max(xyz(*v)[k]);
+        }
+    }
+    let center = vector(std::array::from_fn(|k| (lo[k] + hi[k]) * 0.5));
+    let u = (axis + 1) % 3;
+    let v = (axis + 2) % 3;
+    let radius = (hi[u] - lo[u]).hypot(hi[v] - lo[v]) * 0.5;
+    if super::endcut::crosses_cylinder(body, axis, center, radius, lo[axis], hi[axis], tol) {
+        return super::endcut::planar_cross_cut(body, tool, tol);
+    }
+    let lower = tool
+        .faces
+        .iter()
+        .find(|f| {
+            matches!(f.surface, Surface::Plane { p, n, .. }
+        if xyz(n)[axis].abs() == 1. && (xyz(p)[axis] - lo[axis]).abs() <= tol)
+        })
+        .ok_or_else(|| unsupported("planar profile has no lower cap"))?;
+    if lower.loops.len() != 1 || lower.loops[0].len() < 3 || lower.loops[0].len() > 32 {
+        return Err(unsupported(
+            "planar profile requires one bounded convex polygon",
+        ));
+    }
+    let outline: Vec<_> = lower.loops[0]
+        .iter()
+        .map(|(i, forward)| {
+            if *forward {
+                tool.edges[*i].curve.clone()
+            } else {
+                tool.edges[*i].curve.reversed()
+            }
+        })
+        .collect();
+    let mut normal = [0.; 3];
+    normal[axis] = 1.;
+    let n = vector(normal);
+    let orientation = crate::extrude::signed_area(&outline, n).signum();
+    for edge in &outline {
+        let direction = edge.end().sub(edge.start());
+        for point in outline.iter().map(Curve::start) {
+            if direction.cross(point.sub(edge.start())).dot(n) * orientation < 0. {
+                return Err(unsupported("planar profile must be convex"));
+            }
+        }
+    }
+    let expected = crate::extrude::extrude(
+        &Profile {
+            loops: vec![outline.clone()],
+            n,
+            low: 0.,
+            high: hi[axis] - lo[axis],
+        },
+        tol,
+    )?;
+    super::capsule::match_prism(tool, &expected, tol)?;
+    let body = super::passage::coalesce_caps(body, axis, tol)?;
+    let passages =
+        super::passage::round_passages(&body, axis, center, radius, lo[axis], hi[axis], tol)?;
+    let mut result = body;
+    for (bottom, top, bottom_face, top_face) in passages {
+        let boundary = outline
+            .iter()
+            .map(|c| c.translated(n.scale(bottom - lo[axis])))
+            .collect();
+        let cavity = crate::extrude::extrude(
+            &Profile {
+                loops: vec![boundary],
+                n,
+                low: 0.,
+                high: top - bottom,
+            },
+            tol,
+        )?;
+        result = super::passage::splice_cavity(&result, cavity, axis, bottom_face, top_face, tol)?;
+    }
+    Ok(result)
+}
+
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     if !tol.is_finite() || tol <= 0. {
         return Err(KernelError::InvalidInput(
             "rectangular passage tolerance must be positive".into(),
         ));
     }
-    // Oblique planar prisms enter the analytic section domain directly. No box
-    // admission is attempted and failed operations never select another chart.
-    if tool.vertices.len()!=8 || tool.edges.len()!=12 || tool.faces.len()!=6 || tool.faces.iter().any(|f|matches!(f.surface,Surface::Plane {n,..} if xyz(n).iter().filter(|v|**v!=0.).count()!=1)) {
-        return super::endcut::planar_cross_cut(body,tool,tol);
+    // Select local polygon passage or transverse admission before construction.
+    if tool.vertices.len() != 8
+        || tool.edges.len() != 12
+        || tool.faces.len() != 6
+        || tool.faces.iter().any(|f| {
+            matches!(f.surface,Surface::Plane {n,..}
+            if xyz(n).iter().filter(|v| **v != 0.).count() != 1)
+        })
+    {
+        return planar_profile_cut(body, tool, tol);
     }
     let (lo, hi) = super::rectilinear::plain_box_bounds(tool, tol)?;
     if body.faces.len() > 5000 || body.edges.len() > 20000 || body.vertices.len() > 20000 {
@@ -129,6 +255,236 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
 mod tests {
     use super::*;
     use crate::geom::Surface;
+    #[test]
+    fn convex_profile_passages_repeat_on_all_axes_and_refuse_incomplete_depth() {
+        let n = Vec3::new(0., 0., 1.);
+        let points = [
+            Vec3::new(3., 5., 0.),
+            Vec3::new(5., 5., 0.),
+            Vec3::new(3.5, 7., 0.),
+        ];
+        let outline: Vec<_> = (0..3)
+            .map(|i| Curve::Line {
+                a: points[i],
+                b: points[(i + 1) % 3],
+            })
+            .collect();
+        let mut tool = crate::extrude::extrude(
+            &Profile {
+                loops: vec![outline.clone()],
+                n,
+                low: -6.,
+                high: 1.,
+            },
+            1e-6,
+        )
+        .unwrap();
+        let mut next = crate::extrude::extrude(
+            &Profile {
+                loops: vec![outline
+                    .iter()
+                    .map(|c| c.translated(Vec3::new(0., 10., 0.)))
+                    .collect()],
+                n,
+                low: -6.,
+                high: 1.,
+            },
+            1e-6,
+        )
+        .unwrap();
+        let mut blind = crate::extrude::extrude(
+            &Profile {
+                loops: vec![outline],
+                n,
+                low: -2.,
+                high: 1.,
+            },
+            1e-6,
+        )
+        .unwrap();
+        let mut base = captured("base");
+        let plate = self::tool(0., 10., 0., 20., -4., 0.);
+        let punched = crate::boolean::cut(&plate, &tool, 1e-6).unwrap();
+        assert!((crate::mass::measure(&punched, 1e-6).unwrap().volume - 792.).abs() < 1e-10);
+        for _ in 0..3 {
+            let original = crate::neutral::write_body(&base);
+            let first = crate::boolean::cut(&base, &tool, 1e-6).unwrap();
+            let second = crate::boolean::cut(&first, &next, 1e-6).unwrap();
+            let expected = 155.58846611769187 - 2. * 2. * 0.23;
+            assert!((crate::mass::measure(&second, 1e-6).unwrap().volume - expected).abs() < 1e-9);
+            assert_eq!(crate::topology::check(&second, 1e-6).unwrap().genus(), 2.);
+            assert!(matches!(
+                crate::boolean::cut(&first, &tool, 1e-6),
+                Err(KernelError::Unsupported(_))
+            ));
+            assert!(matches!(
+                crate::boolean::cut(&base, &blind, 1e-6),
+                Err(KernelError::Unsupported(_))
+            ));
+            assert_eq!(original, crate::neutral::write_body(&base));
+            base = rotate(&base);
+            tool = rotate(&tool);
+            next = rotate(&next);
+            blind = rotate(&blind);
+        }
+    }
+    #[test]
+    fn actual_rect_tube_fifth_profile_clears_partition_seams_and_retains_prior_cuts() {
+        let load = |name: &str| {
+            let bytes = std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("tests/fixtures/parts/rect_tube/{name}.f64")),
+            )
+            .unwrap();
+            let data: Vec<_> = bytes
+                .chunks_exact(8)
+                .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            crate::neutral::Reader::new(&data).body().unwrap()
+        };
+        let mut before = load("base");
+        for step in 1..=4 {
+            let mut data = crate::neutral::write_body(&before);
+            data.extend(crate::neutral::write_body(&load(&format!("step{step:02}"))));
+            let request = crate::protocol::parse_request(&crate::protocol::encode_request(
+                crate::protocol::OP_CUT,
+                1e-6,
+                &data,
+            ))
+            .unwrap();
+            let out = crate::protocol::handle(&request).unwrap();
+            before = crate::neutral::Reader::new(&out).body().unwrap();
+        }
+        let original = crate::neutral::write_body(&before);
+        let merged = super::super::passage::coalesce_caps(&before, 0, 1e-6).unwrap();
+        assert!(merged.faces.len() < before.faces.len());
+        let old_mass = crate::mass::measure(&before, 1e-6).unwrap();
+        let merged_mass = crate::mass::measure(&merged, 1e-6).unwrap();
+        assert!((old_mass.volume - merged_mass.volume).abs() < 1e-10);
+        assert!((old_mass.area - merged_mass.area).abs() < 1e-10);
+        assert_eq!(
+            crate::neutral::write_body(&merged),
+            crate::neutral::write_body(
+                &super::super::passage::coalesce_caps(&merged, 0, 1e-6).unwrap()
+            )
+        );
+        let tool = load("step05");
+        let result = crate::boolean::cut(&before, &tool, 1e-6).unwrap();
+        assert!(matches!(
+            crate::boolean::cut(&result, &tool, 1e-6),
+            Err(KernelError::Unsupported(_))
+        ));
+        assert_eq!(original, crate::neutral::write_body(&before));
+        assert_eq!(
+            crate::topology::check(&result, 1e-6).unwrap().genus(),
+            crate::topology::check(&before, 1e-6).unwrap().genus() + 1.
+        );
+        // Independent triangle area times the quarter-inch flat wall depth.
+        let cap = tool
+            .faces
+            .iter()
+            .find(|f| matches!(f.surface,Surface::Plane { n, .. } if n.x.abs() == 1.))
+            .unwrap();
+        let vertices: Vec<_> = cap.loops[0]
+            .iter()
+            .map(|(e, f)| {
+                if *f {
+                    tool.edges[*e].curve.start()
+                } else {
+                    tool.edges[*e].curve.end()
+                }
+            })
+            .collect();
+        assert_eq!(vertices.len(), 3);
+        let area = vertices[1]
+            .sub(vertices[0])
+            .cross(vertices[2].sub(vertices[0]))
+            .length()
+            * 0.5;
+        let volume = crate::mass::measure(&result, 1e-6).unwrap().volume;
+        assert!((old_mass.volume - volume - area * 0.25).abs() < 1e-10);
+        assert!((volume - 54.342254292).abs() < 0.001); // Claude's native mesh, 9ebdf7d.
+        let mut turned_body = before.clone();
+        let mut turned_tool = tool.clone();
+        for _ in 0..2 {
+            turned_body = rotate(&turned_body);
+            turned_tool = rotate(&turned_tool);
+            let turned = crate::boolean::cut(&turned_body, &turned_tool, 1e-6).unwrap();
+            assert!((crate::mass::measure(&turned, 1e-6).unwrap().volume - volume).abs() < 1e-9);
+        }
+        let translated = |body: &Body| {
+            let offset = Vec3::new(1e5, -1e5, 1e5);
+            let mut body = body.clone();
+            for p in &mut body.vertices {
+                *p = p.add(offset);
+            }
+            for e in &mut body.edges {
+                e.curve = e.curve.translated(offset);
+            }
+            for f in &mut body.faces {
+                match &mut f.surface {
+                    Surface::Plane { p, .. } | Surface::Cylinder { p, .. } => *p = p.add(offset),
+                }
+            }
+            body
+        };
+        let far = crate::boolean::cut(&translated(&before), &translated(&tool), 1e-6).unwrap();
+        assert!((crate::mass::measure(&far, 1e-6).unwrap().volume - volume).abs() < 1e-7);
+        for (i, face) in merged.faces.iter().enumerate() {
+            if !matches!(face.surface, Surface::Plane { n, .. } if n.x.abs() == 1.) {
+                assert_eq!(format!("{face:?}"), format!("{:?}", result.faces[i]));
+            }
+        }
+        // Independent local ray test of the returned planar wall boundaries,
+        // compared with the original flat wall minus the captured triangle.
+        for ix in 0..17 {
+            for iy in 0..31 {
+                for iz in 0..29 {
+                    let q = Vec3::new(
+                        -0.093 + 0.031 * ix as f64,
+                        2.613 + 0.083 * iy as f64,
+                        -3.913 + 0.081 * iz as f64,
+                    );
+                    let mut sides = Vec::new();
+                    for i in 0..3 {
+                        sides.push(
+                            vertices[(i + 1) % 3]
+                                .sub(vertices[i])
+                                .cross(q.sub(vertices[i]))
+                                .x,
+                        );
+                    }
+                    let in_triangle =
+                        sides.iter().all(|s| *s > 0.) || sides.iter().all(|s| *s < 0.);
+                    let expected = q.x > 0. && q.x < 0.25 && !in_triangle;
+                    let mut winding = 0;
+                    for face in &result.faces {
+                        let Surface::Plane { p, n, .. } = face.surface else {
+                            continue;
+                        };
+                        if n.x.abs() != 1. || p.x >= q.x {
+                            continue;
+                        }
+                        let mut inside = false;
+                        for &(edge, _) in face.loops.iter().flatten() {
+                            let Curve::Line { a, b } = result.edges[edge].curve else {
+                                panic!("flat side cap must have linear trims")
+                            };
+                            if (a.z > q.z) != (b.z > q.z)
+                                && q.y < a.y + (q.z - a.z) * (b.y - a.y) / (b.z - a.z)
+                            {
+                                inside = !inside;
+                            }
+                        }
+                        if inside {
+                            winding -= (n.x * if face.sense { 1. } else { -1. }) as i32;
+                        }
+                    }
+                    assert_eq!(winding == 1, expected, "side triangle probe {q:?}");
+                }
+            }
+        }
+    }
     fn captured(name: &str) -> Body {
         let data = std::fs::read(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -250,55 +606,55 @@ mod tests {
                 < 1e-8
         );
     }
+    fn rotate(body: &Body) -> Body {
+        let map = |v: Vec3| Vec3::new(v.y, v.z, v.x);
+        let mut body = body.clone();
+        for v in &mut body.vertices {
+            *v = map(*v);
+        }
+        for e in &mut body.edges {
+            match &mut e.curve {
+                Curve::Line { a, b } => {
+                    *a = map(*a);
+                    *b = map(*b);
+                }
+                Curve::Arc { c, n, x, .. } => {
+                    *c = map(*c);
+                    *n = map(*n);
+                    *x = map(*x);
+                }
+                Curve::Conic { c, u, v, .. } => {
+                    *c = map(*c);
+                    *u = map(*u);
+                    *v = map(*v);
+                }
+                Curve::CylinderPair { c, a, x, p, b, .. } => {
+                    *c = map(*c);
+                    *a = map(*a);
+                    *x = map(*x);
+                    *p = map(*p);
+                    *b = map(*b);
+                }
+            }
+        }
+        for f in &mut body.faces {
+            match &mut f.surface {
+                Surface::Plane { p, n, x } => {
+                    *p = map(*p);
+                    *n = map(*n);
+                    *x = map(*x);
+                }
+                Surface::Cylinder { p, a, x, .. } => {
+                    *p = map(*p);
+                    *a = map(*a);
+                    *x = map(*x);
+                }
+            }
+        }
+        body
+    }
     #[test]
     fn rectangular_root_punch_selects_each_coordinate_sweep_axis() {
-        let rotate = |body: &Body| {
-            let map = |v: Vec3| Vec3::new(v.y, v.z, v.x);
-            let mut body = body.clone();
-            for v in &mut body.vertices {
-                *v = map(*v);
-            }
-            for e in &mut body.edges {
-                match &mut e.curve {
-                    Curve::Line { a, b } => {
-                        *a = map(*a);
-                        *b = map(*b);
-                    }
-                    Curve::Arc { c, n, x, .. } => {
-                        *c = map(*c);
-                        *n = map(*n);
-                        *x = map(*x);
-                    }
-                    Curve::Conic { c, u, v, .. } => {
-                        *c = map(*c);
-                        *u = map(*u);
-                        *v = map(*v);
-                    }
-                    Curve::CylinderPair { c, a, x, p, b, .. } => {
-                        *c = map(*c);
-                        *a = map(*a);
-                        *x = map(*x);
-                        *p = map(*p);
-                        *b = map(*b);
-                    }
-                }
-            }
-            for f in &mut body.faces {
-                match &mut f.surface {
-                    Surface::Plane { p, n, x } => {
-                        *p = map(*p);
-                        *n = map(*n);
-                        *x = map(*x);
-                    }
-                    Surface::Cylinder { p, a, x, .. } => {
-                        *p = map(*p);
-                        *a = map(*a);
-                        *x = map(*x);
-                    }
-                }
-            }
-            body
-        };
         let mut base = captured("base");
         let mut cutter = tool(0.34, 1.14, 5., 7., -6., 1.);
         let mut reference: Option<f64> = None;

@@ -23,7 +23,11 @@ pub fn cut(
         0 if body
             .faces
             .iter()
-            .any(|f| matches!(f.surface, crate::geom::Surface::Cylinder { .. })) =>
+            .any(|f| matches!(f.surface, crate::geom::Surface::Cylinder { .. }))
+            || tool.faces.iter().any(|f| {
+                matches!(f.surface, crate::geom::Surface::Plane { n, .. }
+                if [n.x,n.y,n.z].iter().filter(|v| **v != 0.).count() != 1)
+            }) =>
         {
             box_cut::cut(body, tool, tolerance)
         }

@@ -411,10 +411,188 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
     Ok(bounds)
 }
 
-/// Returns ordered (lower height, upper height, lower face, upper face) intervals.
-/// A circular disk wholly inside every planar cap, alternating outward signs,
-/// and exclusion of all other patches prove the material intervals throughout
-/// the entire disk. Every interval must be fully spanned by the finite cutter.
+/// Join connected patches on exactly the same axis-normal plane. This removes
+/// artificial partition seams, not geometric boundaries: only a shared edge
+/// with opposite occurrences on two equal outward planes can be cancelled.
+pub(super) fn coalesce_caps(body: &Body, axis: usize, tol: f64) -> Result<Body> {
+    validate(body, tol)?;
+    let planes: Vec<_> = body
+        .faces
+        .iter()
+        .map(|f| match f.surface {
+            Surface::Plane { p, n, .. }
+                if xyz(n)[axis].abs() == 1. && (0..3).all(|k| k == axis || xyz(n)[k] == 0.) =>
+            {
+                Some((xyz(p)[axis], xyz(n)[axis] * sign(f.sense)))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut owners = vec![Vec::new(); body.edges.len()];
+    for (i, face) in body.faces.iter().enumerate() {
+        for (edge, forward) in face.loops.iter().flatten() {
+            owners[*edge].push((i, *forward));
+        }
+    }
+    let mut adjacency = vec![Vec::new(); body.faces.len()];
+    for pair in &owners {
+        let [(a, af), (b, bf)] = pair[..] else {
+            return Err(bad("cap union requires two edge occurrences"));
+        };
+        if a != b && af != bf && planes[a].is_some() && planes[a] == planes[b] {
+            adjacency[a].push(b);
+            adjacency[b].push(a);
+        }
+    }
+    let mut visited = vec![false; body.faces.len()];
+    let mut membership = vec![usize::MAX; body.faces.len()];
+    let mut faces = Vec::new();
+    let mut changed = false;
+    for seed in 0..body.faces.len() {
+        if visited[seed] {
+            continue;
+        }
+        let mut component = vec![seed];
+        visited[seed] = true;
+        let mut at = 0;
+        while at < component.len() {
+            for &next in &adjacency[component[at]] {
+                if !visited[next] {
+                    visited[next] = true;
+                    component.push(next);
+                }
+            }
+            at += 1;
+        }
+        if component.len() == 1 {
+            faces.push(body.faces[seed].clone());
+            continue;
+        }
+        changed = true;
+        for &i in &component {
+            membership[i] = seed;
+        }
+        let mut boundary = Vec::new();
+        for &i in &component {
+            for &(edge, forward) in body.faces[i].loops.iter().flatten() {
+                if owners[edge]
+                    .iter()
+                    .all(|(face, _)| membership[*face] == seed)
+                {
+                    continue;
+                }
+                boundary.push((edge, forward));
+            }
+        }
+        let mut starts = std::collections::BTreeMap::new();
+        let mut ends = std::collections::BTreeSet::new();
+        for (i, &(edge, forward)) in boundary.iter().enumerate() {
+            let e = &body.edges[edge];
+            let (start, end) = if forward {
+                (e.start, e.end)
+            } else {
+                (e.end, e.start)
+            };
+            if starts.insert(start, i).is_some() || !ends.insert(end) {
+                return Err(unsupported("coplanar union boundary branches at a vertex"));
+            }
+        }
+        let mut seen = vec![false; boundary.len()];
+        let mut loops = Vec::new();
+        for first in 0..boundary.len() {
+            if seen[first] {
+                continue;
+            }
+            let mut lp = Vec::new();
+            let mut i = first;
+            loop {
+                if seen[i] {
+                    return Err(bad("coplanar union boundary closes on another loop"));
+                }
+                seen[i] = true;
+                let (edge, forward) = boundary[i];
+                lp.push((edge, forward));
+                let e = &body.edges[edge];
+                let end = if forward { e.end } else { e.start };
+                i = *starts
+                    .get(&end)
+                    .ok_or_else(|| bad("coplanar union boundary is open"))?;
+                if i == first {
+                    break;
+                }
+            }
+            loops.push(lp);
+        }
+        let mut n = [0.; 3];
+        n[axis] = planes[seed].unwrap().1;
+        let n = vector(n);
+        let outer: Vec<_> = loops
+            .iter()
+            .enumerate()
+            .filter_map(|(i, lp)| (loop_area(body, lp, n) > tol * tol).then_some(i))
+            .collect();
+        if outer.len() != 1
+            || loops
+                .iter()
+                .any(|lp| loop_area(body, lp, n).abs() <= tol * tol)
+        {
+            return Err(unsupported(
+                "coplanar union needs one outer boundary and resolved holes",
+            ));
+        }
+        loops.swap(0, outer[0]);
+        let mut face = body.faces[seed].clone();
+        face.loops = loops;
+        faces.push(face);
+    }
+    if !changed {
+        return Ok(body.clone());
+    }
+    // Remove only unused seam edges/vertices and remap surviving references.
+    let mut edge_used = vec![false; body.edges.len()];
+    for face in &faces {
+        for (edge, _) in face.loops.iter().flatten() {
+            edge_used[*edge] = true;
+        }
+    }
+    let mut vertex_used = vec![false; body.vertices.len()];
+    for (i, edge) in body.edges.iter().enumerate() {
+        if edge_used[i] {
+            vertex_used[edge.start] = true;
+            vertex_used[edge.end] = true;
+        }
+    }
+    let mut result = Body::default();
+    let mut vm = vec![0; body.vertices.len()];
+    for (i, vertex) in body.vertices.iter().enumerate() {
+        if vertex_used[i] {
+            vm[i] = result.vertices.len();
+            result.vertices.push(*vertex);
+        }
+    }
+    let mut em = vec![0; body.edges.len()];
+    for (i, edge) in body.edges.iter().enumerate() {
+        if edge_used[i] {
+            em[i] = result.edges.len();
+            let mut edge = edge.clone();
+            edge.start = vm[edge.start];
+            edge.end = vm[edge.end];
+            result.edges.push(edge);
+        }
+    }
+    for mut face in faces {
+        for (edge, _) in face.loops.iter_mut().flatten() {
+            *edge = em[*edge];
+        }
+        result.faces.push(face);
+    }
+    validate(&result, tol)?;
+    Ok(result)
+}
+
+/// Ordered (lower height, upper height, lower face, upper face) intervals.
+/// A disk wholly inside each cap, alternating signs and exclusion of all other
+/// patches prove complete material intervals throughout the finite corridor.
 pub(super) fn round_passages(
     body: &Body,
     axis: usize,

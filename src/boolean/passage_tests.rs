@@ -310,3 +310,37 @@ fn web_passage_works_on_all_coordinate_axes() {
         assert!((volume(&result) - (480. - 21. * PI)).abs() < 1e-9);
     }
 }
+
+#[test]
+fn cap_union_cancels_exact_seams_but_never_merges_near_planes() {
+    let points = [(0., 0.), (2., 0.), (2., 2.), (0., 2.), (0., 1.)];
+    let profile = Profile {
+        loops: vec![(0..points.len())
+            .map(|i| line(points[i], points[(i + 1) % points.len()]))
+            .collect()],
+        n: Vec3::new(0., 0., 1.),
+        low: 0.,
+        high: 3.,
+    };
+    let body = crate::extrude::extrude(&profile, TOL).unwrap();
+    let merged = coalesce_caps(&body, 0, TOL).unwrap();
+    assert_eq!(merged.faces.len(), body.faces.len() - 1);
+    assert!((crate::mass::measure(&merged, TOL).unwrap().volume - 12.).abs() < 1e-12);
+    let mut near_body = body.clone();
+    let face = near_body
+        .faces
+        .iter_mut()
+        .find(|f| matches!(f.surface,Surface::Plane {p,n,..} if p.x==0. && n.x.abs()==1.))
+        .unwrap();
+    if let Surface::Plane { p, .. } = &mut face.surface {
+        p.x += 0.25 * TOL;
+    }
+    let unchanged = coalesce_caps(&near_body, 0, TOL).unwrap();
+    assert_eq!(
+        crate::neutral::write_body(&near_body),
+        crate::neutral::write_body(&unchanged)
+    );
+    let mut malformed = body.clone();
+    malformed.faces[0].sense = !malformed.faces[0].sense;
+    assert!(coalesce_caps(&malformed, 0, TOL).is_err());
+}
