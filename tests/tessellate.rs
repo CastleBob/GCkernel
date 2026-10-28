@@ -48,13 +48,17 @@ fn sound(body: &Body, m: &Mesh) -> f64 {
     let open = directed.values().filter(|&&k| k != 0).count();
     assert_eq!(open, 0, "{open} unmatched directed edges");
     assert_eq!(m.edges.len(), body.edges.len());
+    assert!(m.display_edges.windows(2).all(|e| e[0] < e[1]));
+    assert!(m.display_edges.iter().all(|&e| e < body.edges.len()));
     assert!(m.positions.iter().chain(&m.normals).all(|v| v.is_finite()));
     volume
 }
 
 /// Exact volume, mesh volume and their allowed gap (chord times the curved area).
 fn check(body: &Body, chord: f64) -> (f64, f64) {
+    let original = write_body(body);
     let m = tessellate(body, chord).unwrap();
+    assert_eq!(write_body(body), original, "display must not edit exact topology");
     let mesh_volume = sound(body, &m);
     let exact = measure(body, TOL).unwrap().volume;
     let curved: f64 = m.triangles.iter().zip(&m.faces)
@@ -73,6 +77,25 @@ fn plate() -> Body {
 fn rod(cx: f64, cy: f64, r: f64) -> Body {
     let c = Curve::Arc { c: Vec3::new(cx, cy, 0.0), n: Z, x: Vec3::new(1.0, 0.0, 0.0), r, t0: 0.0, t1: 2.0 * PI };
     gc_kernel::extrude::extrude(&Profile { loops: vec![vec![c]], n: Z, low: -1.0, high: 1.5 }, TOL).unwrap()
+}
+
+#[test]
+fn native_plate_with_separate_hole_and_rotated_slot_displays() {
+    for degrees in [0.0_f64, 37.0, -37.0, 90.0, 180.0] {
+    let angle = degrees.to_radians();
+    let x = Vec3::new(angle.cos(), angle.sin(), 0.0);
+    let y = Z.cross(x);
+    let p = |u: f64, v: f64| Vec3::new(7.0, 5.0, 0.0).add(x.scale(u)).add(y.scale(v));
+    let slot = gc_kernel::extrude::extrude(&Profile { n: Z, low: -1.0, high: 1.5, loops: vec![vec![
+        Curve::Line { a: p(-1.0, -0.5), b: p(1.0, -0.5) },
+        Curve::Arc { c: p(1.0, 0.0), n: Z, x, r: 0.5, t0: -PI / 2.0, t1: PI / 2.0 },
+        Curve::Line { a: p(1.0, 0.5), b: p(-1.0, 0.5) },
+        Curve::Arc { c: p(-1.0, 0.0), n: Z, x, r: 0.5, t0: PI / 2.0, t1: 3.0 * PI / 2.0 },
+    ]] }, TOL).unwrap();
+    let body = gc_kernel::boolean::cut(&plate(), &rod(2.0, 2.0, 0.5), TOL).unwrap();
+    let body = gc_kernel::boolean::cut(&body, &slot, TOL).unwrap();
+    check(&body, 1e-3);
+    }
 }
 
 #[test]
@@ -101,6 +124,10 @@ fn plate_with_hole_display_fixture_matches_the_worker() {
     assert_eq!(reply, write_mesh(&tessellate(&holed, 1e-3).unwrap()));
     let dir = format!("{}/tests/fixtures/display/plate_hole", env!("CARGO_MANIFEST_DIR"));
     let bytes = |v: &[f64]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    // Filtering edge strokes must not change the triangulated surface, normals or per-triangle face IDs.
+    let previous = values("display/plate_hole/mesh.f64");
+    let surface_end = 5 + 6 * reply[2] as usize + 4 * reply[3] as usize;
+    assert_eq!(&previous[5..surface_end], &reply[5..surface_end]);
     if std::env::var("GCKERNEL_WRITE_DISPLAY").is_ok() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(format!("{dir}/body.f64"), bytes(&body)).unwrap();
@@ -108,6 +135,35 @@ fn plate_with_hole_display_fixture_matches_the_worker() {
     }
     assert_eq!(values("display/plate_hole/body.f64"), body);
     assert_eq!(values("display/plate_hole/mesh.f64"), reply);
+}
+
+#[test]
+fn display_hides_periodic_and_partition_seams_but_keeps_hole_rims_and_stock_corners() {
+    let p = plate();
+    let pm = tessellate(&p, 1e-3).unwrap();
+    assert_eq!(pm.display_edges.len(), 12, "all sharp box edges are physical");
+    let r = rod(5.0, 4.0, 1.0);
+    let rm = tessellate(&r, 1e-3).unwrap();
+    assert_eq!(rm.display_edges.len(), 2, "draw the two rims, not the cylinder's periodic seam");
+    assert!(rm.display_edges.iter().all(|&e| matches!(r.edges[e].curve, Curve::Arc { .. })));
+    let holed = gc_kernel::boolean::cut(&p, &r, TOL).unwrap();
+    let hm = tessellate(&holed, 1e-3).unwrap();
+    assert_eq!(hm.display_edges.iter().filter(|&&e| matches!(holed.edges[e].curve, Curve::Arc { .. })).count(), 2);
+
+    for (fixture, steps) in [("rat_hole", 2), ("tangent_hole", 3), ("parts/rect_tube", 5)] {
+        let body = replay(fixture, steps);
+        let m = tessellate(&body, 1e-3).unwrap();
+        assert!(m.display_edges.len() < body.edges.len(), "{fixture}: expected artificial subdivisions");
+        assert!(!m.display_edges.is_empty());
+        let reply = write_mesh(&m);
+        let mut at = 5 + 6 * m.positions.len() + 4 * m.triangles.len();
+        for &id in &m.display_edges {
+            assert_eq!(reply[at] as usize, id, "must retain the original topology ID");
+            at += 2 + 3 * reply[at + 1] as usize;
+        }
+        assert_eq!(at, reply.len());
+        eprintln!("{fixture}: {} display edges / {} body edges", m.display_edges.len(), body.edges.len());
+    }
 }
 
 fn replay(dir: &str, steps: usize) -> Body {

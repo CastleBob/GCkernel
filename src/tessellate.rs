@@ -25,6 +25,44 @@ pub struct Mesh {
     pub faces: Vec<usize>,
     /// Each body edge's polyline, start vertex to end vertex.
     pub edges: Vec<Vec<Vec3>>,
+    /// Body edge IDs to draw. Same-support face divisions and periodic seams remain in topology/triangulation.
+    pub display_edges: Vec<usize>,
+}
+
+/// Only suppress divisions of the SAME analytic support with the same outward sense. Tangent fillet
+/// boundaries (plane/cylinder or different cylinders) and even shallow real creases remain visible.
+/// This roundoff allowance is independent of display chord and modelling tolerance; no body is changed.
+fn same_support(a: &crate::neutral::Face, b: &crate::neutral::Face) -> bool {
+    const ROUND: f64 = 64.0 * f64::EPSILON;
+    let sign = |sense: bool| if sense { 1.0 } else { -1.0 };
+    match (&a.surface, &b.surface) {
+        (Surface::Plane { p, n, .. }, Surface::Plane { p: q, n: m, .. }) => {
+            let d = q.sub(*p);
+            let magnitude = (d.x * n.x).abs() + (d.y * n.y).abs() + (d.z * n.z).abs();
+            n.scale(sign(a.sense)).sub(m.scale(sign(b.sense))).length() <= ROUND
+                && d.dot(*n).abs() <= ROUND * magnitude.max(1.0)
+        }
+        (Surface::Cylinder { p, a: n, r, .. }, Surface::Cylinder { p: q, a: m, r: s, .. }) => {
+            let d = q.sub(*p);
+            a.sense == b.sense && n.cross(*m).length() <= ROUND
+                && d.cross(*n).length() <= ROUND * d.length().max(1.0)
+                && (r - s).abs() <= ROUND * r.abs().max(s.abs()).max(1.0)
+        }
+        _ => false,
+    }
+}
+
+fn display_edges(body: &Body) -> Vec<usize> {
+    let mut uses = vec![Vec::new(); body.edges.len()];
+    for (f, face) in body.faces.iter().enumerate() {
+        for lp in &face.loops {
+            for &(e, _) in lp { uses[e].push(f); }
+        }
+    }
+    uses.iter().enumerate().filter_map(|(e, faces)| {
+        let internal = faces.len() == 2 && same_support(&body.faces[faces[0]], &body.faces[faces[1]]);
+        if internal { None } else { Some(e) }
+    }).collect()
 }
 
 fn unsupported<T>(m: impl Into<String>) -> Result<T, KernelError> { Err(KernelError::Unsupported(m.into())) }
@@ -134,7 +172,15 @@ fn bridge(p: &[[f64; 2]], poly: &mut Vec<usize>, hole: &[usize]) -> Result<(), K
     let mut best_angle = f64::INFINITY;
     for (k, &v) in poly.iter().enumerate() {
         let q = p[v];
-        if k == target || q == pm { continue; }
+        if q == pm { continue; }
+        // A bridge endpoint may occur more than once after earlier holes were joined. Each occurrence
+        // owns a different angular sector: the new bridge must enter the polygon's LOCAL interior.
+        let prev = p[poly[(k + poly.len() - 1) % poly.len()]];
+        let next = p[poly[(k + 1) % poly.len()]];
+        let incoming = cross2(prev, q, pm) >= 0.0;
+        let outgoing = cross2(q, next, pm) >= 0.0;
+        let local = if cross2(prev, q, next) >= 0.0 { incoming && outgoing } else { incoming || outgoing };
+        if !local { continue; }
         let (s1, s2, s3) = (cross2(pm, pi, q), cross2(pi, tp, q), cross2(tp, pm, q));
         let inside = (s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0) || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0);
         if inside && q[0] >= pm[0] {
@@ -142,6 +188,7 @@ fn bridge(p: &[[f64; 2]], poly: &mut Vec<usize>, hole: &[usize]) -> Result<(), K
             if angle < best_angle { best_angle = angle; target = k; }
         }
     }
+    if !best_angle.is_finite() { return unsupported("a face hole has no locally visible bridge endpoint"); }
     let mut joined = Vec::with_capacity(poly.len() + hole.len() + 2);
     joined.extend_from_slice(&poly[..=target]);
     for k in 0..=hole.len() { joined.push(hole[(hm + k) % hole.len()]); }
@@ -236,7 +283,7 @@ fn triangulate(p: &[[f64; 2]], loops: &[Vec<usize>], short: bool) -> Result<Vec<
 pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
     if !chord.is_finite() || chord <= 0.0 { return Err(KernelError::InvalidInput("the chord tolerance must be positive".into())); }
     let lines: Vec<Vec<Vec3>> = (0..body.edges.len()).map(|e| polyline(body, e, chord)).collect::<Result<_, _>>()?;
-    let mut mesh = Mesh { chord, positions: Vec::new(), normals: Vec::new(), triangles: Vec::new(), faces: Vec::new(), edges: lines.clone() };
+    let mut mesh = Mesh { chord, positions: Vec::new(), normals: Vec::new(), triangles: Vec::new(), faces: Vec::new(), edges: lines.clone(), display_edges: display_edges(body) };
     for (f, face) in body.faces.iter().enumerate() {
         let loops3: Vec<Vec<Vec3>> = face.loops.iter().map(|l| loop_points(&lines, l)).collect();
         let mut points3: Vec<Vec3> = loops3.concat();
@@ -249,7 +296,7 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
                 let w = n.scale(side);
                 let v = w.cross(x);
                 let p2: Vec<[f64; 2]> = points3.iter().map(|q| { let d = q.sub(p); [d.dot(x), d.dot(v)] }).collect();
-                let tris = triangulate(&p2, &index, false)?;
+                let tris = triangulate(&p2, &index, false).map_err(|e| KernelError::Unsupported(format!("planar face {f}: {e}")))?;
                 (tris, vec![w; points3.len()])
             }
             Surface::Cylinder { p, a, x, r } => {
@@ -342,15 +389,45 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
 }
 
 /// The worker reply: [1, chord, V, T, E, positions 3V, normals 3V, triangles 4T (i, j, k, face), then per edge:
-/// edge index, point count n, 3n points].
+/// original body edge index (possibly sparse), point count n, 3n points]. Only display edges are exported;
+/// triangles and the exact body's edges remain unchanged.
 pub fn write_mesh(m: &Mesh) -> Vec<f64> {
-    let mut out = vec![1.0, m.chord, m.positions.len() as f64, m.triangles.len() as f64, m.edges.len() as f64];
+    let mut out = vec![1.0, m.chord, m.positions.len() as f64, m.triangles.len() as f64, m.display_edges.len() as f64];
     for v in m.positions.iter().chain(&m.normals) { out.extend_from_slice(&[v.x, v.y, v.z]); }
     for (t, f) in m.triangles.iter().zip(&m.faces) { out.extend_from_slice(&[t[0] as f64, t[1] as f64, t[2] as f64, *f as f64]); }
-    for (e, line) in m.edges.iter().enumerate() {
+    for &e in &m.display_edges {
+        let line = &m.edges[e];
         out.push(e as f64);
         out.push(line.len() as f64);
         for v in line { out.extend_from_slice(&[v.x, v.y, v.z]); }
     }
     out
+}
+
+#[cfg(test)]
+mod edge_classification_tests {
+    use super::*;
+    use crate::neutral::Face;
+
+    #[test]
+    fn support_identity_preserves_shallow_creases_offsets_and_fillet_boundaries() {
+        let z = Vec3::new(0.0, 0.0, 1.0);
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let o = Vec3::new(0.0, 0.0, 0.0);
+        let face = |surface| Face { surface, sense: true, loops: Vec::new() };
+        let p = face(Surface::Plane { p: o, n: z, x });
+        let shifted = face(Surface::Plane { p: x.scale(1e8), n: z, x });
+        assert!(same_support(&p, &shifted));
+        let reversed = Face { surface: Surface::Plane { p: o, n: z.scale(-1.0), x }, sense: false, loops: Vec::new() };
+        assert!(same_support(&p, &reversed));
+        assert!(!same_support(&p, &Face { sense: false, ..p.clone() }));
+        assert!(!same_support(&p, &face(Surface::Plane { p: o, n: Vec3::new(1e-8, 0.0, 1.0).unit().unwrap(), x })));
+        assert!(!same_support(&p, &face(Surface::Plane { p: z.scale(1e-8), n: z, x })));
+        let c = face(Surface::Cylinder { p: o, a: z, x, r: 1.0 });
+        assert!(same_support(&c, &face(Surface::Cylinder { p: z.scale(1000.0), a: z.scale(-1.0), x, r: 1.0 })));
+        assert!(!same_support(&c, &Face { sense: false, ..c.clone() }));
+        assert!(!same_support(&c, &face(Surface::Cylinder { p: x.scale(1e-7), a: z, x, r: 1.0 })));
+        assert!(!same_support(&c, &face(Surface::Cylinder { p: o, a: z, x, r: 1.0 + 1e-7 })));
+        assert!(!same_support(&p, &c), "fillet transitions are intentional edges");
+    }
 }

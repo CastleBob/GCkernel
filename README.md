@@ -29,6 +29,11 @@ Ops: 1 check, 2 extrude, 3 cut, 4 measure ([volume, area, 1 closed form | 0 quad
 5 rebuild prism, 6 tessellate ([chord, body] -> display mesh and edge polylines, `src/tessellate.rs`; display only). Curves: 0 line, 1 arc, 2 B-spline (refused), 3 conic, 4 cylinder pair.
 Surfaces: 0 plane, 1 cylinder. See `src/protocol.rs`, `src/neutral.rs`, `src/geom.rs`.
 
+Display polylines omit internal same-plane/same-cylinder divisions and periodic seams. Their IDs remain the
+original body edge IDs (possibly sparse); exact topology and mesh boundary samples are retained. Distinct
+supports, including tangent fillet transitions, remain visible. Multi-hole face triangulation chooses bridge
+endpoints using the local interior sector when earlier holes repeat a vertex. These are display-only rules.
+
 ## Precision
 
 Floating point with explicit tolerances and whole-interval mathematical bounds where stated; not exact
