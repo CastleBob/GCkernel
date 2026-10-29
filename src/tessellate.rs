@@ -73,6 +73,20 @@ fn same_support(a: &crate::neutral::Face, b: &crate::neutral::Face) -> bool {
             a.sense == b.sense && n.cross(*m).length() <= ROUND && c.distance(*c2) <= ROUND * c.length().max(1.0)
                 && (big - big2).abs() <= ROUND * big.max(*big2).max(1.0) && (r - r2).abs() <= ROUND * r.max(*r2).max(1.0)
         }
+        // One meridian swept about one axis: the same meridian data, axis line and orientation (a seam, or pieces of one
+        // swept curve). Distinct meridian pieces (different data) stay visible.
+        (Surface::Revolution { p, a: n, m, .. }, Surface::Revolution { p: q, a: k, m: m2, .. }) => {
+            let d = q.sub(*p);
+            let close = |x: f64, y: f64| (x - y).abs() <= ROUND * x.abs().max(y.abs()).max(1.0);
+            let same_meridian = match (m, m2) {
+                (crate::meridian::Meridian::Ellipse { c, u, v }, crate::meridian::Meridian::Ellipse { c: c2, u: u2, v: v2 }) =>
+                    [c.0, c.1, u.0, u.1, v.0, v.1].iter().zip([c2.0, c2.1, u2.0, u2.1, v2.0, v2.1]).all(|(x, y)| close(*x, y)),
+                (crate::meridian::Meridian::Bezier(b1), crate::meridian::Meridian::Bezier(b2)) =>
+                    b1.iter().zip(b2.iter()).all(|(x, y)| close(x.0, y.0) && close(x.1, y.1)),
+                _ => false,
+            };
+            a.sense == b.sense && n.sub(*k).length() <= ROUND && d.length() <= ROUND * p.length().max(1.0) && same_meridian
+        }
         _ => false,
     }
 }
