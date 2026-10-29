@@ -128,6 +128,27 @@ oblique geometry and a box not spanning a stock coordinate remain outside this
 entry's supported domain. Tests can export exact end-cut inputs/results to a
 caller-selected directory with GCKERNEL_ASTRA_END_EXPORT for native review.
 
+### Prism section cuts (Claude, 2026-10-29)
+
+`section.rs`. Selected FIRST, before the domains below, when both operands are
+right prisms along one cardinal axis (two caps normal to it, every other face a
+plane or cylinder parallel to it), the tool spans the body's whole extent along
+it, and the tool's section is not strictly inside the body's section (it meets or
+crosses the outline or a hole). Clear interior passages keep their domains below.
+Prism proof: the section's area times the extent equals the measured volume.
+The result is our own extrusion of the 2D regularized difference of the sections
+(line and circular-arc loops): every edge split at closed-form meetings and at
+endpoints lying on the other boundary; meeting points within the tolerance are one
+vertex; coincident pieces decided once per pair by their tangents (same way:
+removed; opposite: kept); every other piece kept or dropped by its midpoint's
+winding; collinear lines and co-circular arcs merged so no seams remain. Refused:
+a vertex met twice (a pinch, e.g. a hole tangent to the outline: non-manifold),
+disconnected material, a tool not spanning the body, conic section edges.
+Public method: subdivide-and-classify (Martinez, Rueda, Feito 2009), written
+independently. Tests: corner triangle on the plate faces (exact, +-1 ulp), arc
+notch both ways round, cut across a hole, re-cutting a hole or slot (no change),
+crossing bores and slots, Bob's p9999 corner cut, all against analytic volumes.
+
 ## Admission, errors and representation
 
 ### Transverse analytic end cuts

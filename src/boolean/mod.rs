@@ -1,4 +1,4 @@
-//! Independent boolean operations. Owner: Astra/Codex.
+//! Independent boolean operations. Owner: Claude (from 2026-10-29; previously Astra/Codex).
 //! Supported domains are rectilinear solids, clear planar passages, and bounded
 //! transverse intersections of analytic plane/cylinder solids. Admission selects one operation before execution;
 //! failure never triggers another algorithm.
@@ -15,6 +15,10 @@ pub fn cut(
     tool: &crate::neutral::Body,
     tolerance: f64,
 ) -> Result<crate::neutral::Body, crate::KernelError> {
+    // Through cuts reaching a prism's outline or holes: the section domain (selected before execution).
+    if section::selects(body, tool, tolerance) {
+        return section::cut(body, tool, tolerance);
+    }
     let cylinders = tool
         .faces
         .iter()

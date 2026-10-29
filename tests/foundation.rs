@@ -255,12 +255,16 @@ fn protocol_extrude_check_and_cut() {
     assert_eq!(reply_status(&gc_kernel::protocol::encode_reply(&cut)), 0, "{cut:?}");
     check(&Reader::new(cut.as_ref().unwrap()).body().unwrap(), TOL).unwrap();
 
-    // A round tool crossing the box's boundary is outside the supported domain and says so.
+    // A round tool crossing the box's boundary (prism section domain, Claude 2026-10-29): a half-disc notch.
     let crossing = Profile { loops: vec![vec![circle(0.0, 4.0, 1.0)]], n: Z, low: -1.0, high: 5.0 };
     let mut two = body.to_vec();
     two.extend_from_slice(&write_body(&extrude(&crossing, TOL).unwrap()));
     let cut = handle(&parse_request(&encode_request(OP_CUT, TOL, &two)).unwrap());
-    assert_eq!(reply_status(&gc_kernel::protocol::encode_reply(&cut)), 1, "{cut:?}");
+    assert_eq!(reply_status(&gc_kernel::protocol::encode_reply(&cut)), 0, "{cut:?}");
+    let notched = Reader::new(cut.as_ref().unwrap()).body().unwrap();
+    check(&notched, TOL).unwrap();
+    let volume = gc_kernel::mass::measure(&notched, TOL).unwrap().volume;
+    assert!((volume - (320.0 - 2.0 * std::f64::consts::PI)).abs() < 1e-9, "{volume}");
 }
 
 #[test]

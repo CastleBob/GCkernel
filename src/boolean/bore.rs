@@ -475,8 +475,16 @@ mod tests {
     }
 
     #[test]
-    fn boundary_crossing_tangent_and_blind_bores_are_explicitly_unsupported() {
-        for (x, depth) in [(0., (-1., 5.)), (1., (-1., 5.)), (5., (2., 5.))] {
+    fn boundary_crossing_bores_cut_in_the_section_domain_tangent_and_blind_stay_unsupported() {
+        // Since 2026-10-29 a bore reaching the outline is a prism section cut: centred on the x = 0 face it leaves a
+        // half-disc notch. Tangent to that face from inside it would pinch the section (non-manifold), and a blind
+        // bore spans no prism; both stay refused.
+        let (body, tool) = fixture(2, [0., 4., 0.], 1., (-1., 5.));
+        let result = crate::boolean::cut(&body, &tool, 1e-7).unwrap();
+        crate::topology::check(&result, 1e-7).unwrap();
+        let volume = crate::mass::measure(&result, 1e-7).unwrap().volume;
+        assert!((volume - (320. - 2. * std::f64::consts::PI)).abs() < 1e-9, "{volume}");
+        for (x, depth) in [(1., (-1., 5.)), (5., (2., 5.))] {
             let (body, tool) = fixture(2, [x, 4., 0.], 1., depth);
             assert!(matches!(
                 crate::boolean::cut(&body, &tool, 1e-7),
@@ -521,13 +529,14 @@ mod tests {
     }
 
     #[test]
-    fn flush_axial_caps_work_but_recutting_the_same_hole_is_not_yet_admitted() {
+    fn flush_axial_caps_work_and_recutting_the_same_hole_changes_nothing() {
         let (body, tool) = fixture(2, [5., 4., 0.], 1., (0., 4.));
         let result = crate::boolean::cut(&body, &tool, 1e-7).unwrap();
         assert!((boundary_volume(&result) - (320. - 4. * std::f64::consts::PI)).abs() < 1e-9);
-        assert!(matches!(
-            crate::boolean::cut(&result, &tool, 1e-7),
-            Err(KernelError::Unsupported(_))
-        ));
+        // The tool's wall is the hole's wall (section domain since 2026-10-29): nothing more is removed.
+        let again = crate::boolean::cut(&result, &tool, 1e-7).unwrap();
+        crate::topology::check(&again, 1e-7).unwrap();
+        let volume = crate::mass::measure(&again, 1e-7).unwrap().volume;
+        assert!((volume - (320. - 4. * std::f64::consts::PI)).abs() < 1e-9, "{volume}");
     }
 }

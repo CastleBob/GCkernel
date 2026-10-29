@@ -302,7 +302,8 @@ fn difference(a: &[Vec<Seg>], b: &[Vec<Seg>], tol: f64) -> Result<Vec<Vec<Seg>>>
             b_overlap[j] = true;
             // Shared boundary: the same way round, b's material lies on a's side and removes it; the other way
             // round the regions only touch and a's boundary stays.
-            if pb[j].v0 != p.v0 {
+            // Direction from the tangents at the shared midpoint (a closed piece starts and ends at one vertex).
+            if pb[j].seg.tangent(0.5).dot(p.seg.tangent(0.5)) < 0. {
                 kept.push(Piece { v0: p.v0, v1: p.v1, seg: p.seg });
             }
             continue;
@@ -333,6 +334,7 @@ fn difference(a: &[Vec<Seg>], b: &[Vec<Seg>], tol: f64) -> Result<Vec<Vec<Seg>>>
     // back along the arriving piece: each loop then bounds one material sector.
     let mut used = vec![false; kept.len()];
     let mut loops = vec![];
+    let mut visited = vec![false; pool.len()];
     for first in 0..kept.len() {
         if used[first] {
             continue;
@@ -341,6 +343,11 @@ fn difference(a: &[Vec<Seg>], b: &[Vec<Seg>], tol: f64) -> Result<Vec<Vec<Seg>>>
         let mut at = first;
         loop {
             used[at] = true;
+            // A vertex on the boundary twice is a pinch: material meeting itself at a point of the section (an edge
+            // shared by four faces in the solid), e.g. a hole tangent to the outline. Not a manifold result.
+            if std::mem::replace(&mut visited[kept[at].v0], true) {
+                return Err(unsupported("section cut touches a boundary at a point (non-manifold result)"));
+            }
             lp.push(kept[at].seg);
             let end = kept[at].v1;
             let back = kept[at].seg.tangent(1.).scale(-1.);
@@ -524,6 +531,23 @@ fn prism_along(tool: &Body, k: usize) -> bool {
         }
         Surface::Cylinder { a, .. } => coord(a, k).abs() >= 1. - 1e-12,
     }) && caps >= 2
+}
+
+/// Domain selection, before anything is built (reviewed rule pending with Codex): both operands are right prisms
+/// along one axis with the tool spanning the body, and the tool's section is NOT strictly inside the body's - it
+/// meets or crosses the outline or a hole. Clear interior passages keep their existing domains.
+pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
+    for k in (0..3).filter(|&k| prism_along(tool, k) && prism_along(body, k)) {
+        let (Ok(Some((a, lo, hi))), Ok(Some((b, tlo, thi)))) = (prism(body, k, tol), prism(tool, k, tol)) else {
+            continue;
+        };
+        if tlo > lo + tol || thi < hi - tol {
+            continue;
+        }
+        let meets = a.iter().flatten().any(|s| b.iter().flatten().any(|t| !meetings(s, t, tol).is_empty()));
+        return meets || !matches!(winding(&a, b[0][0].start()), Ok(1));
+    }
+    false
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {

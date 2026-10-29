@@ -222,8 +222,15 @@ fn indexing_curve_direction_and_loop_start_do_not_change_the_slot() {
 }
 
 #[test]
-fn slot_crossing_tangent_blind_and_repeated_cases_are_explicitly_unsupported() {
-    for (offset, depth) in [(3., (-1., 5.)), (2., (-1., 5.)), (0., (2., 5.))] {
+fn slot_crossing_cuts_in_the_section_domain_tangent_and_blind_stay_unsupported() {
+    // Since 2026-10-29 a slot reaching the outline is a prism section cut. At offset 3 its right half circle is
+    // past x = 10: inside remain the straight part x 6..10 (8) and the left half disc (pi / 2). At offset 2 its end
+    // touches x = 10 at a point (non-manifold), and a blind slot spans no prism: both stay refused.
+    let (body, tool) = fixture(2, 0., 3., (-1., 5.));
+    let result = crate::boolean::cut(&body, &tool, TOL).unwrap();
+    crate::topology::check(&result, TOL).unwrap();
+    assert!((boundary_volume(&result) - (320. - 4. * (8. + PI / 2.))).abs() < 1e-9);
+    for (offset, depth) in [(2., (-1., 5.)), (0., (2., 5.))] {
         let (body, tool) = fixture(2, 0., offset, depth);
         assert!(matches!(
             crate::boolean::cut(&body, &tool, TOL),
@@ -233,10 +240,9 @@ fn slot_crossing_tangent_blind_and_repeated_cases_are_explicitly_unsupported() {
     let (body, tool) = fixture(2, 0., 0., (0., 4.));
     let result = crate::boolean::cut(&body, &tool, TOL).unwrap();
     assert!((boundary_volume(&result) - (320. - 4. * (8. + PI))).abs() < 1e-9);
-    assert!(matches!(
-        crate::boolean::cut(&result, &tool, TOL),
-        Err(KernelError::Unsupported(_))
-    ));
+    // Recutting the same slot removes nothing more.
+    let again = crate::boolean::cut(&result, &tool, TOL).unwrap();
+    assert!((boundary_volume(&again) - (320. - 4. * (8. + PI))).abs() < 1e-9);
 }
 
 #[test]
