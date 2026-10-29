@@ -137,10 +137,13 @@ construction; one domain runs and its failure is returned, never retried):
    to k, the caps lie on two levels, and the prism proof below holds;
 2. the tool spans the body along k (tool low <= body low + tol, tool high >=
    body high - tol); the first axis k = 0, 1, 2 meeting 1-2 is the chart;
-3. and EITHER the tool's section meets or crosses the body's section boundary
-   (outline or a hole), OR the body is no longer a plain box (six cardinal planar
-   faces), e.g. Bob's p9999 hole after its corner cut. A clear interior cut in a
-   plain box keeps the domains below (bore, passage, rectilinear).
+3. and ANY of: the tool's section meets or crosses the body's section boundary
+   (outline or a hole); the body is no longer a plain box (six cardinal planar
+   faces), e.g. Bob's p9999 hole after its corner cut; or a representative point
+   of the tool's boundary (its first edge's start) is not classified inside the
+   body (winding not 1), i.e. a tool wholly enclosing the body or wholly outside
+   it with no boundary meetings. Only a clear interior cut in a plain box keeps
+   the domains below (bore, passage, rectilinear).
 Bounds: at most 2000 section edges per operand and 8000 kept pieces.
 Prism proof: the section's area times the extent equals the measured volume.
 The result is our own extrusion of the 2D regularized difference of the sections
