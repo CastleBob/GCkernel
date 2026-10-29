@@ -130,11 +130,18 @@ caller-selected directory with GCKERNEL_ASTRA_END_EXPORT for native review.
 
 ### Prism section cuts (Claude, 2026-10-29)
 
-`section.rs`. Selected FIRST, before the domains below, when both operands are
-right prisms along one cardinal axis (two caps normal to it, every other face a
-plane or cylinder parallel to it), the tool spans the body's whole extent along
-it, and the tool's section is not strictly inside the body's section (it meets or
-crosses the outline or a hole). Clear interior passages keep their domains below.
+`section.rs`. Selector (`section::selects`, from operand geometry before any
+construction; one domain runs and its failure is returned, never retried):
+1. both operands are right prisms along the same cardinal axis k: every face is a
+   cap plane normal to k (within 1e-12 of cardinal) or a plane/cylinder parallel
+   to k, the caps lie on two levels, and the prism proof below holds;
+2. the tool spans the body along k (tool low <= body low + tol, tool high >=
+   body high - tol); the first axis k = 0, 1, 2 meeting 1-2 is the chart;
+3. and EITHER the tool's section meets or crosses the body's section boundary
+   (outline or a hole), OR the body is no longer a plain box (six cardinal planar
+   faces), e.g. Bob's p9999 hole after its corner cut. A clear interior cut in a
+   plain box keeps the domains below (bore, passage, rectilinear).
+Bounds: at most 2000 section edges per operand and 8000 kept pieces.
 Prism proof: the section's area times the extent equals the measured volume.
 The result is our own extrusion of the 2D regularized difference of the sections
 (line and circular-arc loops): every edge split at closed-form meetings and at
