@@ -193,6 +193,9 @@ impl Rigid {
         match *s {
             Surface::Plane { p, n, x } => Surface::Plane { p: self.position(p), n: self.vector(n), x: self.vector(x) },
             Surface::Cylinder { p, a, x, r } => Surface::Cylinder { p: self.position(p), a: self.vector(a), x: self.vector(x), r },
+            Surface::EllipticCylinder { p, a, u, v } => Surface::EllipticCylinder {
+                p: self.position(p), a: self.vector(a), u: self.vector(u), v: self.vector(v),
+            },
         }
     }
     /// The body moved exactly; topology (indices, senses, loops) is untouched.

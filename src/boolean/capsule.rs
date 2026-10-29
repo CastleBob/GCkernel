@@ -270,6 +270,7 @@ fn admit(tool: &Body, tol: f64) -> Result<Admitted> {
         let (p, n, x, r) = match face.surface {
             Surface::Plane { p, n, x } => (p, n, x, None),
             Surface::Cylinder { p, a, x, r } => (p, a, x, Some(r)),
+            Surface::EllipticCylinder { .. } => return Err(unsupported("capsule cutters with elliptic-cylinder faces are not supported")),
         };
         if !p.is_finite()
             || !unit(n)

@@ -82,7 +82,21 @@ fn distance(q: Vec3, surface: &Surface) -> f64 {
             let w = q.sub(p);
             (w.sub(a.scale(w.dot(a))).length() - r).abs()
         }
+        Surface::EllipticCylinder { p, a, u, v } => {
+            // Its unit-circle coordinates (c, n): scaled back onto c^2 + n^2 = 1 they give a point of the surface, so
+            // this bounds the distance from above (equal on the surface).
+            let (c, n) = unit_circle(p, a, u, v, q);
+            let rho = c.hypot(n);
+            if rho == 0.0 { return f64::INFINITY; }
+            let s = q.sub(p).dot(a);
+            q.distance(p.add(u.scale(c / rho)).add(v.scale(n / rho)).add(a.scale(s)))
+        }
     }
+}
+
+/// A point's coordinates (c, n) in an elliptic cylinder's frame across its axis: q - p = c u + n v + s a.
+fn unit_circle(p: Vec3, a: Vec3, u: Vec3, v: Vec3, q: Vec3) -> (f64, f64) {
+    Surface::elliptic_coordinates(a, u, v, q.sub(p))
 }
 
 /// A bound on how far the whole curve leaves the surface, when it may exceed `tolerance` (Astra's analytic checks,
@@ -104,6 +118,12 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
                     let t = if d.dot(d) > 0.0 { (-w0.dot(d) / d.dot(d)).clamp(0.0, 1.0) } else { 0.0 };
                     [0.0, 1.0, t].iter().map(|&s| distance(a.add(b.sub(a).scale(s)), surface)).fold(0.0, f64::max)
                 }
+                // Only a generator (a line along the axis) lies on an elliptic cylinder.
+                Surface::EllipticCylinder { a: axis, .. } => {
+                    let d = b.sub(a);
+                    let across = d.sub(axis.scale(d.dot(axis))).length();
+                    across.max(distance(a, surface)).max(distance(b, surface))
+                }
             };
             return (worst > tolerance).then_some(worst);
         }
@@ -115,7 +135,7 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
                     let w = q.sub(fp);
                     fa.cross(axis).length() <= 1e-9 && w.sub(fa.scale(w.dot(fa))).length() <= tolerance && (fr - radius).abs() <= tolerance
                 }
-                Surface::Plane { .. } => false,
+                Surface::Plane { .. } | Surface::EllipticCylinder { .. } => false,
             };
             return if same(c, a, rho) || same(p, b, r) { None } else { Some(f64::INFINITY) };
         }
@@ -131,6 +151,21 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
             let residual: f64 = k.iter().map(|x| x.abs()).sum();
             // |rho^2 - r^2| <= tol (2 r - tol) keeps rho within tol of r on both sides.
             if r > tolerance && residual <= tolerance * (2.0 * r - tolerance) { 0.0 } else { (residual / r).max(tolerance * 2.0) }
+        }
+        Surface::EllipticCylinder { p, a, u: su, v: sv } => {
+            // In the surface's unit-circle coordinates the curve is A + B cos t + C sin t (linear in the point), so
+            // c^2 + n^2 - 1 = k0 + k1 cos t + k2 sin t + k3 cos 2t + k4 sin 2t; the sum of |k| bounds it. A residual e
+            // moves a point at most max(|u|, |v|) |sqrt(1 + e) - 1| <= max(|u|, |v|) |e| / 2 off the surface. The curve
+            // must also lie across the axis (a section at one height): its semi-diameters' parts along the axis count.
+            let at = |q: Vec3| unit_circle(p, a, su, sv, q);
+            let lin = |w: Vec3| unit_circle(Vec3::new(0.0, 0.0, 0.0), a, su, sv, w);
+            let (big_a, big_b, big_c) = (at(c), lin(u), lin(v));
+            let dot = |x: (f64, f64), y: (f64, f64)| x.0 * y.0 + x.1 * y.1;
+            let k = [dot(big_a, big_a) + (dot(big_b, big_b) + dot(big_c, big_c)) / 2.0 - 1.0, 2.0 * dot(big_a, big_b),
+                     2.0 * dot(big_a, big_c), (dot(big_b, big_b) - dot(big_c, big_c)) / 2.0, dot(big_b, big_c)];
+            let residual: f64 = k.iter().map(|x| x.abs()).sum();
+            let tilt = u.dot(a).abs().max(v.dot(a).abs());
+            residual * su.length().max(sv.length()) / 2.0 + tilt
         }
     };
     (worst > tolerance).then_some(worst)

@@ -252,4 +252,28 @@ pub enum Surface {
     Plane { p: Vec3, n: Vec3, x: Vec3 },
     /// Right-handed about unit `a` (normal points away from the axis); `x` unit, perpendicular to `a`.
     Cylinder { p: Vec3, a: Vec3, x: Vec3, r: f64 },
+    /// An elliptic cylinder (Claude 2026-10-29, Bob: exact ellipses): p + u cos t + v sin t + s a, unit axis `a`, `u` and
+    /// `v` independent semi-diameters perpendicular to `a` (conjugate, as a Conic carries them) with (u x v).a > 0; wire
+    /// type 3. Its normal (v cos t - u sin t) x a points away from the axis.
+    EllipticCylinder { p: Vec3, a: Vec3, u: Vec3, v: Vec3 },
+}
+
+impl Surface {
+    /// The elliptic cylinder's parameters (t, s) of a point on (or near) it: s along the axis, t from solving
+    /// q' = u cos t + v sin t in the plane across the axis (exact for points on the surface).
+    pub fn elliptic_params(p: Vec3, a: Vec3, u: Vec3, v: Vec3, q: Vec3) -> (f64, f64) {
+        let d = q.sub(p);
+        let s = d.dot(a);
+        let (c, n) = Self::elliptic_coordinates(a, u, v, d);
+        (n.atan2(c), s)
+    }
+
+    /// Coordinates (c, n) of a vector d across the axis: d = c u + n v + (d.a) a. By Cramer's rule in the plane across
+    /// a, with the triple products (w x v).a, (u x w).a over (u x v).a: no Gram-determinant cancellation when u and v
+    /// are nearly parallel (Codex's acceptance case).
+    pub fn elliptic_coordinates(a: Vec3, u: Vec3, v: Vec3, d: Vec3) -> (f64, f64) {
+        let w = d.sub(a.scale(d.dot(a)));
+        let det = u.cross(v).dot(a);
+        (w.cross(v).dot(a) / det, u.cross(w).dot(a) / det)
+    }
 }

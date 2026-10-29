@@ -87,7 +87,8 @@ fn segment(body: &Body, edge: usize, forward: bool, shift: Vec3) -> Curve {
 /// Curves that do not lie on their cylinder (beyond `tolerance`) are refused.
 pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelError> {
     let (mut volume, mut area) = (0.0, 0.0);
-    let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. }));
+    let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. }))
+        && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. }));
     let n = body.vertices.len().max(1) as f64;
     let o = body.vertices.iter().fold(Vec3::new(0.0, 0.0, 0.0), |s, v| s.add(*v)).scale(1.0 / n);
     // The body's size, for the quadrature's absolute tolerance.
@@ -112,6 +113,18 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
                 let (mut flux, mut sweep) = (0.0, 0.0);
                 for &(e, fwd) in face.loops.iter().flatten() {
                     let (j, k) = cylinder_terms(&segment(body, e, fwd, shift), *p, o, *a, *x, y, *r, px, py, tolerance, size)
+                        .map_err(|m| KernelError::InvalidInput(format!("face {f}, edge {e}: {m}")))?;
+                    flux += j;
+                    sweep += k;
+                }
+                volume -= flux / 3.0;
+                area -= sense * sweep;
+            }
+            Surface::EllipticCylinder { p, a, u, v } => {
+                let p = p.add(shift);
+                let (mut flux, mut sweep) = (0.0, 0.0);
+                for &(e, fwd) in face.loops.iter().flatten() {
+                    let (j, k) = elliptic_terms(&segment(body, e, fwd, shift), p, *a, *u, *v, size)
                         .map_err(|m| KernelError::InvalidInput(format!("face {f}, edge {e}: {m}")))?;
                     flux += j;
                     sweep += k;
@@ -161,6 +174,30 @@ fn cylinder_terms(curve: &Curve, p: Vec3, o: Vec3, a: Vec3, x: Vec3, y: Vec3, r:
     let j = e * r * (sc * big_a * ic + sc * big_b * is + sc * r * span + cu * big_a * icc + (cu * big_b + cv * big_a) * ics
         + cu * r * ic + cv * big_b * iss + cv * r * is);
     let k = e * r * (sc * span + cu * ic + cv * is);
+    Ok((j, k))
+}
+
+/// For one boundary curve on an elliptic cylinder X = C(t) + s a, C(t) = p + u cos t + v sin t (Claude 2026-10-29): the
+/// flux integrand X.(C' x a) = C(t).(C'(t) x a) =: g(t) does not depend on s, so (as for the cylinder) the face's flux is
+/// the loop integral of s g(t) dt and its area that of s |C'(t)| dt. Along the curve t is recovered exactly from the
+/// point's coordinates (c, n) across the axis, dt = (c dn - n dc) / (c^2 + n^2); both integrals by quadrature.
+fn elliptic_terms(curve: &Curve, p: Vec3, a: Vec3, u: Vec3, v: Vec3, size: f64) -> Result<(f64, f64), String> {
+    let dual = |w: Vec3| Surface::elliptic_coordinates(a, u, v, w);
+    let (t0, t1) = curve.domain();
+    let parts = |tau: f64| {
+        let (q, dq) = curve.eval(tau);
+        let s = q.dot(a);
+        let (c, n) = dual(q.sub(p));
+        let (dc, dn) = dual(dq);
+        let rho2 = c * c + n * n;
+        let t = n.atan2(c);
+        let dt = if rho2 > 0.0 { (c * dn - n * dc) / rho2 } else { 0.0 };
+        let cp = u.scale(-t.sin()).add(v.scale(t.cos()));
+        let ct = p.add(u.scale(t.cos())).add(v.scale(t.sin()));
+        (s, ct.dot(cp.cross(a)), cp.length(), dt)
+    };
+    let j = quadrature(&|tau| { let (s, g, _, dt) = parts(tau); s * g * dt }, t0, t1, 1e-14 * size.powi(3))?;
+    let k = quadrature(&|tau| { let (s, _, len, dt) = parts(tau); s * len * dt }, t0, t1, 1e-14 * size.powi(2))?;
     Ok((j, k))
 }
 

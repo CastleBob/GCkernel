@@ -336,7 +336,7 @@ fn conic_reverses_and_translates_exactly() {
 
 /// Area of a whole ellipse is pi |u x v|; half an ellipse closed by its chord is half that.
 #[test]
-fn conic_area_is_exact_and_conic_profiles_are_not_extruded() {
+fn conic_area_is_exact_and_conic_profiles_extrude_exactly() {
     let (u, v) = (Vec3::new(3.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 0.0));
     let full = vec![Curve::Conic { c: Vec3::new(1.0, 1.0, 0.0), u, v, t0: 0.0, t1: 2.0 * PI }];
     assert!((signed_area(&full, Z) - 6.0 * PI).abs() < 1e-12);
@@ -344,8 +344,11 @@ fn conic_area_is_exact_and_conic_profiles_are_not_extruded() {
     let chord = Curve::Line { a: half.end(), b: half.start() };
     assert!((signed_area(&[half.clone(), chord.clone()], Z) - 3.0 * PI).abs() < 1e-12);
     assert!((signed_area(&[chord.reversed(), half.reversed()], Z) + 3.0 * PI).abs() < 1e-12);
+    // Since 2026-10-29 an ellipse sweeps into an exact elliptic cylinder: volume pi |u x v| times the height.
     let profile = Profile { loops: vec![full], n: Z, low: 0.0, high: 1.0 };
-    assert!(matches!(extrude(&profile, TOL), Err(KernelError::Unsupported(_))));
+    let body = extrude(&profile, TOL).unwrap();
+    assert!(body.faces.iter().any(|f| matches!(f.surface, gc_kernel::geom::Surface::EllipticCylinder { .. })));
+    assert!((gc_kernel::mass::measure(&body, TOL).unwrap().volume - 6.0 * PI).abs() < 1e-9);
 }
 
 /// The same oblique-cut cylinder GCmaker's GcKernelLabTests.KernelConicEdge reads: a radius-1 cylinder on z = 0

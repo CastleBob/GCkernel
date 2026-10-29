@@ -337,6 +337,7 @@ mod tests {
         for face in &body.faces {
             let sign = if face.sense { 1. } else { -1. };
             match face.surface {
+                Surface::EllipticCylinder { .. } => unreachable!("no elliptic-cylinder faces in these test bodies"),
                 Surface::Plane { p, n, .. } => {
                     let outward = n.scale(sign);
                     let mut area = 0.;

@@ -48,6 +48,14 @@ fn same_support(a: &crate::neutral::Face, b: &crate::neutral::Face) -> bool {
                 && d.cross(*n).length() <= ROUND * d.length().max(1.0)
                 && (r - s).abs() <= ROUND * r.abs().max(s.abs()).max(1.0)
         }
+        // One ellipse swept along one axis: same semi-diameters (a seam, or pieces of one extruded wall).
+        (Surface::EllipticCylinder { p, a: n, u, v }, Surface::EllipticCylinder { p: q, a: m, u: u2, v: v2 }) => {
+            let d = q.sub(*p);
+            let scale = u.length().max(v.length()).max(1.0);
+            a.sense == b.sense && n.cross(*m).length() <= ROUND
+                && d.cross(*n).length() <= ROUND * d.length().max(1.0)
+                && u.sub(*u2).length() <= ROUND * scale && v.sub(*v2).length() <= ROUND * scale
+        }
         _ => false,
     }
 }
@@ -373,6 +381,91 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
                 let normals = points3.iter().map(|q| {
                     let d = q.sub(p);
                     d.sub(a.scale(d.dot(a))).scale(side / r)
+                }).collect();
+                (tris, normals)
+            }
+            Surface::EllipticCylinder { p, a, u, v } => {
+                // As the cylinder, in (R t, s) with t the elliptic parameter (exact on the surface) and R the mean
+                // semi-diameter (Claude 2026-10-29). Inner edges longer than the chord allows are split and the new
+                // points lifted onto the surface; the chord over a step h is at most h^2 |C''| / 8, |C''| <= sqrt(|u|^2 + |v|^2).
+                let (uu, vv) = (u.dot(u), v.dot(v));
+                let param = |q: Vec3| {
+                    let d = q.sub(p);
+                    let (c, n) = Surface::elliptic_coordinates(a, u, v, d);
+                    (n.atan2(c), d.dot(a))
+                };
+                let big_r = (uu.sqrt() + vv.sqrt()) / 2.0;
+                let flip = side;
+                let mut p2 = Vec::with_capacity(points3.len());
+                let mut spans = Vec::new();
+                for l in &index {
+                    let mut prev: Option<f64> = None;
+                    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                    for &i in l {
+                        let (raw, along) = param(points3[i]);
+                        let theta = match prev { None => raw, Some(t) => t + (raw - t + PI).rem_euclid(TAU) - PI };
+                        prev = Some(theta);
+                        lo = lo.min(theta);
+                        hi = hi.max(theta);
+                        p2.push([big_r * theta, flip * along]);
+                    }
+                    let (first, last) = (p2[l[0]][0] / big_r, prev.unwrap());
+                    let close = last + (first - last + PI).rem_euclid(TAU) - PI;
+                    if (close - first).abs() > PI {
+                        return unsupported("an elliptic-cylinder face loop wraps the axis without a seam edge");
+                    }
+                    spans.push((lo, hi));
+                }
+                if let Some(k) = (0..index.len()).max_by(|&i, &j| (spans[i].1 - spans[i].0).total_cmp(&(spans[j].1 - spans[j].0))) {
+                    let (lo, hi) = spans[k];
+                    for (j, l) in index.iter().enumerate() {
+                        if j == k { continue; }
+                        let mid = (spans[j].0 + spans[j].1) / 2.0;
+                        let turns = if mid < lo { ((lo - mid) / TAU).ceil() } else if mid > hi { -((mid - hi) / TAU).ceil() } else { 0.0 };
+                        for &i in l { p2[i][0] += turns * TAU * big_r; }
+                    }
+                }
+                let mut tris = triangulate(&p2, &index, true)?;
+                let bend = (uu + vv).sqrt();
+                let limit = big_r * (8.0 * chord / bend).sqrt().min(PI / 2.0);
+                let boundary: std::collections::HashSet<(usize, usize)> = index.iter()
+                    .flat_map(|l| (0..l.len()).map(move |k| { let (s0, w) = (l[k], l[(k + 1) % l.len()]); (s0.min(w), s0.max(w)) }))
+                    .collect();
+                for _pass in 0..64 {
+                    let mut by_edge: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+                    for (t, tri) in tris.iter().enumerate() {
+                        for k in 0..3 { let (s0, w) = (tri[k], tri[(k + 1) % 3]); by_edge.entry((s0.min(w), s0.max(w))).or_default().push(t); }
+                    }
+                    let mut long: Vec<(usize, usize)> = by_edge.keys().copied()
+                        .filter(|e| !boundary.contains(e) && (p2[e.0][0] - p2[e.1][0]).abs() > limit).collect();
+                    if long.is_empty() { break; }
+                    long.sort_by(|e1, e2| (p2[e2.0][0] - p2[e2.1][0]).abs().total_cmp(&(p2[e1.0][0] - p2[e1.1][0]).abs()).then(e1.cmp(e2)));
+                    let mut touched = vec![false; tris.len()];
+                    for (s0, w) in long {
+                        let around = &by_edge[&(s0, w)];
+                        if around.iter().any(|&t| touched[t]) { continue; }
+                        let m = p2.len();
+                        let mid = [(p2[s0][0] + p2[w][0]) / 2.0, (p2[s0][1] + p2[w][1]) / 2.0];
+                        p2.push(mid);
+                        let theta = mid[0] / big_r;
+                        points3.push(p.add(a.scale(flip * mid[1])).add(u.scale(theta.cos())).add(v.scale(theta.sin())));
+                        for &t in around {
+                            touched[t] = true;
+                            let tri = tris[t];
+                            let k = (0..3).find(|&k| { let (b0, e0) = (tri[k], tri[(k + 1) % 3]); (b0 == s0 && e0 == w) || (b0 == w && e0 == s0) }).unwrap();
+                            let (b0, e0, o) = (tri[k], tri[(k + 1) % 3], tri[(k + 2) % 3]);
+                            tris[t] = [b0, m, o];
+                            tris.push([m, e0, o]);
+                            touched.push(true);
+                        }
+                    }
+                    if _pass == 63 { return unsupported("an elliptic-cylinder face needs too many display triangles"); }
+                }
+                let normals = points3.iter().map(|q| {
+                    let (t, _) = param(*q);
+                    let tangent = u.scale(-t.sin()).add(v.scale(t.cos()));
+                    let n = tangent.cross(a);
+                    n.scale(side / n.length())
                 }).collect();
                 (tris, normals)
             }

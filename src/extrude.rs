@@ -1,5 +1,6 @@
 //! A flat profile swept into a prism: the kernel's first operation and a self-test of the contract.
-//! Exact construction: two plane caps, a plane side face per line and a cylinder side face per arc.
+//! Exact construction: two plane caps, a plane side face per line, a cylinder side face per arc and an
+//! elliptic-cylinder side face per ellipse.
 
 use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::{Body, Edge, Face, Profile};
@@ -75,9 +76,14 @@ pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
                     return Err(KernelError::InvalidInput("a profile arc does not lie in the profile plane".into()));
                 }
             }
-            // Sweeping an ellipse makes an elliptic cylinder, which is not a surface the kernel has.
-            if let Curve::Conic { .. } = c {
-                return Err(KernelError::Unsupported("extruding an elliptic profile edge is not supported".into()));
+            // An ellipse sweeps into an elliptic cylinder (Claude 2026-10-29): it must lie across the sweep, with
+            // independent semi-diameters.
+            if let Curve::Conic { u: cu, v: cv, .. } = c {
+                let (lu, lv) = (cu.length(), cv.length());
+                if !(lu > 1e-14 && lv > 1e-14) || cu.dot(n).abs() > 1e-9 * lu || cv.dot(n).abs() > 1e-9 * lv
+                    || cu.cross(*cv).length() <= 1e-9 * lu * lv {
+                    return Err(KernelError::InvalidInput("a profile ellipse must lie in the profile plane with independent semi-diameters".into()));
+                }
             }
             if let Curve::CylinderPair { .. } = c {
                 return Err(KernelError::Unsupported("extruding a cylinder-intersection profile edge is not supported".into()));
@@ -137,7 +143,14 @@ pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
                 Curve::Arc { c: center, n: an, r, .. } => {
                     (Surface::Cylinder { p: center.add(down), a: n, x: u, r: *r }, an.dot(n) > 0.0)
                 }
-                Curve::Conic { .. } | Curve::CylinderPair { .. } => unreachable!("these profile edges are refused above"),
+                // The same ellipse with its second semi-diameter turned so that (u x v).n > 0; travelling counter-
+                // clockwise about n keeps the solid inside (sense true), clockwise is a hole (sense false).
+                Curve::Conic { c: center, u: cu, v: cv, .. } => {
+                    let turn = cu.cross(*cv).dot(n);
+                    let v = if turn > 0.0 { *cv } else { cv.scale(-1.0) };
+                    (Surface::EllipticCylinder { p: center.add(down), a: n, u: *cu, v }, turn > 0.0)
+                }
+                Curve::CylinderPair { .. } => unreachable!("these profile edges are refused above"),
             };
             let lp = vec![(bottom_e(j), true), (up_e(j + 1), true), (top_e(j), false), (up_e(j), false)];
             sides.push(Face { surface: surface_and_sense.0, sense: surface_and_sense.1, loops: vec![lp] });

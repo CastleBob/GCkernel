@@ -41,12 +41,39 @@ impl P {
     fn polar(c: P, r: f64, t: f64) -> P { P::new(c.x + r * t.cos(), c.y + r * t.sin()) }
 }
 
-/// A section edge: a line a -> b, or a circular arc about c from angle a0 through the signed sweep (positive is
-/// counter-clockwise).
+/// A section edge: a line a -> b, a circular arc about c from angle a0 through the signed sweep (positive is
+/// counter-clockwise), or an elliptic arc c + u cos t + v sin t (u, v independent semi-diameters) from t = a0 through
+/// the signed sweep (Claude 2026-10-29, exact ellipses).
 #[derive(Clone, Copy, Debug)]
 enum Seg {
     Line { a: P, b: P },
     Arc { c: P, r: f64, a0: f64, sweep: f64 },
+    Conic { c: P, u: P, v: P, a0: f64, sweep: f64 },
+}
+
+/// A point's coordinates (c, n) with w = c u + n v (Cramer in the plane): the ellipse's unit-circle coordinates.
+fn unit_coords(u: P, v: P, w: P) -> (f64, f64) {
+    let det = u.cross(v);
+    (w.cross(v) / det, u.cross(w) / det)
+}
+
+/// A curve c + u cos t + v sin t over t in [a0, a0 + sweep] (either sign): its box, from the ends and every interior
+/// extreme (x' = 0 where tan t = vx / ux, likewise y).
+fn harmonic_box(c: P, u: P, v: P, a0: f64, sweep: f64) -> (P, P) {
+    let at = |t: f64| P::new(c.x + u.x * t.cos() + v.x * t.sin(), c.y + u.y * t.cos() + v.y * t.sin());
+    let (lo_t, hi_t) = if sweep >= 0. { (a0, a0 + sweep) } else { (a0 + sweep, a0) };
+    let mut points = vec![at(lo_t), at(hi_t)];
+    for base in [v.x.atan2(u.x), v.y.atan2(u.y)] {
+        for k in -4..=4 {
+            let t = base + k as f64 * PI;
+            if t > lo_t && t < hi_t {
+                points.push(at(t));
+            }
+        }
+    }
+    let lo = P::new(points.iter().map(|q| q.x).fold(f64::INFINITY, f64::min), points.iter().map(|q| q.y).fold(f64::INFINITY, f64::min));
+    let hi = P::new(points.iter().map(|q| q.x).fold(f64::NEG_INFINITY, f64::max), points.iter().map(|q| q.y).fold(f64::NEG_INFINITY, f64::max));
+    (lo, hi)
 }
 
 impl Seg {
@@ -54,6 +81,10 @@ impl Seg {
         match *self {
             Seg::Line { a, b } => a.add(b.sub(a).scale(s)),
             Seg::Arc { c, r, a0, sweep } => P::polar(c, r, a0 + s * sweep),
+            Seg::Conic { c, u, v, a0, sweep } => {
+                let t = a0 + s * sweep;
+                c.add(u.scale(t.cos())).add(v.scale(t.sin()))
+            }
         }
     }
     fn start(&self) -> P { self.at(0.) }
@@ -66,18 +97,26 @@ impl Seg {
                 let t = a0 + s * sweep;
                 P::new(-t.sin(), t.cos()).scale(sweep.signum())
             }
+            Seg::Conic { u, v, a0, sweep, .. } => {
+                let t = a0 + s * sweep;
+                let d = u.scale(-t.sin()).add(v.scale(t.cos())).scale(sweep.signum());
+                d.scale(1. / d.len())
+            }
         }
     }
     fn length(&self) -> f64 {
         match *self {
             Seg::Line { a, b } => a.dist(b),
             Seg::Arc { r, sweep, .. } => r * sweep.abs(),
+            // Used only for closeness of parameters along the edge: a fine chord sum.
+            Seg::Conic { .. } => (0..64).map(|i| self.at(i as f64 / 64.).dist(self.at((i + 1) as f64 / 64.))).sum(),
         }
     }
     fn reversed(&self) -> Seg {
         match *self {
             Seg::Line { a, b } => Seg::Line { a: b, b: a },
             Seg::Arc { c, r, a0, sweep } => Seg::Arc { c, r, a0: a0 + sweep, sweep: -sweep },
+            Seg::Conic { c, u, v, a0, sweep } => Seg::Conic { c, u, v, a0: a0 + sweep, sweep: -sweep },
         }
     }
     /// The parameter of the point of the supporting curve nearest p (outside [0, 1] beyond the ends).
@@ -90,6 +129,13 @@ impl Seg {
                 // Past the end: nearer the end, or (beyond the gap's middle) just before the start.
                 if d <= sweep.abs() + (2. * PI - sweep.abs()) * 0.5 { d / sweep.abs() } else { (d - 2. * PI) / sweep.abs() }
             }
+            // The ellipse's own parameter of p (exact on the ellipse), wrapped as for the arc.
+            Seg::Conic { c, u, v, a0, sweep } => {
+                let (cc, nn) = unit_coords(u, v, p.sub(c));
+                let phi = nn.atan2(cc);
+                let d = ((phi - a0) * sweep.signum()).rem_euclid(2. * PI);
+                if d <= sweep.abs() + (2. * PI - sweep.abs()) * 0.5 { d / sweep.abs() } else { (d - 2. * PI) / sweep.abs() }
+            }
         }
     }
     /// Distance from p to this edge (its nearest point within the edge).
@@ -99,6 +145,8 @@ impl Seg {
             match *self {
                 Seg::Line { a, b } => (b.sub(a).cross(p.sub(a)) / b.dist(a)).abs(),
                 Seg::Arc { c, r, .. } => (p.dist(c) - r).abs(),
+                // The point of the ellipse at p's own parameter: exact on the ellipse, a close upper bound near it.
+                Seg::Conic { .. } => p.dist(self.at(s)),
             }
         } else {
             p.dist(self.start()).min(p.dist(self.end()))
@@ -112,6 +160,19 @@ impl Seg {
                 let a1 = a0 + sweep;
                 0.5 * (r * c.x * (a1.sin() - a0.sin()) - r * c.y * (a1.cos() - a0.cos()) + r * r * sweep)
             }
+            Seg::Conic { c, u, v, a0, sweep } => {
+                let a1 = a0 + sweep;
+                let (dc, ds) = (a1.cos() - a0.cos(), a1.sin() - a0.sin());
+                0.5 * (c.x * (u.y * dc + v.y * ds) - c.y * (u.x * dc + v.x * ds) + u.cross(v) * sweep)
+            }
+        }
+    }
+    /// The edge's box (rigorous: ends and interior extremes).
+    fn bounds(&self) -> (P, P) {
+        match *self {
+            Seg::Line { a, b } => (P::new(a.x.min(b.x), a.y.min(b.y)), P::new(a.x.max(b.x), a.y.max(b.y))),
+            Seg::Arc { c, r, a0, sweep } => harmonic_box(c, P::new(r, 0.), P::new(0., r), a0, sweep),
+            Seg::Conic { c, u, v, a0, sweep } => harmonic_box(c, u, v, a0, sweep),
         }
     }
 }
@@ -119,7 +180,9 @@ impl Seg {
 fn loop_area(lp: &[Seg]) -> f64 { lp.iter().map(Seg::area).sum() }
 
 /// Points where two edges meet (candidates; each is checked to lie on both within the tolerance by the caller).
-fn meetings(s: &Seg, t: &Seg, tol: f64) -> Vec<P> {
+/// An ellipse meeting an arc or another ellipse (a quartic) is refused unless their boxes keep them apart, or it is
+/// the same ellipse (coincident: its ends are the meetings).
+fn meetings(s: &Seg, t: &Seg, tol: f64) -> Result<Vec<P>> {
     let mut points = vec![];
     for (e, other) in [(s, t), (t, s)] {
         for q in [e.start(), e.end()] {
@@ -165,9 +228,39 @@ fn meetings(s: &Seg, t: &Seg, tol: f64) -> Vec<P> {
                 points.push(base.add(P::new(u.y, -u.x).scale(h)));
             }
         }
+        // In the ellipse's unit-circle coordinates the line stays a line with the same parameter: a circle-line
+        // quadratic, exact.
+        (Seg::Line { a, b }, Seg::Conic { c, u, v, .. }) | (Seg::Conic { c, u, v, .. }, Seg::Line { a, b }) => {
+            let (ax, ay) = unit_coords(u, v, a.sub(c));
+            let (bx, by) = unit_coords(u, v, b.sub(c));
+            let (d, f) = (P::new(bx - ax, by - ay), P::new(ax, ay));
+            let (qa, qb, qc) = (d.dot(d), 2. * d.dot(f), f.dot(f) - 1.);
+            let disc = qb * qb - 4. * qa * qc;
+            if disc >= 0. {
+                let root = disc.sqrt();
+                for k in [(-qb - root) / (2. * qa), (-qb + root) / (2. * qa)] {
+                    points.push(a.add(b.sub(a).scale(k)));
+                }
+            } else {
+                points.push(a.add(b.sub(a).scale(-qb / (2. * qa))));
+            }
+        }
+        (Seg::Conic { c, u, v, .. }, other @ (Seg::Arc { .. } | Seg::Conic { .. }))
+        | (other @ Seg::Arc { .. }, Seg::Conic { c, u, v, .. }) => {
+            let on = |q: P| { let (x, y) = unit_coords(u, v, q.sub(c)); (x.hypot(y) - 1.).abs() * u.len().max(v.len()) <= tol };
+            let same = (0..5).all(|i| on(other.at(i as f64 / 4.)));
+            if !same {
+                let (l1, h1) = s.bounds();
+                let (l2, h2) = t.bounds();
+                let apart = h1.x + tol < l2.x || h2.x + tol < l1.x || h1.y + tol < l2.y || h2.y + tol < l1.y;
+                if !apart {
+                    return Err(unsupported("an ellipse meeting an arc or another ellipse is not supported yet"));
+                }
+            }
+        }
     }
     points.retain(|q| q.x.is_finite() && q.y.is_finite() && s.distance(*q) <= tol && t.distance(*q) <= tol);
-    points
+    Ok(points)
 }
 
 /// Winding number of the loops about p, by a ray from p in a fixed direction off the axes. `None` when the ray
@@ -205,6 +298,34 @@ fn winding_along(loops: &[Vec<Seg>], p: P, angle: f64) -> Option<i32> {
                     if k < 1. {
                         // Upward when the local y grows along the travel: d/dt sin = cos.
                         w += if t.cos() * sweep.signum() > 0. { 1 } else { -1 };
+                    }
+                }
+            }
+            Seg::Conic { c, u, v, a0, sweep } => {
+                // Turned into the ray's frame: y(t) = cy + uy cos t + vy sin t = R cos(t - phi) = 0 crosses the ray.
+                let c = local(c);
+                let turn = |q: P| P::new(q.x * cs + q.y * sn, -q.x * sn + q.y * cs);
+                let (u, v) = (turn(u), turn(v));
+                let r = u.y.hypot(v.y);
+                if r == 0. {
+                    continue;
+                }
+                let k = -c.y / r;
+                if k.abs() >= 1. {
+                    continue;
+                }
+                let phi = v.y.atan2(u.y);
+                for t in [phi + k.acos(), phi - k.acos()] {
+                    if c.x + u.x * t.cos() + v.x * t.sin() <= 0. {
+                        continue;
+                    }
+                    let along = ((t - a0) * sweep.signum()).rem_euclid(2. * PI) / sweep.abs();
+                    if along < 1e-9 || (along - 1.).abs() < 1e-9 {
+                        return None;
+                    }
+                    if along < 1. {
+                        let dy = -u.y * t.sin() + v.y * t.cos();
+                        w += if dy * sweep.signum() > 0. { 1 } else { -1 };
                     }
                 }
             }
@@ -259,7 +380,7 @@ fn split(own: &[Vec<Seg>], other: &[Vec<Seg>], pool: &mut Vec<P>, tol: f64) -> R
         let len = seg.length();
         let mut cuts = vec![(0., vertex(seg.start(), pool)), (1., vertex(seg.end(), pool))];
         for o in other.iter().flatten() {
-            for q in meetings(seg, o, tol) {
+            for q in meetings(seg, o, tol)? {
                 cuts.push((seg.param(q).clamp(0., 1.), vertex(q, pool)));
             }
         }
@@ -279,6 +400,7 @@ fn split(own: &[Vec<Seg>], other: &[Vec<Seg>], pool: &mut Vec<P>, tol: f64) -> R
             let piece = match *seg {
                 Seg::Line { .. } => Seg::Line { a: pool[v0], b: pool[v1] },
                 Seg::Arc { c, r, a0, sweep } => Seg::Arc { c, r, a0: a0 + s0 * sweep, sweep: (s1 - s0) * sweep },
+                Seg::Conic { c, u, v, a0, sweep } => Seg::Conic { c, u, v, a0: a0 + s0 * sweep, sweep: (s1 - s0) * sweep },
             };
             pieces.push(Piece { v0, v1, seg: piece });
         }
@@ -396,6 +518,11 @@ fn merge(lp: Vec<Seg>, tol: f64) -> Vec<Seg> {
                 (c.dist(c2) <= tol && (r - r2).abs() <= tol && sweep.signum() == s2.signum() && (sweep + s2).abs() < 2. * PI)
                     .then_some(Seg::Arc { c, r, a0, sweep: sweep + s2 })
             }
+            (Seg::Conic { c, u, v, a0, sweep }, Seg::Conic { c: c2, u: u2, v: v2, sweep: s2, .. }) => {
+                (c.dist(c2) <= tol && u.dist(u2) <= tol && v.dist(v2) <= tol && sweep.signum() == s2.signum()
+                    && (sweep + s2).abs() < 2. * PI)
+                    .then_some(Seg::Conic { c, u, v, a0, sweep: sweep + s2 })
+            }
             _ => None,
         }
     };
@@ -437,7 +564,7 @@ fn prism(body: &Body, k: usize, tol: f64) -> Result<Option<(Vec<Vec<Seg>>, f64, 
                     return Ok(None);
                 }
             }
-            Surface::Cylinder { a, .. } => {
+            Surface::Cylinder { a, .. } | Surface::EllipticCylinder { a, .. } => {
                 if coord(a, k).abs() < 1. - 1e-12 {
                     return Ok(None);
                 }
@@ -481,7 +608,13 @@ fn prism(body: &Body, k: usize, tol: f64) -> Result<Option<(Vec<Vec<Seg>>, f64, 
                 let s = to2(start).sub(center);
                 Seg::Arc { c: center, r, a0: s.y.atan2(s.x), sweep: (t1 - t0) * side.signum() }
             }
-            _ => return Err(unsupported("prism section edge is not a line or circular arc")),
+            Curve::Conic { c, u: cu, v: cv, t0, t1 } => {
+                if coord(cu, k).abs() > 1e-9 * cu.length() || coord(cv, k).abs() > 1e-9 * cv.length() {
+                    return Err(unsupported("prism section ellipse is not in the cap plane"));
+                }
+                Seg::Conic { c: to2(c), u: P::new(coord(cu, u), coord(cu, v)), v: P::new(coord(cv, u), coord(cv, v)), a0: t0, sweep: t1 - t0 }
+            }
+            _ => return Err(unsupported("prism section edge is not a line, circular arc or ellipse")),
         };
         segs.push(if flags[0] { seg } else { seg.reversed() });
     }
@@ -529,7 +662,7 @@ fn prism_along(tool: &Body, k: usize) -> bool {
                 coord(n, k).abs() <= 1e-12
             }
         }
-        Surface::Cylinder { a, .. } => coord(a, k).abs() >= 1. - 1e-12,
+        Surface::Cylinder { a, .. } | Surface::EllipticCylinder { a, .. } => coord(a, k).abs() >= 1. - 1e-12,
     }) && caps >= 2
 }
 
@@ -545,12 +678,14 @@ pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
         if tlo > lo + tol || thi < hi - tol {
             continue;
         }
-        let meets = a.iter().flatten().any(|s| b.iter().flatten().any(|t| !meetings(s, t, tol).is_empty()));
+        let meets = a.iter().flatten().any(|s| b.iter().flatten().any(|t| meetings(s, t, tol).map_or(true, |m| !m.is_empty())));
+        // No other domain cuts with ellipses.
+        let elliptic = b.iter().flatten().chain(a.iter().flatten()).any(|s| matches!(s, Seg::Conic { .. }));
         // A plain box keeps its passage domains for interior cuts; a prism already cut to another outline does not
         // fit them (Bob's p9999: a hole after its corner cut).
         let plain_box = body.faces.len() == 6
             && body.faces.iter().all(|f| matches!(f.surface, Surface::Plane { n, .. } if [n.x, n.y, n.z].iter().filter(|c| **c != 0.).count() == 1));
-        return meets || !plain_box || !matches!(winding(&a, b[0][0].start()), Ok(1));
+        return meets || elliptic || !plain_box || !matches!(winding(&a, b[0][0].start()), Ok(1));
     }
     false
 }
@@ -605,6 +740,15 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
                     // Clockwise in (u, v): counter-clockwise about -k, where the angle from u runs the other way.
                     Seg::Arc { c, r, a0, sweep } => {
                         Curve::Arc { c: to3(c), n: unit(k).scale(-1.), x: unit(u), r, t0: -a0, t1: -a0 - sweep }
+                    }
+                    // c + cu cos t + cv sin t; run backwards it is c + cu cos s - cv sin s for s = -t increasing.
+                    Seg::Conic { c, u: cu, v: cv, a0, sweep } => {
+                        let along = |q: P| { let mut w = [0.; 3]; w[u] = q.x; w[v] = q.y; Vec3::new(w[0], w[1], w[2]) };
+                        if sweep > 0. {
+                            Curve::Conic { c: to3(c), u: along(cu), v: along(cv), t0: a0, t1: a0 + sweep }
+                        } else {
+                            Curve::Conic { c: to3(c), u: along(cu), v: along(cv).scale(-1.), t0: -a0, t1: -a0 - sweep }
+                        }
                     }
                 })
                 .collect()

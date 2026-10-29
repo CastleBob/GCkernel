@@ -172,6 +172,24 @@ impl<'a> Reader<'a> {
                 Ok(Surface::Cylinder { p, a, x, r })
             }
             t if t == 2.0 => Err(KernelError::Unsupported("extruded (tabulated) surfaces are not supported by the GC Kernel yet".into())),
+            t if t == 3.0 => {
+                let p = self.point()?;
+                let (a, u, v) = (self.point()?, self.point()?, self.point()?);
+                if (a.length() - 1.0).abs() > 1e-9 { return invalid("an elliptic cylinder needs a unit axis"); }
+                let (lu, lv) = (u.length(), v.length());
+                // Finite throughout: lengths and the triple product too (NaN or overflow would pass a comparison).
+                let turn = u.cross(v).dot(a);
+                if !(lu.is_finite() && lv.is_finite() && turn.is_finite() && (lu * lv).is_finite()) {
+                    return invalid("an elliptic cylinder's semi-diameters must be finite");
+                }
+                if !(lu > 1e-14 && lv > 1e-14) || u.dot(a).abs() > 1e-9 * lu || v.dot(a).abs() > 1e-9 * lv {
+                    return invalid("an elliptic cylinder needs two semi-diameters across its axis");
+                }
+                if u.cross(v).dot(a) <= 1e-9 * lu * lv {
+                    return invalid("an elliptic cylinder's semi-diameters must be independent and turn about its axis");
+                }
+                Ok(Surface::EllipticCylinder { p, a, u, v })
+            }
             t => invalid(format!("unknown surface type {t}")),
         }
     }
@@ -252,6 +270,7 @@ pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
     match s {
         Surface::Plane { p, n, x } => { out.push(0.0); put(out, *p); put(out, *n); put(out, *x); }
         Surface::Cylinder { p, a, x, r } => { out.push(1.0); put(out, *p); put(out, *a); put(out, *x); out.push(*r); }
+        Surface::EllipticCylinder { p, a, u, v } => { out.push(3.0); put(out, *p); put(out, *a); put(out, *u); put(out, *v); }
     }
 }
 
