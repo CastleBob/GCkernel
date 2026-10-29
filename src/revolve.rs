@@ -55,7 +55,9 @@ fn meet(a0: (f64, f64), a1: (f64, f64), b0: (f64, f64), b1: (f64, f64), tol: f64
 
 pub fn revolve(section: &Section, tol: f64) -> Result<Body, KernelError> {
     let (p, a, x) = (section.p, section.a, section.x);
-    if !p.is_finite() || (a.length() - 1.0).abs() > 1e-9 || (x.length() - 1.0).abs() > 1e-9 || a.dot(x).abs() > 1e-9 {
+    // Stated as what must hold, so a NaN fails every test (Codex acceptance 2026-10-29).
+    if !(p.is_finite() && a.is_finite() && x.is_finite()
+        && (a.length() - 1.0).abs() <= 1e-9 && (x.length() - 1.0).abs() <= 1e-9 && a.dot(x).abs() <= 1e-9) {
         return invalid("a revolve needs an axis point, a unit axis and a unit seam direction at right angles");
     }
     let mut pts = section.points.clone();
@@ -79,6 +81,10 @@ pub fn revolve(section: &Section, tol: f64) -> Result<Body, KernelError> {
         }
     }
     let twice = area2(&pts);
+    // Finite coordinates can still overflow the section's area or the solid's volume: refused, not returned as infinite.
+    if !twice.is_finite() || !volume(section).is_finite() {
+        return invalid("the revolved section is too large to measure (its area or volume overflows)");
+    }
     if twice.abs() <= tol * tol { return invalid("the revolved section encloses no area"); }
     if twice < 0.0 { pts.reverse(); }
 
@@ -240,5 +246,15 @@ mod tests {
         assert!(matches!(revolve(&near, TOL), Err(KernelError::InvalidInput(_))));
         let negative = axis(vec![(-1.0, 0.0), (2.0, 0.0), (2.0, 1.0)]);
         assert!(matches!(revolve(&negative, TOL), Err(KernelError::InvalidInput(_))));
+        let huge = axis(vec![(1.0, 0.0), (1e200, 0.0), (1e200, 1e200), (1.0, 1e200)]);
+        assert!(matches!(revolve(&huge, TOL), Err(KernelError::InvalidInput(_))));
+        for bad in [Vec3::new(f64::NAN, 0.0, 0.0), Vec3::new(0.0, f64::NAN, 0.0)] {
+            let mut s = pole(0.25);
+            s.a = Vec3::new(0.0, 1.0, 0.0).add(bad);
+            assert!(matches!(revolve(&s, TOL), Err(KernelError::InvalidInput(_))));
+            let mut s = pole(0.25);
+            s.x = Vec3::new(1.0, 0.0, 0.0).add(bad);
+            assert!(matches!(revolve(&s, TOL), Err(KernelError::InvalidInput(_))));
+        }
     }
 }
