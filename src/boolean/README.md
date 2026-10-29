@@ -1,6 +1,6 @@
 # Boolean operation boundary
 
-Owner: Astra/Codex. Independent implementation; no OCCT or Truck code/dependency.
+Owner: Claude (from 2026-10-29, Bob; previously Astra/Codex). Independent implementation; no OCCT or Truck code/dependency.
 The public entry is `cut(body, tool, tolerance) -> Result<Body, KernelError>`.
 Inputs and tolerance use the same linear unit (the worker protocol currently
 declares inches). Neither input is mutated. Success returns the entire result;
@@ -205,6 +205,18 @@ are omitted before constructing boundary curves. Connectivity includes shared
 faces within each band and positive-area overlap between bands. Existing holes
 remain; disconnected output components remain unsupported. Input interface
 coverage, analytic surface checks and closed oriented topology are required.
+
+X stations come from vertices, circle extrema and analytic graph crossings;
+values within tolerance are one station. Such a station is placed AT the
+analytic value it agrees with: the extremum (existing), or the crossing when
+all crossings within tolerance of it agree within roundoff (Claude, 2026-10-29;
+Bob's rule: what agrees within the tolerance is the same). An authored vertex a
+few ulps short of a crossing therefore no longer starts a band past it, which
+refused a second miter on stock already mitered at its other end (Bob's HSS2x2
+36 Miter Both Trapezoid and L3 Angle 48 Miter Both Ends; tests/miter_pair.rs
+checks each removed volume against its exact section integral). Stations that
+end up within tolerance of each other are refused. The ordering proof itself is
+unchanged: a sub-tolerance reversal inside a band is still refused.
 
 The graph ordering bound checks all candidate extrema of a difference of two
 line/circle graphs. Equating their derivatives gives a closed-form critical point

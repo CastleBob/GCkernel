@@ -108,10 +108,11 @@ fn intersection_stations(
     body: &Body,
     tool: &Body,
     xs: &[f64],
+    extrema: &[f64],
     tol: f64,
     work: &mut usize,
 ) -> Result<Vec<f64>> {
-    let mut refined = xs.to_vec();
+    let mut crossings = Vec::new();
     for band in xs.windows(2) {
         let mid = band[0] + (band[1] - band[0]) * 0.5;
         let mut hits = boundary_hits(body, mid, tol)?;
@@ -127,12 +128,40 @@ fn intersection_stations(
             for i in 0..graphs.len() {
                 for j in i + 1..graphs.len() {
                     spend(work, 1)?;
-                    refined.extend(intersections(graphs[i], graphs[j], band[0], band[1], tol)?);
+                    crossings.extend(intersections(graphs[i], graphs[j], band[0], band[1], tol)?);
                 }
             }
         }
     }
-    stations(refined, tol)
+    let mut refined = stations(xs.iter().chain(&crossings).copied().collect(), tol)?;
+    // A station within tolerance of an analytic crossing IS that crossing (Bob
+    // 2026-10-28: what agrees within the tolerance is the same). Merging keeps
+    // the smaller value, which can be an authored vertex a few ulps short of the
+    // crossing; the band would then start past it and fail its ordering proof.
+    // Take the crossing, as extremal stations take the extremum. Extremal
+    // stations stay put; crossings that disagree beyond roundoff are left to
+    // the ordering proof, which refuses them.
+    for x in refined.iter_mut() {
+        if extrema.contains(x) {
+            continue;
+        }
+        let near: Vec<f64> = crossings.iter().copied().filter(|c| (c - *x).abs() <= tol).collect();
+        let (Some(lo), Some(hi)) = (
+            near.iter().copied().reduce(f64::min),
+            near.iter().copied().reduce(f64::max),
+        ) else {
+            continue;
+        };
+        if hi - lo <= 64. * f64::EPSILON * (1. + x.abs()) {
+            *x = lo;
+        }
+    }
+    if refined.windows(2).any(|w| w[1] - w[0] <= tol) {
+        return Err(unsupported(
+            "ambiguous transverse crossing stations within tolerance",
+        ));
+    }
+    Ok(refined)
 }
 
 fn ordered_graphs(mut graphs: Vec<Graph>, lo: f64, hi: f64, tol: f64) -> Result<Vec<Graph>> {
@@ -522,7 +551,7 @@ fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
         return Err(unsupported("transverse recognition exceeds its work limit"));
     }
     let mut arrangement_work = 0;
-    xs = intersection_stations(&body, &tool, &xs, tol, &mut arrangement_work)?;
+    xs = intersection_stations(&body, &tool, &xs, &extrema, tol, &mut arrangement_work)?;
     if xs.len().saturating_mul(body.edges.len() + tool.edges.len()) > 2_000_000 {
         return Err(unsupported(
             "refined transverse recognition exceeds its work limit",
