@@ -423,7 +423,7 @@ mod tests {
             }
             for f in &mut body.faces {
                 match &mut f.surface {
-                    Surface::EllipticCylinder { .. } | Surface::Cone { .. } => unreachable!("no elliptic-cylinder or conical faces in these test bodies"),
+                    Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                     Surface::Plane { p, .. } | Surface::Cylinder { p, .. } => *p = p.add(offset),
                 }
             }
@@ -640,7 +640,7 @@ mod tests {
         }
         for f in &mut body.faces {
             match &mut f.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } => unreachable!("no elliptic-cylinder or conical faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p, n, x } => {
                     *p = map(*p);
                     *n = map(*n);

@@ -15,7 +15,10 @@
 //!        contract with Astra's viewport),
 //!      7 transform (one rigid motion and a batch of items -> the items moved; frame.rs, `transform`),
 //!      8 revolve (axis point, unit axis, unit seam direction, n, then n (radius, height) points -> the solid of
-//!        revolution, followed by its exact volume; revolve.rs).
+//!        revolution, followed by its exact volume; revolve.rs),
+//!      9 general revolve (axis point, unit axis, unit seam direction, signed angle, loop count, then per loop a segment
+//!        count and segments [kind, r, z, ...]: 0 line, 1 arc (centre r, z, direction +1/-1), 2 ellipse arc (centre, u, v,
+//!        direction), 3 cubic Bezier (two control points) -> the solid followed by its exact volume; revolve.rs).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
@@ -33,6 +36,7 @@ pub const OP_REBUILD_PRISM: u32 = 5;
 pub const OP_TESSELLATE: u32 = 6;
 pub const OP_TRANSFORM: u32 = 7;
 pub const OP_REVOLVE: u32 = 8;
+pub const OP_REVOLVE_GENERAL: u32 = 9;
 
 pub struct Request {
     pub op: u32,
@@ -145,6 +149,47 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             topology::check(&body, tol).map_err(|e| KernelError::Internal(format!("revolve built an invalid solid: {e}")))?;
             let mut out = write_body(&body);
             out.push(revolve::volume(&section));
+            Ok(out)
+        }
+        OP_REVOLVE_GENERAL => {
+            let (p, a, x) = (reader.point()?, reader.point()?, reader.point()?);
+            let angle = reader.next()?;
+            let loop_count = reader.count()?;
+            let mut loops = Vec::with_capacity(loop_count);
+            for _ in 0..loop_count {
+                let n = reader.count()?;
+                let mut segments = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let kind = reader.next()?;
+                    let (r, z) = (reader.next()?, reader.next()?);
+                    let direction = |v: f64| if v == 1.0 { Ok(true) } else if v == -1.0 { Ok(false) }
+                        else { Err(KernelError::InvalidInput(format!("a segment direction must be 1 or -1, not {v}"))) };
+                    let kind = match kind {
+                        k if k == 0.0 => revolve::Kind::Line,
+                        k if k == 1.0 => {
+                            let (cr, cz, d) = (reader.next()?, reader.next()?, reader.next()?);
+                            revolve::Kind::Arc { cr, cz, ccw: direction(d)? }
+                        }
+                        k if k == 2.0 => {
+                            let v: Vec<f64> = (0..7).map(|_| reader.next()).collect::<Result<_, _>>()?;
+                            revolve::Kind::Ellipse { cr: v[0], cz: v[1], ur: v[2], uz: v[3], vr: v[4], vz: v[5], forward: direction(v[6])? }
+                        }
+                        k if k == 3.0 => {
+                            let v: Vec<f64> = (0..4).map(|_| reader.next()).collect::<Result<_, _>>()?;
+                            revolve::Kind::Bezier { c1: (v[0], v[1]), c2: (v[2], v[3]) }
+                        }
+                        k => return Err(KernelError::InvalidInput(format!("unknown section segment kind {k}"))),
+                    };
+                    segments.push(revolve::Segment { r, z, kind });
+                }
+                loops.push(segments);
+            }
+            reader.finish()?;
+            let rev = revolve::Revolution { p, a, x, angle, loops };
+            let body = revolve::revolve_general(&rev, tol)?;
+            topology::check(&body, tol).map_err(|e| KernelError::Internal(format!("revolve built an invalid solid: {e}")))?;
+            let mut out = write_body(&body);
+            out.push(revolve::volume_of(&rev, tol)?);
             Ok(out)
         }
         op => Err(KernelError::Unsupported(format!("op {op}"))),

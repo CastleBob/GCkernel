@@ -17,6 +17,7 @@ use crate::extrude::signed_area;
 use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::Body;
 use crate::KernelError;
+use std::f64::consts::{PI, TAU};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MassProperties {
@@ -130,6 +131,47 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
                     flux += j;
                     sweep += s;
                 }
+                // An apex is a boundary segment of the (theta, s) chart that no edge carries: its share is added here.
+                for (q, ta, tb) in pole_jumps(body, face, shift, p, *a, *x, y, sense, tolerance) {
+                    let (j, s) = cone_parallel(q.sub(p).dot(*a), ta, tb, p, *a, *x, y, *r, *k);
+                    flux += j;
+                    sweep += s;
+                }
+                volume -= flux / 3.0;
+                area -= sense * sweep;
+            }
+            Surface::Sphere { c, a, x, r } | Surface::Torus { c, a, x, r, .. } => {
+                let big = if let Surface::Torus { big, .. } = face.surface { big } else { 0.0 };
+                let c = c.add(shift);
+                let y = a.cross(*x);
+                // Each parallel's meridian angle u; on a torus a face's parallels lie within one turn of u, so the branch
+                // is cut at the widest gap between them (a sphere's u is always in [-pi/2, pi/2]).
+                let edges: Vec<(usize, bool)> = face.loops.iter().flatten().copied().collect();
+                let u_of = |q: Vec3| { let w = q.sub(c); let h = w.dot(*a); h.atan2(w.sub(a.scale(h)).length() - big) };
+                let mut us: Vec<Option<f64>> = edges.iter().map(|&(e, fwd)| parallel_u(&segment(body, e, fwd, shift), c, *a, big, tolerance)).collect();
+                // A face spans less than a turn of u: every parallel is taken within half a turn of the u at a meridian's
+                // midpoint (the meridian runs between the face's ends), which fixes the branch on a torus.
+                let reference = edges.iter().zip(&us).find(|(_, u)| u.is_none()).map(|(&(e, fwd), _)| {
+                    let seg = segment(body, e, fwd, shift);
+                    let (t0, t1) = seg.domain();
+                    u_of(seg.eval((t0 + t1) / 2.0).0)
+                });
+                if let Some(reference) = reference {
+                    for u in us.iter_mut().flatten() { *u = reference + (*u - reference + PI).rem_euclid(TAU) - PI; }
+                }
+                let (mut flux, mut sweep) = (0.0, 0.0);
+                for (&(e, fwd), u) in edges.iter().zip(&us) {
+                    let (j, k) = circle_family_terms(&segment(body, e, fwd, shift), *u, c, *a, *x, y, big, *r, tolerance)
+                        .map_err(|m| KernelError::InvalidInput(format!("face {f}, edge {e}: {m}")))?;
+                    flux += j;
+                    sweep += k;
+                }
+                // Poles (a sphere's points on the axis) close the chart like an apex.
+                for (q, ta, tb) in pole_jumps(body, face, shift, c, *a, *x, y, sense, tolerance) {
+                    let (j, k) = circle_parallel(u_of(q), ta, tb, c, *a, *x, y, big, *r);
+                    flux += j;
+                    sweep += k;
+                }
                 volume -= flux / 3.0;
                 area -= sense * sweep;
             }
@@ -224,7 +266,11 @@ fn cone_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, k: f64,
     let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
     let (c, u, v, t0, t1) = match *curve {
         Curve::Line { a: s, b: e } => {
-            let (w, d) = (perp(s.sub(p)), perp(e.sub(s)));
+            // A generator lies in one half-plane through the axis: measured from its end farther from the axis (an apex
+            // end has no direction of its own).
+            let (ws, we) = (perp(s.sub(p)), perp(e.sub(p)));
+            let w = if we.length() > ws.length() { we } else { ws };
+            let d = perp(e.sub(s));
             if w.length() <= tol || d.cross(w.scale(1.0 / w.length())).length() > tol * e.sub(s).length().max(1.0) {
                 return Err("a line on a cone must be a generator".into());
             }
@@ -243,11 +289,103 @@ fn cone_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, k: f64,
     }
     let e = up.cross(vp).dot(a).signum();
     let theta_u = up.dot(y).atan2(up.dot(x));
-    let (ta, tb) = (theta_u + e * t0, theta_u + e * t1);
+    Ok(cone_parallel(sc, theta_u + e * t0, theta_u + e * t1, p, a, x, y, r, k))
+}
+
+/// The cone's loop integrals along a parallel at height s (from P) between angles ta and tb.
+#[allow(clippy::too_many_arguments)]
+fn cone_parallel(sc: f64, ta: f64, tb: f64, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, k: f64) -> (f64, f64) {
     let (px, py, pa) = (p.dot(x), p.dot(y), p.dot(a));
     let g = px * (tb.sin() - ta.sin()) - py * (tb.cos() - ta.cos()) + (r - k * pa) * (tb - ta);
     let big_g = r * sc + k * sc * sc / 2.0;
-    Ok((big_g * g, big_g * (1.0 + k * k).sqrt() * (tb - ta)))
+    (big_g * g, big_g * (1.0 + k * k).sqrt() * (tb - ta))
+}
+
+/// Where a face's loop passes through the axis (a cone's apex, a sphere's pole), the (theta, u) chart's boundary runs
+/// along the pole from the arriving meridian's angle to the departing one's, which no edge carries. The jump's size is
+/// the angle between the two meridians (revolve splits faces so it is at most half a turn); its direction follows the
+/// loop's counter-clockwise turn about the outward normal: backwards at the pole of greatest u, forwards at the least,
+/// reversed when the face's sense is. Returns (pole point, angle from, angle to) in the measuring frame.
+#[allow(clippy::too_many_arguments)]
+fn pole_jumps(body: &Body, face: &crate::neutral::Face, shift: Vec3, o: Vec3, a: Vec3, x: Vec3, y: Vec3, sense: f64, tol: f64)
+    -> Vec<(Vec3, f64, f64)> {
+    let mut out = Vec::new();
+    let theta = |q: Vec3| { let d = q.sub(o); d.dot(y).atan2(d.dot(x)) };
+    let radial = |q: Vec3| { let d = q.sub(o); d.sub(a.scale(d.dot(a))).length() };
+    let mid = |e: usize, fwd: bool| { let c = segment(body, e, fwd, shift); let (t0, t1) = c.domain(); c.eval((t0 + t1) / 2.0).0 };
+    for lp in &face.loops {
+        for k in 0..lp.len() {
+            let (e_in, f_in) = lp[k];
+            let (e_out, f_out) = lp[(k + 1) % lp.len()];
+            let v = if f_in { body.edges[e_in].end } else { body.edges[e_in].start };
+            let q = body.vertices[v].add(shift);
+            if radial(q) > tol { continue; }
+            let (m_in, m_out) = (mid(e_in, f_in), mid(e_out, f_out));
+            let (ta, tb) = (theta(m_in), theta(m_out));
+            let turn = (tb - ta + PI).rem_euclid(TAU) - PI;
+            let size = if turn <= -PI { PI } else { turn.abs() };
+            // The pole is the face's extreme in u: above the arriving meridian's midpoint means the top.
+            let top = q.sub(m_in).dot(a) > 0.0;
+            let dir = if top { -1.0 } else { 1.0 } * sense;
+            out.push((q, ta, ta + dir * size));
+        }
+    }
+    out
+}
+
+/// A parallel's meridian angle on a sphere (big = 0) or torus: atan2(h, rho - big) for a circle across the axis with
+/// centre on it at height h and radius rho; None for any other curve.
+fn parallel_u(curve: &Curve, c: Vec3, a: Vec3, big: f64, tol: f64) -> Option<f64> {
+    let (cc, u, v) = match *curve {
+        Curve::Arc { c, n, x, r, .. } => (c, x.scale(r), n.cross(x).scale(r)),
+        Curve::Conic { c, u, v, .. } => (c, u, v),
+        _ => return None,
+    };
+    let w = cc.sub(c);
+    let perp = |q: Vec3| q.sub(a.scale(q.dot(a)));
+    if u.dot(a).abs() > tol || v.dot(a).abs() > tol || perp(w).length() > tol { return None; }
+    Some(w.dot(a).atan2(perp(u).length() - big))
+}
+
+/// For one boundary curve on a sphere (big = 0) or torus X = C + R(u) rho(theta) + r sin(u) a, R = big + r cos u (Claude
+/// 2026-10-29): X_theta x X_u = R r (cos u rho + sin u a), so X.N = A(u) (C.rho) + B(u) with A = R r cos u and
+/// B = R r (big cos u + r + (C.a) sin u), and |N| = R r. Green's theorem in (theta, u) turns the face integrals into loop
+/// integrals of (A^(u) (C.rho) + B^(u)) dtheta and r (big u + r sin u) dtheta (antiderivatives in u, closed form). Along a
+/// parallel u is constant; along a meridian theta is; anything else is refused.
+#[allow(clippy::too_many_arguments)]
+fn circle_family_terms(curve: &Curve, u: Option<f64>, c: Vec3, a: Vec3, x: Vec3, y: Vec3, big: f64, r: f64, tol: f64)
+    -> Result<(f64, f64), String> {
+    let (cc, cu, cv, t0, t1) = match *curve {
+        Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
+        Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
+        _ => return Err("only circles lie on a sphere or torus face's boundary here".into()),
+    };
+    let Some(u) = u else {
+        // A meridian: its plane contains the axis (theta constant along it), so it contributes nothing.
+        let n = cu.cross(cv);
+        let ln = n.length();
+        if ln == 0.0 || n.scale(1.0 / ln).dot(a).abs() > tol || n.scale(1.0 / ln).dot(cc.sub(c)).abs() > tol {
+            return Err("a circle on a sphere or torus that is neither a parallel nor a meridian".into());
+        }
+        return Ok((0.0, 0.0));
+    };
+    let perp = |q: Vec3| q.sub(a.scale(q.dot(a)));
+    let (up, vp) = (perp(cu), perp(cv));
+    let e = up.cross(vp).dot(a).signum();
+    let theta_u = up.dot(y).atan2(up.dot(x));
+    Ok(circle_parallel(u, theta_u + e * t0, theta_u + e * t1, c, a, x, y, big, r))
+}
+
+/// The sphere's or torus's loop integrals along a parallel at meridian angle u between angles ta and tb.
+#[allow(clippy::too_many_arguments)]
+fn circle_parallel(u: f64, ta: f64, tb: f64, c: Vec3, a: Vec3, x: Vec3, y: Vec3, big: f64, r: f64) -> (f64, f64) {
+    let (cx, cy, ca) = (c.dot(x), c.dot(y), c.dot(a));
+    let (s, co) = (u.sin(), u.cos());
+    let a_hat = r * big * s + r * r * (u / 2.0 + (2.0 * u).sin() / 4.0);
+    let b_hat = r * big * big * s + r * r * big * u - r * ca * big * co + r * r * big * (u / 2.0 + (2.0 * u).sin() / 4.0)
+        + r * r * r * s + r * r * ca * s * s / 2.0;
+    let rho_int = cx * (tb.sin() - ta.sin()) - cy * (tb.cos() - ta.cos());
+    (a_hat * rho_int + b_hat * (tb - ta), r * (big * u + r * s) * (tb - ta))
 }
 
 /// The same two integrals for any curve on the cylinder, by quadrature: with w = point - P, s = (point - o) . a,

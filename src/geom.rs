@@ -261,6 +261,15 @@ pub enum Surface {
     /// Wire type 4. Its normal (x cos t + y sin t) - k a points away from the axis (as the cylinder's, which is k = 0).
     /// Faces stay where the radius is positive (no apex in a face).
     Cone { p: Vec3, a: Vec3, x: Vec3, r: f64, k: f64 },
+    /// A sphere (Claude 2026-10-29, revolved arcs centred on the axis): centre `c`, radius `r`; `a` and `x` (unit, at
+    /// right angles) give its parameter frame: c + r (cos u rho(t) + sin u a), rho(t) = x cos t + y sin t, y = a x x.
+    /// Wire type 5. Normal outward.
+    Sphere { c: Vec3, a: Vec3, x: Vec3, r: f64 },
+    /// A torus (revolved arcs centred off the axis): axis point `c` (the tube centre circle's centre), unit axis `a`,
+    /// unit `x` perpendicular, centre-circle radius `big` > 0 and tube radius `r` > 0 (r >= big is a horn or spindle
+    /// torus, valid only where a face keeps a positive radius from the axis):
+    /// c + (big + r cos u) rho(t) + r sin u a. Wire type 6. Normal points away from the tube's centre circle.
+    Torus { c: Vec3, a: Vec3, x: Vec3, big: f64, r: f64 },
 }
 
 impl Surface {

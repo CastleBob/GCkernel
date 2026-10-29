@@ -97,6 +97,13 @@ fn distance(q: Vec3, surface: &Surface) -> f64 {
             let s = w.dot(a);
             (w.sub(a.scale(s)).length() - (r + k * s)).abs() / (1.0 + k * k).sqrt()
         }
+        Surface::Sphere { c, r, .. } => (q.distance(c) - r).abs(),
+        // In the half-plane through the axis the torus is the circle of radius r about (big, 0).
+        Surface::Torus { c, a, big, r, .. } => {
+            let w = q.sub(c);
+            let h = w.dot(a);
+            ((w.sub(a.scale(h)).length() - big).hypot(h) - r).abs()
+        }
     }
 }
 
@@ -133,15 +140,19 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
                 // Only a generator lies on a cone: both ends on it in one half-plane through the axis. Across that half-
                 // plane the line departs linearly (its far end's offset bounds it); within it the radius and the cone's
                 // are both linear, so the ends bound the rest.
+                // The half-plane is taken through the end farther from the axis, so a generator may end at the apex.
                 Surface::Cone { p, a: axis, .. } => {
                     let perp = |w: Vec3| w.sub(axis.scale(w.dot(axis)));
-                    let (e0, e1) = (perp(a.sub(p)), perp(b.sub(p)));
+                    let (mut e0, mut e1) = (perp(a.sub(p)), perp(b.sub(p)));
+                    if e1.length() > e0.length() { std::mem::swap(&mut e0, &mut e1); }
                     let l0 = e0.length();
-                    if l0 <= tolerance || e1.dot(e0) <= 0.0 { f64::INFINITY } else {
+                    if l0 <= tolerance || e1.dot(e0) < -tolerance * l0 { f64::INFINITY } else {
                         let off = e1.cross(e0.scale(1.0 / l0)).length();
                         distance(a, surface).max(distance(b, surface)) + off
                     }
                 }
+                // No straight line lies on a sphere or (in our admitted faces) a torus.
+                Surface::Sphere { .. } | Surface::Torus { .. } => f64::INFINITY,
             };
             return (worst > tolerance).then_some(worst);
         }
@@ -153,7 +164,8 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
                     let w = q.sub(fp);
                     fa.cross(axis).length() <= 1e-9 && w.sub(fa.scale(w.dot(fa))).length() <= tolerance && (fr - radius).abs() <= tolerance
                 }
-                Surface::Plane { .. } | Surface::EllipticCylinder { .. } | Surface::Cone { .. } => false,
+                Surface::Plane { .. } | Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. }
+                | Surface::Torus { .. } => false,
             };
             return if same(c, a, rho) || same(p, b, r) { None } else { Some(f64::INFINITY) };
         }
@@ -198,6 +210,42 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
                 let tilt = u.dot(a).abs().max(v.dot(a).abs());
                 let radial = if r > tolerance && residual <= tolerance * (2.0 * r - tolerance) { 0.0 } else { (residual / r).max(tolerance * 2.0) };
                 radial + tilt * (1.0 + k.abs())
+            }
+        }
+        // Any circle on a sphere: |X - c|^2 - r^2 is a degree-two trigonometric polynomial; the sum of its coefficients'
+        // magnitudes bounds it, and a residual e moves a point at most |e| / (2 r) (for small e) off the sphere.
+        Surface::Sphere { c: sc, r, .. } => {
+            let w = c.sub(sc);
+            let k = [w.dot(w) + (u.dot(u) + v.dot(v)) / 2.0 - r * r, 2.0 * w.dot(u), 2.0 * w.dot(v),
+                     (u.dot(u) - v.dot(v)) / 2.0, u.dot(v)];
+            let residual: f64 = k.iter().map(|x| x.abs()).sum();
+            if residual <= tolerance * (2.0 * r - tolerance) { 0.0 } else { (residual / r).max(tolerance * 2.0) }
+        }
+        // A torus holds two families of circles our faces use: across the axis (a parallel: centre on the axis, its
+        // radius and height on the meridian circle) and in a plane through the axis (a meridian: centre on the centre
+        // circle, radius r). Anything else is refused.
+        Surface::Torus { c: tc, a, x: _, big, r } => {
+            let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
+            let w = c.sub(tc);
+            let tilt = u.dot(a).abs().max(v.dot(a).abs());
+            if tilt <= tolerance && perp(w).length() <= tolerance {
+                // A parallel at height h with radius rho: (rho - big)^2 + h^2 = r^2, and a true circle about the axis.
+                let (pu, pv) = (perp(u), perp(v));
+                let rho = (pu.length() + pv.length()) / 2.0;
+                let roundness = (pu.length() - pv.length()).abs() + pu.dot(pv).abs() / rho.max(1e-300);
+                let h = w.dot(a);
+                ((rho - big).hypot(h) - r).abs() + roundness + perp(w).length()
+            } else {
+                // A meridian: the circle's plane contains the axis, its centre on the centre circle, radius r.
+                let n = u.cross(v);
+                let ln = n.length();
+                if ln == 0.0 { f64::INFINITY } else {
+                    let n = n.scale(1.0 / ln);
+                    let plane_off = n.dot(a).abs() * w.length().max(r) + n.dot(w).abs();
+                    let centre_off = (perp(w).length() - big).abs() + w.dot(a).abs();
+                    let round = (u.length() - r).abs() + (v.length() - r).abs() + u.dot(v).abs() / r;
+                    plane_off + centre_off + round
+                }
             }
         }
     };

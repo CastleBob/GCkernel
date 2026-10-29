@@ -159,7 +159,7 @@ fn translated_plug_with_far_axis_anchors_measures_the_same() {
     }
     for f in &mut far.faces {
         f.surface = match f.surface.clone() {
-            Surface::EllipticCylinder { .. } | Surface::Cone { .. } => unreachable!("no elliptic-cylinder or conical faces in these test bodies"),
+            Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => unreachable!("no elliptic-cylinder or conical faces in these test bodies"),
             Surface::Plane { p, n, x } => Surface::Plane { p: p.add(d), n, x },
             Surface::Cylinder { p, a, x, r } => Surface::Cylinder { p: p.add(d).add(a.scale(-9.0e5)), a, x, r },
         };

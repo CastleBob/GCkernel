@@ -66,6 +66,13 @@ fn same_support(a: &crate::neutral::Face, b: &crate::neutral::Face) -> bool {
                 && (r - there).abs() <= ROUND * r.abs().max(there.abs()).max(1.0)
                 && (k - k2 * along).abs() <= ROUND * k.abs().max(k2.abs()).max(1.0)
         }
+        (Surface::Sphere { c, r, .. }, Surface::Sphere { c: c2, r: r2, .. }) => {
+            a.sense == b.sense && c.distance(*c2) <= ROUND * c.length().max(1.0) && (r - r2).abs() <= ROUND * r.max(*r2).max(1.0)
+        }
+        (Surface::Torus { c, a: n, big, r, .. }, Surface::Torus { c: c2, a: m, big: big2, r: r2, .. }) => {
+            a.sense == b.sense && n.cross(*m).length() <= ROUND && c.distance(*c2) <= ROUND * c.length().max(1.0)
+                && (big - big2).abs() <= ROUND * big.max(*big2).max(1.0) && (r - r2).abs() <= ROUND * r.max(*r2).max(1.0)
+        }
         _ => false,
     }
 }
@@ -86,8 +93,10 @@ fn display_edges(body: &Body) -> Vec<usize> {
 fn unsupported<T>(m: impl Into<String>) -> Result<T, KernelError> { Err(KernelError::Unsupported(m.into())) }
 
 /// The angle step whose chord stays within `chord` of a circle of radius r (at most a quarter turn).
+/// Stable for any radius (Codex review: acos(1 - chord / r) rounds to zero when r is huge): the sagitta r (1 - cos(h / 2))
+/// = 2 r sin^2(h / 4) inverted as h = 4 asin(sqrt(chord / (2 r))).
 fn angle_step(r: f64, chord: f64) -> f64 {
-    if chord >= r { PI / 2.0 } else { (2.0 * (1.0 - chord / r).acos()).min(PI / 2.0) }
+    if !(r > 0.0) || chord >= r { PI / 2.0 } else { (4.0 * (chord / (2.0 * r)).sqrt().asin()).min(PI / 2.0) }
 }
 
 /// An edge as points from its start vertex to its end vertex.
@@ -98,14 +107,18 @@ fn polyline(body: &Body, edge: usize, chord: f64) -> Result<Vec<Vec3>, KernelErr
     let params: Vec<f64> = match e.curve {
         Curve::Line { .. } => vec![0.0, 1.0],
         Curve::Arc { r, .. } => {
-            let n = ((t1 - t0) / angle_step(r, chord)).ceil().max(1.0) as usize;
+            let steps = ((t1 - t0) / angle_step(r, chord)).ceil().max(1.0);
+            if !(steps <= 1_000_000.0) { return unsupported("an arc edge needs over 1000000 display points"); }
+            let n = steps as usize;
             (0..=n).map(|k| t0 + (t1 - t0) * k as f64 / n as f64).collect()
         }
         Curve::Conic { u, v, .. } => {
             // |P''| <= sqrt(|u|^2 + |v|^2); a chord over step h departs by at most h^2 |P''| / 8.
             let bend = (u.dot(u) + v.dot(v)).sqrt();
             let step = (8.0 * chord / bend).sqrt().min(PI / 2.0);
-            let n = ((t1 - t0) / step).ceil().max(1.0) as usize;
+            let steps = ((t1 - t0) / step).ceil().max(1.0);
+            if !(steps <= 1_000_000.0) { return unsupported("an ellipse edge needs over 1000000 display points"); }
+            let n = steps as usize;
             (0..=n).map(|k| t0 + (t1 - t0) * k as f64 / n as f64).collect()
         }
         Curve::CylinderPair { .. } => {
@@ -218,22 +231,35 @@ fn bridge(p: &[[f64; 2]], poly: &mut Vec<usize>, hole: &[usize]) -> Result<(), K
 /// Ear clipping of a counter-clockwise polygon (indices into p, possibly repeated at bridges). `short` takes the
 /// ear with the shortest new side each time (cylinders: a strip of short triangles, not long fans across the
 /// angle), at n^3 cost; otherwise the next ear found.
-fn clip(p: &[[f64; 2]], mut poly: Vec<usize>, short: bool, out: &mut Vec<[usize; 3]>) -> Result<(), KernelError> {
+/// Which straight runs of a chart are straight on the surface too (where a zero-area ear may keep a vertex): any on a
+/// plane, those along the axis on a cylinder or cone, none on a sphere or torus (both directions curve).
+#[derive(Clone, Copy, PartialEq)]
+enum Runs { Any, Axis, None }
+
+fn clip(p: &[[f64; 2]], mut poly: Vec<usize>, short: bool, runs: Runs, out: &mut Vec<[usize; 3]>) -> Result<(), KernelError> {
     let scale = poly.iter().map(|&i| p[i][0].abs().max(p[i][1].abs())).fold(1.0, f64::max);
     let eps = 1e-14 * scale * scale;
     let mut i = 0;
     let mut stall = 0;
     while poly.len() > 3 {
         let n = poly.len();
+        // A straight-run vertex (a zero-area ear) is clipped only when no proper ear is left (Codex acceptance: display
+        // triangles have area); otherwise it stays and joins proper triangles.
+        let proper = |k: usize| {
+            let n = poly.len();
+            cross2(p[poly[(k + n - 1) % n]], p[poly[k]], p[poly[(k + 1) % n]]).abs() > eps && is_ear(p, &poly, k, eps, runs)
+        };
         if short {
             let side = |k: usize| { let (a, c) = (p[poly[(k + n - 1) % n]], p[poly[(k + 1) % n]]); (a[0] - c[0]).hypot(a[1] - c[1]) };
             let mut order: Vec<usize> = (0..n).collect();
             order.sort_by(|&x, &y| side(x).total_cmp(&side(y)).then(x.cmp(&y)));
-            i = order.into_iter().find(|&k| is_ear(p, &poly, k, eps, short)).ok_or_else(|| KernelError::Unsupported(
-                "a face could not be triangulated for display".into()))?;
+            i = order.iter().copied().find(|&k| proper(k)).or_else(|| order.iter().copied().find(|&k| is_ear(p, &poly, k, eps, runs)))
+                .ok_or_else(|| KernelError::Unsupported("a face could not be triangulated for display".into()))?;
+        } else if !proper(i % n) {
+            if let Some(k) = (0..n).map(|d| (i + d) % n).find(|&k| proper(k)) { i = k; }
         }
         let (ia, ib, ic) = ((i + n - 1) % n, i % n, (i + 1) % n);
-        if is_ear(p, &poly, ib, eps, short) {
+        if is_ear(p, &poly, ib, eps, runs) {
             out.push([poly[ia], poly[ib], poly[ic]]);
             poly.remove(ib);
             stall = 0;
@@ -252,13 +278,13 @@ fn clip(p: &[[f64; 2]], mut poly: Vec<usize>, short: bool, out: &mut Vec<[usize;
 /// Whether vertex ib of the polygon is an ear: a convex corner with no other vertex in or on its triangle, or a
 /// vertex on a straight run (a zero-area triangle keeps it, so the faces either side share every edge point). On a
 /// cylinder (`curved`) only a run along the axis is straight: one along the angle is an arc.
-fn is_ear(p: &[[f64; 2]], poly: &[usize], ib: usize, eps: f64, curved: bool) -> bool {
+fn is_ear(p: &[[f64; 2]], poly: &[usize], ib: usize, eps: f64, runs: Runs) -> bool {
     let n = poly.len();
     let (ia, ic) = ((ib + n - 1) % n, (ib + 1) % n);
     let (a, b, c) = (p[poly[ia]], p[poly[ib]], p[poly[ic]]);
     let turn = cross2(a, b, c);
     if turn.abs() <= eps {
-        if curved && (a[0] != b[0] || b[0] != c[0]) { return false; }
+        if runs == Runs::None || (runs == Runs::Axis && (a[0] != b[0] || b[0] != c[0])) { return false; }
         return a != c && (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1]) > 0.0;
     }
     if turn < 0.0 { return false; }
@@ -271,6 +297,10 @@ fn is_ear(p: &[[f64; 2]], poly: &[usize], ib: usize, eps: f64, curved: bool) -> 
 
 /// Triangles over the loops (outer counter-clockwise, holes clockwise in p's frame).
 fn triangulate(p: &[[f64; 2]], loops: &[Vec<usize>], short: bool) -> Result<Vec<[usize; 3]>, KernelError> {
+    triangulate_runs(p, loops, short, if short { Runs::Axis } else { Runs::Any })
+}
+
+fn triangulate_runs(p: &[[f64; 2]], loops: &[Vec<usize>], short: bool, runs: Runs) -> Result<Vec<[usize; 3]>, KernelError> {
     let (mut outers, mut holes): (Vec<&Vec<usize>>, Vec<&Vec<usize>>) = (Vec::new(), Vec::new());
     for l in loops {
         if l.len() < 3 { return unsupported("a face loop has fewer than three display points"); }
@@ -293,7 +323,7 @@ fn triangulate(p: &[[f64; 2]], loops: &[Vec<usize>], short: bool) -> Result<Vec<
             mx(y).total_cmp(&mx(x))
         });
         for h in hs { bridge(p, &mut poly, h)?; }
-        clip(p, poly, short, &mut out)?;
+        clip(p, poly, short, runs, &mut out)?;
     }
     Ok(out)
 }
@@ -394,91 +424,10 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
                 }).collect();
                 (tris, normals)
             }
-            Surface::Cone { p, a, x, r, k } => {
-                // As the cylinder (Claude 2026-10-29), in (R theta, L s) with R the face's largest radius and L = sqrt(1 + k^2)
-                // the slant per unit along the axis: the parameter orientation is the cylinder's, so loops run the same way.
-                // Inner edges spanning more angle than the chord allows at R are split, new points lifted onto the cone.
-                let y = a.cross(x);
-                let slant = (1.0 + k * k).sqrt();
-                let flip = side;
-                let big_r = points3.iter().map(|q| r + k * q.sub(p).dot(a)).fold(0.0, f64::max);
-                if !(big_r > 0.0) { return unsupported(format!("conical face {f} has no positive radius")); }
-                let mut p2 = Vec::with_capacity(points3.len());
-                let mut spans = Vec::new();
-                for l in &index {
-                    let mut prev: Option<f64> = None;
-                    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-                    for &i in l {
-                        let d = points3[i].sub(p);
-                        let raw = d.dot(y).atan2(d.dot(x));
-                        let theta = match prev { None => raw, Some(t) => t + (raw - t + PI).rem_euclid(TAU) - PI };
-                        prev = Some(theta);
-                        lo = lo.min(theta);
-                        hi = hi.max(theta);
-                        p2.push([big_r * theta, flip * slant * d.dot(a)]);
-                    }
-                    let (first, last) = (p2[l[0]][0] / big_r, prev.unwrap());
-                    let close = last + (first - last + PI).rem_euclid(TAU) - PI;
-                    if (close - first).abs() > PI {
-                        return unsupported("a conical face loop wraps the axis without a seam edge");
-                    }
-                    spans.push((lo, hi));
-                }
-                if let Some(kk) = (0..index.len()).max_by(|&i, &j| (spans[i].1 - spans[i].0).total_cmp(&(spans[j].1 - spans[j].0))) {
-                    let (lo, hi) = spans[kk];
-                    for (j, l) in index.iter().enumerate() {
-                        if j == kk { continue; }
-                        let mid = (spans[j].0 + spans[j].1) / 2.0;
-                        let turns = if mid < lo { ((lo - mid) / TAU).ceil() } else if mid > hi { -((mid - hi) / TAU).ceil() } else { 0.0 };
-                        for &i in l { p2[i][0] += turns * TAU * big_r; }
-                    }
-                }
-                let mut tris = triangulate(&p2, &index, true)?;
-                // An edge's allowed angle is the step at its smaller end's radius: the boundary circles were divided at their
-                // own radius, so a fixed limit at R would split the small end's triangles forever.
-                let radius_at = |q: [f64; 2]| r + k * q[1] / (flip * slant);
-                let limit = |e: &(usize, usize), p2: &Vec<[f64; 2]>| big_r * angle_step(radius_at(p2[e.0]).min(radius_at(p2[e.1])), chord);
-                let boundary: std::collections::HashSet<(usize, usize)> = index.iter()
-                    .flat_map(|l| (0..l.len()).map(move |j| { let (s0, w) = (l[j], l[(j + 1) % l.len()]); (s0.min(w), s0.max(w)) }))
-                    .collect();
-                for _pass in 0..64 {
-                    let mut by_edge: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
-                    for (t, tri) in tris.iter().enumerate() {
-                        for j in 0..3 { let (s0, w) = (tri[j], tri[(j + 1) % 3]); by_edge.entry((s0.min(w), s0.max(w))).or_default().push(t); }
-                    }
-                    let mut long: Vec<(usize, usize)> = by_edge.keys().copied()
-                        .filter(|e| !boundary.contains(e) && (p2[e.0][0] - p2[e.1][0]).abs() > limit(e, &p2)).collect();
-                    if long.is_empty() { break; }
-                    long.sort_by(|e1, e2| (p2[e2.0][0] - p2[e2.1][0]).abs().total_cmp(&(p2[e1.0][0] - p2[e1.1][0]).abs()).then(e1.cmp(e2)));
-                    let mut touched = vec![false; tris.len()];
-                    for (s0, w) in long {
-                        let around = &by_edge[&(s0, w)];
-                        if around.iter().any(|&t| touched[t]) { continue; }
-                        let m = p2.len();
-                        let mid = [(p2[s0][0] + p2[w][0]) / 2.0, (p2[s0][1] + p2[w][1]) / 2.0];
-                        p2.push(mid);
-                        let (theta, along) = (mid[0] / big_r, mid[1] / (flip * slant));
-                        let radius = r + k * along;
-                        points3.push(p.add(a.scale(along)).add(x.scale(radius * theta.cos())).add(y.scale(radius * theta.sin())));
-                        for &t in around {
-                            touched[t] = true;
-                            let tri = tris[t];
-                            let j = (0..3).find(|&j| { let (b0, e0) = (tri[j], tri[(j + 1) % 3]); (b0 == s0 && e0 == w) || (b0 == w && e0 == s0) }).unwrap();
-                            let (b0, e0, o) = (tri[j], tri[(j + 1) % 3], tri[(j + 2) % 3]);
-                            tris[t] = [b0, m, o];
-                            tris.push([m, e0, o]);
-                            touched.push(true);
-                        }
-                    }
-                    if _pass == 63 { return unsupported("a conical face needs too many display triangles"); }
-                }
-                let normals = points3.iter().map(|q| {
-                    let d = q.sub(p);
-                    let radial = d.sub(a.scale(d.dot(a)));
-                    let l = radial.length();
-                    let rho = if l > 0.0 { radial.scale(1.0 / l) } else { x };
-                    rho.sub(a.scale(k)).scale(side / slant)
-                }).collect();
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => {
+                let rev = Revolved::of(&face.surface).expect("a surface of revolution");
+                let (pts, tris, normals) = revolved_mesh(&rev, &loops3, side, chord, f)?;
+                points3 = pts;
                 (tris, normals)
             }
             Surface::EllipticCylinder { p, a, u, v } => {
@@ -576,6 +525,269 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
         }
     }
     Ok(mesh)
+}
+
+/// A surface of revolution's chart (Claude 2026-10-29): theta round the axis, u along the meridian (a cone's height from
+/// its point; a sphere's or torus's meridian angle).
+#[derive(Clone, Copy)]
+struct Revolved { o: Vec3, a: Vec3, x: Vec3, y: Vec3, cone: Option<(f64, f64)>, circle: Option<(f64, f64)> }
+
+impl Revolved {
+    fn of(s: &Surface) -> Option<Revolved> {
+        match *s {
+            Surface::Cone { p, a, x, r, k } => Some(Revolved { o: p, a, x, y: a.cross(x), cone: Some((r, k)), circle: None }),
+            Surface::Sphere { c, a, x, r } => Some(Revolved { o: c, a, x, y: a.cross(x), cone: None, circle: Some((0.0, r)) }),
+            Surface::Torus { c, a, x, big, r } => Some(Revolved { o: c, a, x, y: a.cross(x), cone: None, circle: Some((big, r)) }),
+            _ => None,
+        }
+    }
+    fn radial(&self, q: Vec3) -> Vec3 { let d = q.sub(self.o); d.sub(self.a.scale(d.dot(self.a))) }
+    fn theta(&self, q: Vec3) -> f64 { let d = q.sub(self.o); d.dot(self.y).atan2(d.dot(self.x)) }
+    fn u(&self, q: Vec3) -> f64 {
+        let h = q.sub(self.o).dot(self.a);
+        match (self.cone, self.circle) {
+            (Some(_), _) => h,
+            (_, Some((big, _))) => h.atan2(self.radial(q).length() - big),
+            _ => unreachable!(),
+        }
+    }
+    fn radius(&self, u: f64) -> f64 {
+        match (self.cone, self.circle) {
+            (Some((r, k)), _) => r + k * u,
+            (_, Some((big, rho))) => big + rho * u.cos(),
+            _ => unreachable!(),
+        }
+    }
+    fn rho(&self, t: f64) -> Vec3 { self.x.scale(t.cos()).add(self.y.scale(t.sin())) }
+    fn point(&self, t: f64, u: f64) -> Vec3 {
+        let along = match (self.cone, self.circle) { (Some(_), _) => u, (_, Some((_, rho))) => rho * u.sin(), _ => unreachable!() };
+        self.o.add(self.a.scale(along)).add(self.rho(t).scale(self.radius(u).max(0.0)))
+    }
+    /// The unit natural normal (away from the axis, or from the torus's centre circle).
+    fn normal(&self, t: f64, u: f64) -> Vec3 {
+        match (self.cone, self.circle) {
+            (Some((_, k)), _) => self.rho(t).sub(self.a.scale(k)).scale(1.0 / (1.0 + k * k).sqrt()),
+            (_, Some(_)) => self.rho(t).scale(u.cos()).add(self.a.scale(u.sin())),
+            _ => unreachable!(),
+        }
+    }
+    /// Distance from a point to the surface (in the half-plane through the axis: to the cone's line or the torus's
+    /// meridian circle; exact).
+    fn off(&self, q: Vec3) -> f64 {
+        let (h, rad) = (q.sub(self.o).dot(self.a), self.radial(q).length());
+        match (self.cone, self.circle) {
+            (Some((r, k)), _) => (rad - (r + k * h)).abs() / (1.0 + k * k).sqrt(),
+            (_, Some((big, rho))) => ((rad - big).hypot(h) - rho).abs(),
+            _ => unreachable!(),
+        }
+    }
+    /// Length along the surface per unit of u.
+    fn u_scale(&self) -> f64 {
+        match (self.cone, self.circle) { (Some((_, k)), _) => (1.0 + k * k).sqrt(), (_, Some((_, rho))) => rho, _ => unreachable!() }
+    }
+}
+
+/// A face on a cone, sphere or torus as triangles in its (theta, u) chart. Loops are unwrapped by continuity; a point on
+/// the axis (an apex or pole) has no angle of its own, so it is entered twice, at the angles of its neighbours (revolve
+/// splits faces touching the axis so those neighbours' angles differ by at most half a turn). Inner edges longer than the
+/// chord allows (round the axis at the smaller end's radius; along a curved meridian) are split and lifted onto the
+/// surface. Returns the points, triangles and outward normals.
+fn revolved_mesh(rev: &Revolved, loops3: &[Vec<Vec3>], side: f64, chord: f64, f: usize)
+    -> Result<(Vec<Vec3>, Vec<[usize; 3]>, Vec<Vec3>), KernelError> {
+    let scale = loops3.iter().flatten().map(|q| q.distance(rev.o)).fold(1.0, f64::max);
+    let on_axis = |q: Vec3| rev.radial(q).length() <= 1e-10 * scale;
+    let wraps_u = matches!(rev.circle, Some((big, _)) if big > 0.0);
+    let mut points3 = Vec::new();
+    let mut tu: Vec<(f64, f64)> = Vec::new();
+    let mut index = Vec::new();
+    let mut spans = Vec::new();
+    let near = |prev: f64, raw: f64| prev + (raw - prev + PI).rem_euclid(TAU) - PI;
+    for l in loops3 {
+        let n = l.len();
+        let Some(first) = (0..n).find(|&i| !on_axis(l[i])) else {
+            return unsupported(format!("face {f}: a loop lies entirely on the axis"));
+        };
+        let mut idx = Vec::new();
+        let (mut theta, mut u): (Option<f64>, Option<f64>) = (None, None);
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for step in 0..n {
+            let q = l[(first + step) % n];
+            let raw_u = rev.u(q);
+            let uu = match u { Some(p) if wraps_u => near(p, raw_u), _ => raw_u };
+            u = Some(uu);
+            if on_axis(q) {
+                let next = (1..n).map(|k| l[(first + step + k) % n]).find(|&w| !on_axis(w))
+                    .ok_or_else(|| KernelError::Unsupported(format!("face {f}: an axis point has no neighbour off the axis")))?;
+                let before = theta.expect("the loop starts off the axis");
+                // The jump along the pole: its size is the angle to the next meridian (at most half a turn; exactly half
+                // is ambiguous by angle alone), its direction the loop's turn: backwards at the top of the chart (greatest
+                // u), forwards at the bottom, reversed for an inward face.
+                let turn = near(before, rev.theta(next)) - before;
+                let size = turn.abs();
+                let prev_u = tu.last().expect("the loop starts off the axis").1;
+                let dir = if uu > prev_u { -1.0 } else { 1.0 } * side;
+                let after = before + dir * size;
+                // Entered along the pole every 1/32 turn (one point in space), so each triangle meets the pole at an
+                // angle near its own: a triangle reaching a far entry would fold over the pole.
+                let steps = ((size / (PI / 32.0)).ceil() as usize).max(1);
+                for k in 0..=steps {
+                    idx.push(points3.len());
+                    points3.push(q);
+                    tu.push((before + (after - before) * k as f64 / steps as f64, uu));
+                }
+                theta = Some(after);
+                continue;
+            }
+            let t = match theta { None => rev.theta(q), Some(p) => near(p, rev.theta(q)) };
+            theta = Some(t);
+            lo = lo.min(t);
+            hi = hi.max(t);
+            idx.push(points3.len());
+            points3.push(q);
+            tu.push((t, uu));
+        }
+        // A loop must come back to its start angle (a seam closes a whole turn); one that wraps without a seam is refused.
+        let (start, last) = (tu[idx[0]].0, theta.unwrap());
+        if (last - start).abs() > PI {
+            return unsupported("a revolved face loop wraps the axis without a seam edge");
+        }
+        spans.push((lo, hi));
+        index.push(idx);
+    }
+    // Holes unwrapped a turn away from the outer loop are moved into its range.
+    if let Some(k) = (0..index.len()).max_by(|&i, &j| (spans[i].1 - spans[i].0).total_cmp(&(spans[j].1 - spans[j].0))) {
+        let (lo, hi) = spans[k];
+        for (j, l) in index.iter().enumerate() {
+            if j == k { continue; }
+            let mid = (spans[j].0 + spans[j].1) / 2.0;
+            let turns = if mid < lo { ((lo - mid) / TAU).ceil() } else if mid > hi { -((mid - hi) / TAU).ceil() } else { 0.0 };
+            for &i in l { tu[i].0 += turns * TAU; }
+        }
+    }
+    let big_r = tu.iter().map(|&(_, u)| rev.radius(u)).fold(0.0, f64::max);
+    if !(big_r > 0.0) { return unsupported(format!("revolved face {f} has no positive radius")); }
+    // A cone's generators are straight, so its chart is squashed along them (an affine change: triangulation stays
+    // valid) until it is no taller than a tenth of its width: triangles then follow the generators instead of crossing
+    // the angle on long diagonals that would need endless splitting.
+    let (u_lo, u_hi) = tu.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(_, u)| (lo.min(u), hi.max(u)));
+    let ys = match rev.cone {
+        Some(_) => rev.u_scale() * (0.1 * big_r * TAU / (rev.u_scale() * (u_hi - u_lo)).max(1e-300)).min(1.0),
+        None => rev.u_scale(),
+    };
+    let flip = side;
+    let mut p2: Vec<[f64; 2]> = tu.iter().map(|&(t, u)| [big_r * t, flip * ys * u]).collect();
+    let mut tris = triangulate_runs(&p2, &index, true, if rev.circle.is_some() { Runs::None } else { Runs::Axis })?;
+    // Refinement by true distance from the surface (exact for these surfaces): an inner edge whose midpoint departs by
+    // more than 0.6 of the chord is split, and so is the longest inner edge of a triangle whose centre departs by more than
+    // 0.95 of it. A triangle's centre lies at most 4/9 of its edges' midpoint departures below them, so with boundary
+    // edges within the chord (their polylines) every face ends within it. Edges from an apex along a cone are generators
+    // (no departure) and are never split.
+    let limit_edge = 0.6 * chord;
+    let limit_centre = 0.95 * chord;
+    let boundary: std::collections::HashSet<(usize, usize)> = index.iter()
+        .flat_map(|l| (0..l.len()).map(move |j| { let (s0, w) = (l[j], l[(j + 1) % l.len()]); (s0.min(w), s0.max(w)) }))
+        .collect();
+    for pass in 0..100 {
+        delaunay_flips(&p2, &mut tris, &boundary);
+        let mut by_edge: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (t, tri) in tris.iter().enumerate() {
+            for j in 0..3 { let (s0, w) = (tri[j], tri[(j + 1) % 3]); by_edge.entry((s0.min(w), s0.max(w))).or_default().push(t); }
+        }
+        let inner_edge = |e: &(usize, usize)| !boundary.contains(e) && points3[e.0] != points3[e.1];
+        let mut split: Vec<(usize, usize)> = by_edge.keys().copied()
+            .filter(|e| inner_edge(e) && rev.off(points3[e.0].add(points3[e.1]).scale(0.5)) > limit_edge).collect();
+        for tri in &tris {
+            let [pa, pb, pc] = tri.map(|i| points3[i]);
+            // A triangle facing against the surface folds the chart near a pole: split it in the chart until it does not.
+            if pa != pb && pb != pc && pc != pa {
+                let normal = tri.iter().fold(Vec3::new(0.0, 0.0, 0.0), |acc, &i| acc.add(rev.normal(tu[i].0, tu[i].1))).scale(side);
+                if pb.sub(pa).cross(pc.sub(pa)).dot(normal) <= 0.0 {
+                    let chart = |e: &(usize, usize)| (p2[e.0][0] - p2[e.1][0]).hypot(p2[e.0][1] - p2[e.1][1]);
+                    let longest = (0..3).map(|j| { let (u0, u1) = (tri[j], tri[(j + 1) % 3]); (u0.min(u1), u0.max(u1)) }).filter(|e| inner_edge(e))
+                        .max_by(|e1, e2| chart(e1).total_cmp(&chart(e2)).then(e1.cmp(e2)));
+                    if let Some(e) = longest { split.push(e); continue; }
+                }
+            }
+            // Triangles on two entries of one axis point are dropped at the end; their edges are checked above.
+            if pa == pb || pb == pc || pc == pa { continue; }
+            let centre = pa.add(pb).add(pc).scale(1.0 / 3.0);
+            if rev.off(centre) <= limit_centre { continue; }
+            let longest = (0..3).map(|j| { let (a, b) = (tri[j], tri[(j + 1) % 3]); (a.min(b), a.max(b)) }).filter(|e| inner_edge(e))
+                .max_by(|e1, e2| points3[e1.0].distance(points3[e1.1]).total_cmp(&points3[e2.0].distance(points3[e2.1])).then(e1.cmp(e2)));
+            if let Some(e) = longest { split.push(e); }
+        }
+        split.sort();
+        split.dedup();
+        if split.is_empty() { break; }
+        if pass == 99 || tris.len() > 2_000_000 { return unsupported(format!("revolved face {f} needs too many display triangles")); }
+        let len = |e: &(usize, usize)| points3[e.0].distance(points3[e.1]);
+        split.sort_by(|e1, e2| len(e2).total_cmp(&len(e1)).then(e1.cmp(e2)));
+        let mut touched = vec![false; tris.len()];
+        for (s0, w) in split {
+            let around = &by_edge[&(s0, w)];
+            if around.iter().any(|&t| touched[t]) { continue; }
+            let m = p2.len();
+            let mid = [(p2[s0][0] + p2[w][0]) / 2.0, (p2[s0][1] + p2[w][1]) / 2.0];
+            p2.push(mid);
+            let (t, u) = (mid[0] / big_r, mid[1] / (flip * ys));
+            points3.push(rev.point(t, u));
+            tu.push((t, u));
+            for &tr in around {
+                touched[tr] = true;
+                let tri = tris[tr];
+                let j = (0..3).find(|&j| { let (b0, e0) = (tri[j], tri[(j + 1) % 3]); (b0 == s0 && e0 == w) || (b0 == w && e0 == s0) }).unwrap();
+                let (b0, e0, o) = (tri[j], tri[(j + 1) % 3], tri[(j + 2) % 3]);
+                tris[tr] = [b0, m, o];
+                tris.push([m, e0, o]);
+                touched.push(true);
+            }
+        }
+    }
+    // The two entries of an axis point are one point in space: a triangle using both has no area and is dropped (its other
+    // two edges are one segment, shared by the triangles either side).
+    tris.retain(|t| { let [a, b, c] = t.map(|i| points3[i]); a != b && b != c && c != a });
+    let normals = tu.iter().map(|&(t, u)| rev.normal(t, u).scale(side)).collect();
+    Ok((points3, tris, normals))
+}
+
+/// Lawson flips in the chart: an inner edge whose opposite vertex lies inside the circumcircle of the triangle across it
+/// (and whose quadrilateral is convex) is replaced by the other diagonal, until none is left. Removes slivers the
+/// splitting cannot (a chain of points along one meridian). Boundary edges never move.
+fn delaunay_flips(p2: &[[f64; 2]], tris: &mut [[usize; 3]], boundary: &std::collections::HashSet<(usize, usize)>) {
+    let in_circle = |a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]| {
+        let (adx, ady, bdx, bdy, cdx, cdy) = (a[0] - d[0], a[1] - d[1], b[0] - d[0], b[1] - d[1], c[0] - d[0], c[1] - d[1]);
+        (adx * adx + ady * ady) * (bdx * cdy - cdx * bdy) - (bdx * bdx + bdy * bdy) * (adx * cdy - cdx * ady)
+            + (cdx * cdx + cdy * cdy) * (adx * bdy - bdx * ady)
+    };
+    for _ in 0..64 {
+        let mut by_edge: HashMap<(usize, usize), Vec<(usize, usize)>> = HashMap::new();
+        for (t, tri) in tris.iter().enumerate() {
+            for j in 0..3 { let (a, b) = (tri[j], tri[(j + 1) % 3]); by_edge.entry((a.min(b), a.max(b))).or_default().push((t, j)); }
+        }
+        let mut flipped = vec![false; tris.len()];
+        let mut any = false;
+        let mut keys: Vec<(usize, usize)> = by_edge.keys().copied().collect();
+        keys.sort();
+        for e in keys {
+            let around = &by_edge[&e];
+            if boundary.contains(&e) || around.len() != 2 { continue; }
+            let ((t1, j1), (t2, j2)) = (around[0], around[1]);
+            if flipped[t1] || flipped[t2] { continue; }
+            let (a, b, c) = (tris[t1][j1], tris[t1][(j1 + 1) % 3], tris[t1][(j1 + 2) % 3]);
+            let d = tris[t2][(j2 + 2) % 3];
+            // t1 = (a, b, c) counter-clockwise; t2 runs b -> a with d opposite.
+            if tris[t2][j2] != b || tris[t2][(j2 + 1) % 3] != a { continue; }
+            if in_circle(p2[a], p2[b], p2[c], p2[d]) <= 1e-12 * (cross2(p2[a], p2[b], p2[c]).abs() + 1e-300).sqrt().max(1e-300) { continue; }
+            // The new triangles (c, a, d) and (d, b, c) must both turn counter-clockwise (a convex quadrilateral).
+            if cross2(p2[c], p2[a], p2[d]) <= 0.0 || cross2(p2[d], p2[b], p2[c]) <= 0.0 { continue; }
+            tris[t1] = [c, a, d];
+            tris[t2] = [d, b, c];
+            flipped[t1] = true;
+            flipped[t2] = true;
+            any = true;
+        }
+        if !any { break; }
+    }
 }
 
 /// The worker reply: [1, chord, V, T, E, positions 3V, normals 3V, triangles 4T (i, j, k, face), then per edge:

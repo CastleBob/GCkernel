@@ -197,6 +197,21 @@ impl<'a> Reader<'a> {
                 if !(r.is_finite() && k.is_finite()) || r <= 0.0 { return invalid("a cone needs a positive radius at its point and a finite slope"); }
                 Ok(Surface::Cone { p, a, x, r, k })
             }
+            t if t == 5.0 => {
+                let c = self.point()?;
+                let (a, x) = self.frame()?;
+                let r = self.next()?;
+                if r <= 0.0 { return invalid("a sphere needs a positive radius"); }
+                Ok(Surface::Sphere { c, a, x, r })
+            }
+            t if t == 6.0 => {
+                let c = self.point()?;
+                let (a, x) = self.frame()?;
+                let (big, r) = (self.next()?, self.next()?);
+                // Ring, horn or spindle: a face on it is admitted only where its radius from the axis stays positive.
+                if !(r > 0.0 && big > 0.0) { return invalid("a torus needs a positive centre-circle radius and tube radius"); }
+                Ok(Surface::Torus { c, a, x, big, r })
+            }
             t => invalid(format!("unknown surface type {t}")),
         }
     }
@@ -279,6 +294,8 @@ pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
         Surface::Cylinder { p, a, x, r } => { out.push(1.0); put(out, *p); put(out, *a); put(out, *x); out.push(*r); }
         Surface::EllipticCylinder { p, a, u, v } => { out.push(3.0); put(out, *p); put(out, *a); put(out, *u); put(out, *v); }
         Surface::Cone { p, a, x, r, k } => { out.push(4.0); put(out, *p); put(out, *a); put(out, *x); out.extend_from_slice(&[*r, *k]); }
+        Surface::Sphere { c, a, x, r } => { out.push(5.0); put(out, *c); put(out, *a); put(out, *x); out.push(*r); }
+        Surface::Torus { c, a, x, big, r } => { out.push(6.0); put(out, *c); put(out, *a); put(out, *x); out.extend_from_slice(&[*big, *r]); }
     }
 }
 

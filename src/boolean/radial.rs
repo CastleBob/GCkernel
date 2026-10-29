@@ -315,7 +315,7 @@ mod tests {
         }
         for f in &mut body.faces {
             f.surface = match f.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } => unreachable!("no elliptic-cylinder or conical faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p, n, x } => Surface::Plane { p: place(p), n: turn(n), x: turn(x) },
                 Surface::Cylinder { p, a, x, r } => Surface::Cylinder { p: place(p), a: turn(a), x: turn(x), r },
             };

@@ -197,6 +197,8 @@ impl Rigid {
                 p: self.position(p), a: self.vector(a), u: self.vector(u), v: self.vector(v),
             },
             Surface::Cone { p, a, x, r, k } => Surface::Cone { p: self.position(p), a: self.vector(a), x: self.vector(x), r, k },
+            Surface::Sphere { c, a, x, r } => Surface::Sphere { c: self.position(c), a: self.vector(a), x: self.vector(x), r },
+            Surface::Torus { c, a, x, big, r } => Surface::Torus { c: self.position(c), a: self.vector(a), x: self.vector(x), big, r },
         }
     }
     /// The body moved exactly; topology (indices, senses, loops) is untouched.
