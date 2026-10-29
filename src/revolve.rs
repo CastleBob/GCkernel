@@ -16,6 +16,7 @@
 //! outward normal is (dz, -dr), which makes the loops run counter-clockwise about it.
 
 use crate::geom::{Curve, Surface, Vec3};
+use crate::meridian::Meridian;
 use crate::neutral::{Body, Edge, Face};
 use crate::KernelError;
 use std::f64::consts::{PI, TAU};
@@ -67,7 +68,6 @@ impl Revolution {
 }
 
 fn invalid<T>(m: impl Into<String>) -> Result<T, KernelError> { Err(KernelError::InvalidInput(m.into())) }
-fn unsupported<T>(m: impl Into<String>) -> Result<T, KernelError> { Err(KernelError::Unsupported(m.into())) }
 
 /// A segment resolved in (radius, height): start, end and, for an arc, its centre, radius, start angle and signed sweep.
 #[derive(Clone, Copy, Debug)]
@@ -75,14 +75,43 @@ struct Piece {
     s: (f64, f64),
     e: (f64, f64),
     arc: Option<(f64, f64, f64, f64, f64)>, // cr, cz, rho, alpha0, signed sweep
+    /// An ellipse or Bezier meridian with its parameter interval, increasing along travel.
+    mer: Option<(Meridian, f64, f64)>,
 }
 
 impl Piece {
     fn reversed(&self) -> Piece {
-        Piece { s: self.e, e: self.s, arc: self.arc.map(|(cr, cz, rho, a0, sw)| (cr, cz, rho, a0 + sw, -sw)) }
+        Piece { s: self.e, e: self.s, arc: self.arc.map(|(cr, cz, rho, a0, sw)| (cr, cz, rho, a0 + sw, -sw)),
+            mer: self.mer.map(|(m, t0, t1)| match m {
+                Meridian::Bezier(_) => (m.reversed(), 1.0 - t1, 1.0 - t0),
+                Meridian::Ellipse { .. } => (m.reversed(), -t1, -t0),
+            }) }
+    }
+    /// The point at fraction f in [0, 1] of the piece.
+    fn at(&self, f: f64) -> (f64, f64) {
+        if let Some((m, t0, t1)) = self.mer { return m.eval(t0 + (t1 - t0) * f); }
+        match self.arc {
+            None => (self.s.0 + (self.e.0 - self.s.0) * f, self.s.1 + (self.e.1 - self.s.1) * f),
+            Some((cr, cz, rho, a0, sw)) => (cr + rho * (a0 + sw * f).cos(), cz + rho * (a0 + sw * f).sin()),
+        }
+    }
+    /// A box holding the piece over fractions [f0, f1] (exact for lines and arcs, conservative for meridians).
+    fn bounds(&self, f0: f64, f1: f64) -> (f64, f64, f64, f64) {
+        if let Some((m, t0, t1)) = self.mer { return m.bounds(t0 + (t1 - t0) * f0, t0 + (t1 - t0) * f1); }
+        let mut pts = vec![self.at(f0), self.at(f1)];
+        if let Some((cr, cz, rho, a0, sw)) = self.arc {
+            let (lo, hi) = { let (x, y) = (a0 + sw * f0, a0 + sw * f1); (x.min(y), x.max(y)) };
+            for k in -8..=8 {
+                let t = k as f64 * PI / 2.0;
+                if t > lo && t < hi { pts.push((cr + rho * t.cos(), cz + rho * t.sin())); }
+            }
+        }
+        pts.iter().fold((f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+            |b, p| (b.0.min(p.0), b.1.min(p.1), b.2.max(p.0), b.3.max(p.1)))
     }
     /// Twice the signed area contribution: the loop integral of (r dz - z dr).
     fn area2(&self) -> f64 {
+        if let Some((m, t0, t1)) = self.mer { return m.area2(t0, t1); }
         match self.arc {
             None => self.s.0 * self.e.1 - self.e.0 * self.s.1,
             Some((cr, cz, rho, a0, sw)) => {
@@ -93,6 +122,7 @@ impl Piece {
     }
     /// The loop integral of r^2 dz (Pappus: pi times its loop sum is the full-turn volume).
     fn r2dz(&self) -> f64 {
+        if let Some((m, t0, t1)) = self.mer { return m.r2dz(t0, t1); }
         match self.arc {
             None => {
                 let ((r0, z0), (r1, z1)) = (self.s, self.e);
@@ -108,12 +138,14 @@ impl Piece {
     }
     /// The smallest radius strictly inside the segment (an arc passing the angle pi), if any.
     fn inner_min_radius(&self) -> Option<f64> {
+        if let Some((m, t0, t1)) = self.mer { return m.inner_min_radius(t0, t1); }
         let (cr, _, rho, a0, sw) = self.arc?;
         let (lo, hi) = if sw > 0.0 { (a0, a0 + sw) } else { (a0 + sw, a0) };
         let t = PI + ((lo - PI) / TAU).ceil() * TAU;
         (t > lo && t < hi).then_some(cr - rho)
     }
     fn mid(&self) -> (f64, f64) {
+        if self.mer.is_some() { return self.at(0.5); }
         match self.arc {
             None => ((self.s.0 + self.e.0) / 2.0, (self.s.1 + self.e.1) / 2.0),
             Some((cr, cz, rho, a0, sw)) => (cr + rho * (a0 + sw / 2.0).cos(), cz + rho * (a0 + sw / 2.0).sin()),
@@ -125,7 +157,7 @@ fn resolve(seg: &Segment, next: &Segment, tol: f64, at: &str) -> Result<Piece, K
     let (s, e) = ((seg.r, seg.z), (next.r, next.z));
     if (e.0 - s.0).hypot(e.1 - s.1) <= tol { return invalid(format!("{at} has no length")); }
     match seg.kind {
-        Kind::Line => Ok(Piece { s, e, arc: None }),
+        Kind::Line => Ok(Piece { s, e, arc: None, mer: None }),
         Kind::Arc { cr, cz, ccw } => {
             if !(cr.is_finite() && cz.is_finite()) { return invalid(format!("{at}: the arc centre is not finite")); }
             let (rho, rho_end) = ((s.0 - cr).hypot(s.1 - cz), (e.0 - cr).hypot(e.1 - cz));
@@ -134,11 +166,63 @@ fn resolve(seg: &Segment, next: &Segment, tol: f64, at: &str) -> Result<Piece, K
             }
             let (a0, a1) = ((s.1 - cz).atan2(s.0 - cr), (e.1 - cz).atan2(e.0 - cr));
             let sw = if ccw { (a1 - a0).rem_euclid(TAU) } else { -(a0 - a1).rem_euclid(TAU) };
-            Ok(Piece { s, e, arc: Some((cr, cz, rho, a0, sw)) })
+            Ok(Piece { s, e, arc: Some((cr, cz, rho, a0, sw)), mer: None })
         }
-        Kind::Ellipse { .. } => unsupported(format!("{at}: revolved ellipse arcs are not supported yet")),
-        Kind::Bezier { .. } => unsupported(format!("{at}: revolved Bezier curves are not supported yet")),
+        Kind::Ellipse { cr, cz, ur, uz, vr, vz, forward } => {
+            let vals = [cr, cz, ur, uz, vr, vz];
+            if vals.iter().any(|v| !v.is_finite()) { return invalid(format!("{at}: the ellipse is not finite")); }
+            let det = ur * vz - uz * vr;
+            if det.abs() <= 1e-12 * ur.hypot(uz) * vr.hypot(vz) || ur.hypot(uz) <= tol || vr.hypot(vz) <= tol {
+                return invalid(format!("{at}: the ellipse's semi-diameters must be independent"));
+            }
+            let m = Meridian::Ellipse { c: (cr, cz), u: (ur, uz), v: (vr, vz) };
+            // Travel always runs with increasing parameter: a backwards arc is the reversed ellipse.
+            let m = if forward { m } else { m.reversed() };
+            let t0 = m.param_of(s, 0.0);
+            let mut t1 = m.param_of(e, t0);
+            if t1 <= t0 { t1 += TAU; }
+            for (q, t) in [(s, t0), (e, t1)] {
+                let on = m.eval(t);
+                if (on.0 - q.0).hypot(on.1 - q.1) > tol { return invalid(format!("{at}: an end is not on the ellipse")); }
+            }
+            Ok(Piece { s, e, arc: None, mer: Some((m, t0, t1)) })
+        }
+        Kind::Bezier { c1, c2 } => {
+            if !(c1.0.is_finite() && c1.1.is_finite() && c2.0.is_finite() && c2.1.is_finite()) {
+                return invalid(format!("{at}: the Bezier controls are not finite"));
+            }
+            Ok(Piece { s, e, arc: None, mer: Some((Meridian::Bezier([s, c1, c2, e]), 0.0, 1.0)) })
+        }
     }
+}
+
+/// Proves two pieces stay farther apart than tol (except at the given shared points: pairs of fractions (on p, on q)
+/// where they meet as neighbours), by subdividing until boxes separate (sound: boxes hold the pieces). False when the
+/// pieces come within tol (boxes smaller than tol still touching) or the proof does not finish.
+fn apart(p: &Piece, q: &Piece, shared: &[(f64, f64)], tol: f64) -> bool {
+    let size = { let b = p.bounds(0.0, 1.0); (b.2 - b.0).hypot(b.3 - b.1) }.max({ let b = q.bounds(0.0, 1.0); (b.2 - b.0).hypot(b.3 - b.1) });
+    let exclusion = (10.0 * tol).max(1e-9 * size);
+    let mut stack = vec![((0.0, 1.0), (0.0, 1.0), 0usize)];
+    let diag = |b: (f64, f64, f64, f64)| (b.2 - b.0).hypot(b.3 - b.1);
+    while let Some(((a0, a1), (b0, b1), depth)) = stack.pop() {
+        let (bp, bq) = (p.bounds(a0, a1), q.bounds(b0, b1));
+        let gap = (bq.0 - bp.2).max(bp.0 - bq.2).max(0.0).hypot((bq.1 - bp.3).max(bp.1 - bq.3).max(0.0));
+        if gap > tol { continue; }
+        let at_shared = shared.iter().any(|&(fp, fq)| fp >= a0 && fp <= a1 && fq >= b0 && fq <= b1);
+        if at_shared && diag(bp) <= exclusion && diag(bq) <= exclusion { continue; }
+        if depth > 60 || (diag(bp) <= tol && diag(bq) <= tol) { return false; }
+        if diag(bp) >= diag(bq) {
+            let m = (a0 + a1) / 2.0;
+            stack.push(((a0, m), (b0, b1), depth + 1));
+            stack.push(((m, a1), (b0, b1), depth + 1));
+        } else {
+            let m = (b0 + b1) / 2.0;
+            stack.push(((a0, a1), (b0, m), depth + 1));
+            stack.push(((a0, a1), (m, b1), depth + 1));
+        }
+        if stack.len() > 200_000 { return false; }
+    }
+    true
 }
 
 /// Is angle t on the arc from a0 through the signed sweep sw?
@@ -252,6 +336,22 @@ fn distance(p: &Piece, q: &Piece, shared: Option<(f64, f64)>, tol: f64) -> f64 {
 /// Crossings of the ray from q towards +r with a piece (half-open in height, so a shared end counts once).
 fn ray_crossings(pc: &Piece, q: (f64, f64)) -> usize {
     let counts = |e0: f64, e1: f64| (e0 > q.1) != (e1 > q.1);
+    if pc.mer.is_some() {
+        let n = 256;
+        let mut found = 0;
+        for k in 0..n {
+            let (f0, f1) = (k as f64 / n as f64, (k + 1) as f64 / n as f64);
+            let (z0, z1) = (pc.at(f0).1, pc.at(f1).1);
+            if !counts(z0, z1) { continue; }
+            let (mut lo, mut hi) = (f0, f1);
+            for _ in 0..60 {
+                let m = (lo + hi) / 2.0;
+                if counts(pc.at(lo).1, pc.at(m).1) { hi = m } else { lo = m }
+            }
+            found += usize::from(pc.at((lo + hi) / 2.0).0 > q.0);
+        }
+        return found;
+    }
     match pc.arc {
         None => {
             let ((r0, z0), (r1, z1)) = (pc.s, pc.e);
@@ -347,7 +447,7 @@ fn pieces(rev: &Revolution, tol: f64) -> Result<Vec<Vec<Piece>>, KernelError> {
         let n = lp.len();
         for i in 0..n {
             if lp[i].s.0 != 0.0 { continue; }
-            let along = |pc: &Piece| pc.arc.is_none() && (pc.s.0 == 0.0 && pc.e.0 == 0.0 || (pc.e.1 - pc.s.1).abs() <= tol);
+            let along = |pc: &Piece| pc.arc.is_none() && pc.mer.is_none() && (pc.s.0 == 0.0 && pc.e.0 == 0.0 || (pc.e.1 - pc.s.1).abs() <= tol);
             if !along(&lp[(i + n - 1) % n]) && !along(&lp[i]) {
                 return invalid(format!("loop {l} point {i} touches the axis only at a point (the solid would pinch there)"));
             }
@@ -362,6 +462,15 @@ fn pieces(rev: &Revolution, tol: f64) -> Result<Vec<Vec<Piece>>, KernelError> {
             let n = out[l1].len();
             let after = l1 == l2 && (i1 + 1) % n == i2;
             let before = l1 == l2 && (i2 + 1) % n == i1;
+            if p1.mer.is_some() || p2.mer.is_some() {
+                let mut shared = Vec::new();
+                if after { shared.push((1.0, 0.0)); }
+                if before { shared.push((0.0, 1.0)); }
+                if !apart(&p1, &p2, &shared, tol) {
+                    return invalid(format!("section segments (loop {l1} segment {i1}) and (loop {l2} segment {i2}) cross, touch or could not be proved apart"));
+                }
+                continue;
+            }
             if after && before {
                 // A two-segment loop: the pieces share both ends; they must not overlap or meet elsewhere.
                 if (p1.mid().0 - p2.mid().0).hypot(p1.mid().1 - p2.mid().1) <= tol
@@ -431,7 +540,7 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
     let at = |r: f64, z: f64, t: f64| p.add(a.scale(z)).add(rho_at(t).scale(r));
     let split_faces = full || phi > PI;
     let mid = if full { PI } else { phi / 2.0 };
-    let curved = |pc: &Piece| pc.arc.is_some() || (pc.e.1 - pc.s.1).abs() > tol;
+    let curved = |pc: &Piece| pc.arc.is_some() || pc.mer.is_some() || (pc.e.1 - pc.s.1).abs() > tol;
     let touches = |pc: &Piece| pc.s.0 == 0.0 || pc.e.0 == 0.0;
 
     let mut body = Body::default();
@@ -494,6 +603,14 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
     };
     // A piece's meridian curve at angle t, from its start to its end.
     let meridian = |pc: &Piece, t: f64| -> Curve {
+        if let Some((m, t0, t1)) = pc.mer {
+            // The map (r, z) -> 3D at angle t is affine, so control points and conjugate semi-diameters map exactly.
+            let lift = |v: (f64, f64)| rho_at(t).scale(v.0).add(a.scale(v.1));
+            return match m {
+                Meridian::Bezier(_) => Curve::Bezier { p: m.sub_bezier(t0, t1).map(|q| at(q.0, q.1, t)) },
+                Meridian::Ellipse { c, u, v } => Curve::Conic { c: at(c.0, c.1, t), u: lift(u), v: lift(v), t0, t1 },
+            };
+        }
         match pc.arc {
             None => Curve::Line { a: at(pc.s.0, pc.s.1, t), b: at(pc.e.0, pc.e.1, t) },
             Some((cr, cz, rho, _, sw)) => {
@@ -512,7 +629,7 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
         for i in 0..n {
             let j = (i + 1) % n;
             let pc = lp[i];
-            if pc.arc.is_none() && pc.s.0 == 0.0 && pc.e.0 == 0.0 {
+            if pc.arc.is_none() && pc.mer.is_none() && pc.s.0 == 0.0 && pc.e.0 == 0.0 {
                 // On the axis: nothing in a full turn; the caps' shared edge in a part turn.
                 if !full {
                     let e = body.edges.len();
@@ -531,6 +648,8 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
                 (false, true) => vec![0.0, mid, phi],
             };
             let surface = match pc.arc {
+                // Its natural normal points right of the meridian's travel, which is outward here.
+                None if pc.mer.is_some() => Surface::Revolution { p, a, x, m: pc.mer.unwrap().0 },
                 None if planar => Surface::Plane { p: p.add(a.scale(pc.s.1)), n: a, x },
                 None => {
                     let ((r0, z0), (r1, z1)) = (pc.s, pc.e);
@@ -546,6 +665,7 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
                 }
             };
             let sense = match pc.arc {
+                None if pc.mer.is_some() => true,
                 None if planar => pc.e.0 < pc.s.0,
                 None => pc.e.1 > pc.s.1,
                 Some((_, _, _, _, sw)) => sw > 0.0,
@@ -785,10 +905,11 @@ mod tests {
     }
 
     #[test]
-    fn refuses_unbuilt_kinds_and_off_axis_arcs_reaching_the_axis() {
+    fn refuses_ellipse_ends_off_the_curve_and_zero_angles() {
+        // The ellipse c (1, 1), u (0, -1), v (1, 0) passes (1, 0) and (2, 1); (2, 1.5) is off it.
         let ellipse = vec![Segment { r: 1.0, z: 0.0, kind: Kind::Ellipse { cr: 1.0, cz: 1.0, ur: 0.0, uz: -1.0, vr: 1.0, vz: 0.0, forward: true } },
-            line(2.0, 1.0), line(1.0, 1.0)];
-        assert!(matches!(revolve_general(&general(TAU, vec![ellipse]), TOL), Err(KernelError::Unsupported(_))));
+            line(2.0, 1.5), line(1.0, 1.5)];
+        assert!(matches!(revolve_general(&general(TAU, vec![ellipse]), TOL), Err(KernelError::InvalidInput(_))));
         let horn = vec![line(0.0, 0.0), arc(2.0, 0.0, 1.0, 0.0, true), line(0.0, 0.0)];
         assert!(revolve_general(&general(TAU, vec![horn]), TOL).is_err());
         assert!(matches!(revolve_general(&general(0.0, vec![vec![line(1.0, 0.0), line(2.0, 0.0), line(2.0, 1.0)]]), TOL), Err(KernelError::InvalidInput(_))));

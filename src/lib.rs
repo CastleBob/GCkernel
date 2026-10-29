@@ -10,6 +10,7 @@ pub mod extrude;
 pub mod frame;
 pub mod geom;
 pub mod mass;
+pub mod meridian;
 pub mod neutral;
 pub mod protocol;
 pub mod rebuild;

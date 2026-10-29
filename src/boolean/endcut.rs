@@ -39,7 +39,7 @@ fn domain(c: &Curve) -> (f64, f64) {
 }
 fn conic(c: &Curve) -> Option<(Vec3, Vec3, Vec3, f64, f64)> {
     match *c {
-        Curve::Line { .. } | Curve::CylinderPair { .. } => None,
+        Curve::Line { .. } | Curve::CylinderPair { .. } | Curve::Bezier { .. } => None,
         Curve::Arc { c, n, x, r, t0, t1 } => Some((c, x.scale(r), n.cross(x).scale(r), t0, t1)),
         Curve::Conic { c, u, v, t0, t1 } => Some((c, u, v, t0, t1)),
     }
@@ -287,7 +287,7 @@ fn validate(body: &Body, tol: f64) -> Result<()> {
             Surface::Plane { p, n, x } => (p, n, x),
             Surface::Cylinder { p, a, x, .. } => (p, a, x),
             Surface::EllipticCylinder { .. } => return Err(unsupported("end cuts across elliptic-cylinder faces are not supported")),
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => return Err(unsupported("end cuts across revolved (conical, spherical or toroidal) faces are not supported")),
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => return Err(unsupported("end cuts across revolved (conical, spherical or toroidal) faces are not supported")),
         };
         if !anchor.is_finite()
             || !n.is_finite()
@@ -366,7 +366,7 @@ fn validate(body: &Body, tol: f64) -> Result<()> {
                 Surface::EllipticCylinder { .. } => {
                     return Err(unsupported("end cuts across elliptic-cylinder faces are not supported"));
                 }
-                Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => return Err(unsupported("end cuts across revolved (conical, spherical or toroidal) faces are not supported")),
+                Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => return Err(unsupported("end cuts across revolved (conical, spherical or toroidal) faces are not supported")),
             }
         }
     }
@@ -1088,6 +1088,7 @@ fn parameter(curve: &Curve, q: Vec3, tol: f64) -> Option<f64> {
 }
 fn slice(curve: &Curve, t0: f64, t1: f64) -> Curve {
     match *curve {
+        Curve::Bezier { p } => Curve::Bezier { p: crate::geom::bezier_piece(p, t0, t1) },
         Curve::Line { .. } => segment(eval(curve, t0), eval(curve, t1)),
         Curve::Arc { c, n, x, r, .. } => Curve::Arc { c, n, x, r, t0, t1 },
         Curve::Conic { c, u, v, .. } => Curve::Conic { c, u, v, t0, t1 },
@@ -1329,6 +1330,7 @@ fn transform(body: &Body, map: impl Fn(Vec3) -> Vec3) -> Body {
                 *p = map(*p);
                 *b = map(*b);
             }
+            Curve::Bezier { p } => { for q in p.iter_mut() { *q = map(*q); } }
         }
     }
     for f in &mut result.faces {
@@ -1349,7 +1351,7 @@ fn transform(body: &Body, map: impl Fn(Vec3) -> Vec3) -> Body {
                 *u = map(*u);
                 *v = map(*v);
             }
-            Surface::Cone { p, a, x, .. } | Surface::Sphere { c: p, a, x, .. } | Surface::Torus { c: p, a, x, .. } => {
+            Surface::Cone { p, a, x, .. } | Surface::Sphere { c: p, a, x, .. } | Surface::Torus { c: p, a, x, .. } | Surface::Revolution { p, a, x, .. } => {
                 *p = map(*p);
                 *a = map(*a);
                 *x = map(*x);
@@ -1467,7 +1469,7 @@ mod tests {
         let origin = body.vertices[0];
         for face in &body.faces {
             match face.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p: anchor, n, .. } => {
                     let outward = n.scale(sign(face.sense));
                     let mut area = 0.;
@@ -1749,11 +1751,12 @@ mod tests {
                     *rho *= scale;
                     *r *= scale;
                 }
+                Curve::Bezier { .. } => unreachable!("no Bezier edges in these test bodies"),
             }
         }
         for f in &mut out.faces {
             match &mut f.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p, .. } => *p = p.scale(scale).add(offset),
                 Surface::Cylinder { p, r, .. } => {
                     *p = p.scale(scale).add(offset);

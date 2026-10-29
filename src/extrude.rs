@@ -34,6 +34,15 @@ pub fn signed_area(lp: &[Curve], n: Vec3) -> f64 {
                 let (dc, ds) = (t1.cos() - t0.cos(), t1.sin() - t0.sin());
                 area += 0.5 * (cx * (uy * dc + vy * ds) - cy * (ux * dc + vx * ds) + (ux * vy - uy * vx) * (t1 - t0));
             }
+            // A cubic's x y' - y x' is a degree-5 polynomial: three-point Gauss-Legendre is exact.
+            Curve::Bezier { .. } => {
+                let nodes = [(-(0.6f64).sqrt(), 5.0 / 9.0), (0.0, 8.0 / 9.0), ((0.6f64).sqrt(), 5.0 / 9.0)];
+                area += 0.5 * nodes.iter().map(|&(s, w)| {
+                    let (q, d) = c.eval(0.5 + 0.5 * s);
+                    let ((x, y), (dx, dy)) = (uv(q), (d.dot(u), d.dot(v)));
+                    w * 0.5 * (x * dy - y * dx)
+                }).sum::<f64>();
+            }
             // No closed form: x y' - y x' by quadrature (mass::quadrature); a refused integral makes the area NaN,
             // which mass::measure reports.
             Curve::CylinderPair { .. } => {
@@ -87,6 +96,9 @@ pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
             }
             if let Curve::CylinderPair { .. } = c {
                 return Err(KernelError::Unsupported("extruding a cylinder-intersection profile edge is not supported".into()));
+            }
+            if let Curve::Bezier { .. } = c {
+                return Err(KernelError::Unsupported("extruding a Bezier profile edge is not supported yet".into()));
             }
         }
     }
@@ -150,7 +162,7 @@ pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
                     let v = if turn > 0.0 { *cv } else { cv.scale(-1.0) };
                     (Surface::EllipticCylinder { p: center.add(down), a: n, u: *cu, v }, turn > 0.0)
                 }
-                Curve::CylinderPair { .. } => unreachable!("these profile edges are refused above"),
+                Curve::CylinderPair { .. } | Curve::Bezier { .. } => unreachable!("these profile edges are refused above"),
             };
             let lp = vec![(bottom_e(j), true), (up_e(j + 1), true), (top_e(j), false), (up_e(j), false)];
             sides.push(Face { surface: surface_and_sense.0, sense: surface_and_sense.1, loops: vec![lp] });

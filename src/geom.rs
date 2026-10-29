@@ -57,6 +57,8 @@ pub enum Curve {
     /// perpendicular to b) chosen by `branch` (+1 or -1). The discriminant is positive over [t0, t1]. Which cylinder
     /// is the parameter one is the writer's choice of chart (the one smooth over the trim), not which is the tool.
     CylinderPair { c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t0: f64, t1: f64 },
+    /// A cubic Bezier curve (Claude 2026-10-29, revolved Bezier meridians), wire type 5: control points p0..p3, t in [0, 1].
+    Bezier { p: [Vec3; 4] },
 }
 
 /// The pieces of a CylinderPair at t: point less c (kept small, so callers can add c - o once for any origin o),
@@ -159,6 +161,20 @@ pub fn pair_trim_touches(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, 
     })
 }
 
+/// The control points of a cubic Bezier curve's piece over [a, b] (de Casteljau).
+pub fn bezier_piece(p: [Vec3; 4], a: f64, b: f64) -> [Vec3; 4] {
+    let split = |p: [Vec3; 4], t: f64| -> ([Vec3; 4], [Vec3; 4]) {
+        let l = |x: Vec3, y: Vec3| x.add(y.sub(x).scale(t));
+        let (p01, p12, p23) = (l(p[0], p[1]), l(p[1], p[2]), l(p[2], p[3]));
+        let (p012, p123) = (l(p01, p12), l(p12, p23));
+        let m = l(p012, p123);
+        ([p[0], p01, p012, m], [m, p123, p23, p[3]])
+    };
+    if a >= 1.0 { return [p[3]; 4]; }
+    let right = split(p, a).1;
+    split(right, ((b - a) / (1.0 - a)).clamp(0.0, 1.0)).0
+}
+
 impl Curve {
     pub fn point_at_angle(c: Vec3, n: Vec3, x: Vec3, r: f64, t: f64) -> Vec3 {
         let y = n.cross(x);
@@ -170,6 +186,7 @@ impl Curve {
         match self {
             Curve::Line { .. } => (0.0, 1.0),
             Curve::Arc { t0, t1, .. } | Curve::Conic { t0, t1, .. } | Curve::CylinderPair { t0, t1, .. } => (*t0, *t1),
+            Curve::Bezier { .. } => (0.0, 1.0),
         }
     }
     /// Point and derivative at parameter t (see `domain`).
@@ -184,6 +201,13 @@ impl Curve {
             Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => {
                 let (offset, d, _) = pair_eval_sided(c, a, x, rho, p, b, r, branch, t, Self::pair_side(t, t0, t1));
                 (c.add(offset), d)
+            }
+            Curve::Bezier { p } => {
+                let s = 1.0 - t;
+                let w = [s * s * s, 3.0 * s * s * t, 3.0 * s * t * t, t * t * t];
+                let dw = [-3.0 * s * s, 3.0 * s * s - 6.0 * s * t, 6.0 * s * t - 3.0 * t * t, 3.0 * t * t];
+                let zero = Vec3::new(0.0, 0.0, 0.0);
+                ((0..4).fold(zero, |acc, k| acc.add(p[k].scale(w[k]))), (0..4).fold(zero, |acc, k| acc.add(p[k].scale(dw[k]))))
             }
         }
     }
@@ -206,6 +230,7 @@ impl Curve {
             Curve::Arc { c, n, x, r, t0, .. } => Self::point_at_angle(*c, *n, *x, *r, *t0),
             Curve::Conic { c, u, v, t0, .. } => Self::conic_point(*c, *u, *v, *t0),
             Curve::CylinderPair { t0, .. } => self.eval(*t0).0,
+            Curve::Bezier { p } => p[0],
         }
     }
     pub fn end(&self) -> Vec3 {
@@ -214,6 +239,7 @@ impl Curve {
             Curve::Arc { c, n, x, r, t1, .. } => Self::point_at_angle(*c, *n, *x, *r, *t1),
             Curve::Conic { c, u, v, t1, .. } => Self::conic_point(*c, *u, *v, *t1),
             Curve::CylinderPair { t1, .. } => self.eval(*t1).0,
+            Curve::Bezier { p } => p[3],
         }
     }
     pub fn translated(&self, d: Vec3) -> Curve {
@@ -224,6 +250,7 @@ impl Curve {
             Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => Curve::CylinderPair {
                 c: c.add(d), a: *a, x: *x, rho: *rho, p: p.add(d), b: *b, r: *r, branch: *branch, t0: *t0, t1: *t1,
             },
+            Curve::Bezier { p } => Curve::Bezier { p: p.map(|q| q.add(d)) },
         }
     }
     /// The same curve run the other way: an arc becomes counter-clockwise about -n from its old end.
@@ -240,6 +267,7 @@ impl Curve {
             Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => Curve::CylinderPair {
                 c: *c, a: a.scale(-1.0), x: *x, rho: *rho, p: *p, b: *b, r: *r, branch: -branch, t0: -t1, t1: -t0,
             },
+            Curve::Bezier { p } => Curve::Bezier { p: [p[3], p[2], p[1], p[0]] },
         }
     }
 }
@@ -270,6 +298,10 @@ pub enum Surface {
     /// torus, valid only where a face keeps a positive radius from the axis):
     /// c + (big + r cos u) rho(t) + r sin u a. Wire type 6. Normal points away from the tube's centre circle.
     Torus { c: Vec3, a: Vec3, x: Vec3, big: f64, r: f64 },
+    /// A general surface of revolution (Claude 2026-10-29, revolved ellipse arcs and Bezier curves), wire type 7:
+    /// p + z(u) a + r(u) rho(t) for the meridian (r, z)(u) in the frame of unit axis `a` and unit `x` perpendicular.
+    /// Its natural normal r (z' rho - r' a) points right of the meridian's travel.
+    Revolution { p: Vec3, a: Vec3, x: Vec3, m: crate::meridian::Meridian },
 }
 
 impl Surface {

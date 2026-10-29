@@ -89,7 +89,7 @@ fn segment(body: &Body, edge: usize, forward: bool, shift: Vec3) -> Curve {
 pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelError> {
     let (mut volume, mut area) = (0.0, 0.0);
     let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. }))
-        && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. }));
+        && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. } | Surface::Revolution { .. }));
     let n = body.vertices.len().max(1) as f64;
     let o = body.vertices.iter().fold(Vec3::new(0.0, 0.0, 0.0), |s, v| s.add(*v)).scale(1.0 / n);
     // The body's size, for the quadrature's absolute tolerance.
@@ -136,6 +136,55 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
                     let (j, s) = cone_parallel(q.sub(p).dot(*a), ta, tb, p, *a, *x, y, *r, *k);
                     flux += j;
                     sweep += s;
+                }
+                volume -= flux / 3.0;
+                area -= sense * sweep;
+            }
+            Surface::Revolution { p, a, x, m } => {
+                // X = P + z(u) a + r(u) rho(theta): X.N = r z' (P.rho) + r (r z' - r' (z + P.a)) (meridian.rs flux_hats),
+                // |N| = r |M'|. Parallels have u constant (closed-form flux, area by quadrature); meridians theta.
+                let p = p.add(shift);
+                let y = a.cross(*x);
+                let pa = p.dot(*a);
+                let edges: Vec<(usize, bool)> = face.loops.iter().flatten().copied().collect();
+                let rz = |q: Vec3| { let w = q.sub(p); let h = w.dot(*a); (w.sub(a.scale(h)).length(), h) };
+                // The meridian parameter near which every parallel's lies (an ellipse's is periodic): a meridian edge's
+                // midpoint.
+                let reference = edges.iter().find_map(|&(e, fwd)| {
+                    let seg = segment(body, e, fwd, shift);
+                    if parallel_u(&seg, p, *a, 0.0, tolerance).is_some() { return None; }
+                    let (t0, t1) = seg.domain();
+                    Some(m.param_of(rz(seg.eval((t0 + t1) / 2.0).0), 0.0))
+                }).unwrap_or(0.0);
+                let u_at = |q: Vec3| m.param_of(rz(q), reference);
+                let terms = |u: f64, ta: f64, tb: f64| -> Result<(f64, f64), KernelError> {
+                    let (a_hat, b_hat) = m.flux_hats(u, pa);
+                    let g_hat = m.area_hat(u, size).map_err(|e| KernelError::Unsupported(format!("face {f}: {e}")))?;
+                    let rho_int = p.dot(*x) * (tb.sin() - ta.sin()) - p.dot(y) * (tb.cos() - ta.cos());
+                    Ok((a_hat * rho_int + b_hat * (tb - ta), g_hat * (tb - ta)))
+                };
+                let (mut flux, mut sweep) = (0.0, 0.0);
+                for &(e, fwd) in &edges {
+                    let seg = segment(body, e, fwd, shift);
+                    let (cc, cu, cv, t0, t1) = match seg {
+                        Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
+                        Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
+                        Curve::Bezier { .. } => continue, // a meridian: theta constant
+                        _ => return Err(KernelError::InvalidInput(format!("face {f}, edge {e}: not a parallel or meridian of its surface of revolution"))),
+                    };
+                    if parallel_u(&seg, p, *a, 0.0, tolerance).is_none() { continue; } // a meridian ellipse
+                    let perp = |q: Vec3| q.sub(a.scale(q.dot(*a)));
+                    let (up, vp) = (perp(cu), perp(cv));
+                    let dir = up.cross(vp).dot(*a).signum();
+                    let theta_u = up.dot(y).atan2(up.dot(*x));
+                    let (j, k) = terms(u_at(cc.add(up)), theta_u + dir * t0, theta_u + dir * t1)?;
+                    flux += j;
+                    sweep += k;
+                }
+                for (q, ta, tb) in pole_jumps(body, face, shift, p, *a, *x, y, sense, tolerance) {
+                    let (j, k) = terms(u_at(q), ta, tb)?;
+                    flux += j;
+                    sweep += k;
                 }
                 volume -= flux / 3.0;
                 area -= sense * sweep;
@@ -210,6 +259,7 @@ fn cylinder_terms(curve: &Curve, p: Vec3, o: Vec3, a: Vec3, x: Vec3, y: Vec3, r:
         Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
         Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
         Curve::CylinderPair { .. } => return curve_on_cylinder_terms(curve, p, o, a, x, y, r, px, py, tol, size),
+        Curve::Bezier { .. } => return Err("a Bezier curve on a cylinder is not supported".into()),
     };
     let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
     let (dc, up, vp) = (c.sub(p), perp(u), perp(v));
@@ -279,6 +329,7 @@ fn cone_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, k: f64,
         Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
         Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
         Curve::CylinderPair { .. } => return Err("intersection curves on a cone are not supported yet".into()),
+        Curve::Bezier { .. } => return Err("a Bezier curve on a cone is not supported".into()),
     };
     let sc = c.sub(p).dot(a);
     let radius = r + k * sc;

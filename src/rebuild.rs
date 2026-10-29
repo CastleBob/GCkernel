@@ -36,7 +36,7 @@ pub fn rebuild_prism(body: &Body, tolerance: f64) -> Result<Body, KernelError> {
         let sides_ok = body.faces.iter().enumerate().filter(|(i, _)| *i != top && *i != bottom).all(|(_, f)| match f.surface {
             Surface::Plane { n, .. } => n.dot(d).abs() < PARALLEL,
             Surface::Cylinder { a, .. } | Surface::EllipticCylinder { a, .. } => a.cross(d).length() < PARALLEL,
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => false,
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => false,
         });
         if !sides_ok { continue; }
         let caps = [top, bottom].map(|i| match body.faces[i].surface { Surface::Plane { p, .. } => p, _ => unreachable!() });

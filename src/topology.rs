@@ -2,6 +2,7 @@
 //! edge appears in one face's loop twice, once each way, and every occurrence is counted.
 
 use crate::geom::{Curve, Surface, Vec3};
+use crate::meridian::Meridian;
 use crate::neutral::Body;
 use crate::KernelError;
 
@@ -104,7 +105,28 @@ fn distance(q: Vec3, surface: &Surface) -> f64 {
             let h = w.dot(a);
             ((w.sub(a.scale(h)).length() - big).hypot(h) - r).abs()
         }
+        // In the half-plane through the axis: the distance to the meridian over its whole domain.
+        Surface::Revolution { p, a, m, .. } => {
+            let w = q.sub(p);
+            let h = w.dot(a);
+            let domain = match m { Meridian::Bezier(_) => (0.0, 1.0), Meridian::Ellipse { .. } => (0.0, std::f64::consts::TAU) };
+            m.distance((w.sub(a.scale(h)).length(), h), domain.0, domain.1)
+        }
     }
+}
+
+/// A curve's (radius, height) form in the half-plane through the axis containing it, if it lies in one: the unit radial
+/// direction of that half-plane and the curve's points' coordinates (affine in the curve's own data), with the largest
+/// departure from the plane.
+fn meridian_plane(points: &[Vec3], p: Vec3, a: Vec3) -> Option<(Vec3, f64)> {
+    let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
+    let far = points.iter().map(|&q| perp(q.sub(p))).max_by(|x, y| x.length().total_cmp(&y.length()))?;
+    let l = far.length();
+    if l == 0.0 { return None; }
+    let rho = far.scale(1.0 / l);
+    let n = a.cross(rho);
+    let off = points.iter().map(|&q| q.sub(p).dot(n).abs()).fold(0.0, f64::max);
+    Some((rho, off))
 }
 
 /// A point's coordinates (c, n) in an elliptic cylinder's frame across its axis: q - p = c u + n v + s a.
@@ -151,8 +173,8 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
                         distance(a, surface).max(distance(b, surface)) + off
                     }
                 }
-                // No straight line lies on a sphere or (in our admitted faces) a torus.
-                Surface::Sphere { .. } | Surface::Torus { .. } => f64::INFINITY,
+                // No straight line lies on a sphere or (in our admitted faces) a torus or general meridian surface.
+                Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => f64::INFINITY,
             };
             return (worst > tolerance).then_some(worst);
         }
@@ -165,9 +187,26 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
                     fa.cross(axis).length() <= 1e-9 && w.sub(fa.scale(w.dot(fa))).length() <= tolerance && (fr - radius).abs() <= tolerance
                 }
                 Surface::Plane { .. } | Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. }
-                | Surface::Torus { .. } => false,
+                | Surface::Torus { .. } | Surface::Revolution { .. } => false,
             };
             return if same(c, a, rho) || same(p, b, r) { None } else { Some(f64::INFINITY) };
+        }
+        // A Bezier curve lies within its control points' hull: on a plane, their distances bound it; on a general
+        // surface of revolution with a Bezier meridian, it must be that meridian (or its reverse) in one half-plane.
+        Curve::Bezier { p: cp } => {
+            let worst = match *surface {
+                Surface::Plane { p, n, .. } => cp.iter().map(|q| q.sub(p).dot(n).abs()).fold(0.0, f64::max),
+                Surface::Revolution { p, a, m: Meridian::Bezier(b), .. } => match meridian_plane(&cp, p, a) {
+                    None => f64::INFINITY,
+                    Some((rho, off)) => {
+                        let rz: Vec<(f64, f64)> = cp.iter().map(|q| { let w = q.sub(p); (w.dot(rho), w.dot(a)) }).collect();
+                        let gap = |order: [usize; 4]| (0..4).map(|k| (rz[k].0 - b[order[k]].0).hypot(rz[k].1 - b[order[k]].1)).fold(0.0, f64::max);
+                        off + gap([0, 1, 2, 3]).min(gap([3, 2, 1, 0]))
+                    }
+                },
+                _ => f64::INFINITY,
+            };
+            return (worst > tolerance).then_some(worst);
         }
     };
     let worst = match *surface {
@@ -224,6 +263,36 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
         // A torus holds two families of circles our faces use: across the axis (a parallel: centre on the axis, its
         // radius and height on the meridian circle) and in a plane through the axis (a meridian: centre on the centre
         // circle, radius r). Anything else is refused.
+        Surface::Revolution { p, a, m, .. } => {
+            let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
+            let w = c.sub(p);
+            let tilt = u.dot(a).abs().max(v.dot(a).abs());
+            if tilt <= tolerance && perp(w).length() <= tolerance {
+                // A parallel: a true circle about the axis whose (radius, height) is on the meridian.
+                let (pu, pv) = (perp(u), perp(v));
+                let rho = (pu.length() + pv.length()) / 2.0;
+                let roundness = (pu.length() - pv.length()).abs() + pu.dot(pv).abs() / rho.max(1e-300);
+                let domain = match m { Meridian::Bezier(_) => (0.0, 1.0), Meridian::Ellipse { .. } => (0.0, std::f64::consts::TAU) };
+                m.distance((rho, w.dot(a)), domain.0, domain.1) + roundness + perp(w).length()
+            } else if let Meridian::Ellipse { c: mc, u: mu, v: mv } = m {
+                // An ellipse meridian: the conic lies in a half-plane through the axis and on the meridian ellipse
+                // (its points in the meridian's unit-circle coordinates satisfy c^2 + n^2 = 1 identically).
+                match meridian_plane(&[c, c.add(u), c.sub(u), c.add(v), c.sub(v)], p, a) {
+                    None => f64::INFINITY,
+                    Some((rho, off)) => {
+                        let det = mu.0 * mv.1 - mu.1 * mv.0;
+                        let unit = |x: f64, y: f64| ((x * mv.1 - y * mv.0) / det, (mu.0 * y - mu.1 * x) / det);
+                        let (wr, wz) = (w.dot(rho) - mc.0, w.dot(a) - mc.1);
+                        let (big_a, big_b, big_c) = (unit(wr, wz), unit(u.dot(rho), u.dot(a)), unit(v.dot(rho), v.dot(a)));
+                        let dot = |x: (f64, f64), y: (f64, f64)| x.0 * y.0 + x.1 * y.1;
+                        let k = [dot(big_a, big_a) + (dot(big_b, big_b) + dot(big_c, big_c)) / 2.0 - 1.0, 2.0 * dot(big_a, big_b),
+                                 2.0 * dot(big_a, big_c), (dot(big_b, big_b) - dot(big_c, big_c)) / 2.0, dot(big_b, big_c)];
+                        let residual: f64 = k.iter().map(|x| x.abs()).sum();
+                        off + residual * mu.0.hypot(mu.1).max(mv.0.hypot(mv.1)) / 2.0
+                    }
+                }
+            } else { f64::INFINITY }
+        }
         Surface::Torus { c: tc, a, x: _, big, r } => {
             let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
             let w = c.sub(tc);

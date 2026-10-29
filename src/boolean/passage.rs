@@ -37,7 +37,7 @@ fn sign(forward: bool) -> f64 {
 
 fn harmonic(curve: &Curve) -> Option<(Vec3, Vec3, Vec3, f64, f64)> {
     match *curve {
-        Curve::Line { .. } | Curve::CylinderPair { .. } => None,
+        Curve::Line { .. } | Curve::CylinderPair { .. } | Curve::Bezier { .. } => None,
         Curve::Arc { c, n, x, r, t0, t1 } => Some((c, x.scale(r), n.cross(x).scale(r), t0, t1)),
         Curve::Conic { c, u, v, t0, t1 } => Some((c, u, v, t0, t1)),
     }
@@ -78,7 +78,7 @@ pub(super) fn curve_bounds(curve: &Curve) -> ([f64; 3], [f64; 3]) {
 
 fn distance(curve: &Curve, q: Vec3) -> f64 {
     match *curve {
-        Curve::CylinderPair { .. } => unreachable!("pair edges are refused by passage admission"),
+        Curve::CylinderPair { .. } | Curve::Bezier { .. } => unreachable!("pair edges are refused by passage admission"),
         Curve::Conic { .. } => {
             // A lower distance bound is sufficient for clearance admission.
             // An inconclusive box rejects the cut; it never substitutes a curve.
@@ -112,7 +112,7 @@ fn loop_area(body: &Body, lp: &[(usize, bool)], n: Vec3) -> f64 {
         .map(|(i, fwd)| {
             let c = &body.edges[*i].curve;
             let integral = match *c {
-                Curve::CylinderPair { .. } => {
+                Curve::CylinderPair { .. } | Curve::Bezier { .. } => {
                     unreachable!("pair edges are refused by passage admission")
                 }
                 Curve::Conic {
@@ -237,7 +237,7 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
     }
     for edge in &body.edges {
         match edge.curve {
-            Curve::CylinderPair { .. } => {
+            Curve::CylinderPair { .. } | Curve::Bezier { .. } => {
                 return Err(unsupported(
                     "cylinder-pair trims require transverse admission",
                 ))
@@ -288,7 +288,7 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
             Surface::Plane { p, n, x } => (p, n, x),
             Surface::Cylinder { p, a, x, .. } => (p, a, x),
             Surface::EllipticCylinder { .. } => return Err(unsupported("passages through bodies with elliptic-cylinder faces are not supported")),
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => return Err(unsupported("passages through bodies with revolved (conical, spherical or toroidal) faces are not supported")),
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => return Err(unsupported("passages through bodies with revolved (conical, spherical or toroidal) faces are not supported")),
         };
         if !p.is_finite() || !unit(n) || !unit(x) || n.dot(x).abs() > 1e-10 {
             return Err(bad("invalid passage surface frame"));
@@ -332,7 +332,7 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
                 }
             }
             Surface::EllipticCylinder { .. } => return Err(unsupported("passages through bodies with elliptic-cylinder faces are not supported")),
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => return Err(unsupported("passages through bodies with revolved (conical, spherical or toroidal) faces are not supported")),
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => return Err(unsupported("passages through bodies with revolved (conical, spherical or toroidal) faces are not supported")),
             Surface::Cylinder { p, a, r, .. } => {
                 if !r.is_finite() || r <= tol || face.loops.len() != 1 || face.loops[0].len() < 4 {
                     return Err(unsupported(

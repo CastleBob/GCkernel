@@ -121,7 +121,7 @@ fn polyline(body: &Body, edge: usize, chord: f64) -> Result<Vec<Vec3>, KernelErr
             let n = steps as usize;
             (0..=n).map(|k| t0 + (t1 - t0) * k as f64 / n as f64).collect()
         }
-        Curve::CylinderPair { .. } => {
+        Curve::CylinderPair { .. } | Curve::Bezier { .. } => {
             // No closed-form bend: halve each span until its quarter points sit within chord / 2 of the chord.
             let mut params = vec![t0];
             let mut pending = vec![(t0, t1, 0u32)];
@@ -424,7 +424,7 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
                 }).collect();
                 (tris, normals)
             }
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => {
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => {
                 let rev = Revolved::of(&face.surface).expect("a surface of revolution");
                 let (pts, tris, normals) = revolved_mesh(&rev, &loops3, side, chord, f)?;
                 points3 = pts;
@@ -530,14 +530,16 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
 /// A surface of revolution's chart (Claude 2026-10-29): theta round the axis, u along the meridian (a cone's height from
 /// its point; a sphere's or torus's meridian angle).
 #[derive(Clone, Copy)]
-struct Revolved { o: Vec3, a: Vec3, x: Vec3, y: Vec3, cone: Option<(f64, f64)>, circle: Option<(f64, f64)> }
+struct Revolved { o: Vec3, a: Vec3, x: Vec3, y: Vec3, cone: Option<(f64, f64)>, circle: Option<(f64, f64)>,
+    mer: Option<crate::meridian::Meridian> }
 
 impl Revolved {
     fn of(s: &Surface) -> Option<Revolved> {
         match *s {
-            Surface::Cone { p, a, x, r, k } => Some(Revolved { o: p, a, x, y: a.cross(x), cone: Some((r, k)), circle: None }),
-            Surface::Sphere { c, a, x, r } => Some(Revolved { o: c, a, x, y: a.cross(x), cone: None, circle: Some((0.0, r)) }),
-            Surface::Torus { c, a, x, big, r } => Some(Revolved { o: c, a, x, y: a.cross(x), cone: None, circle: Some((big, r)) }),
+            Surface::Cone { p, a, x, r, k } => Some(Revolved { o: p, a, x, y: a.cross(x), cone: Some((r, k)), circle: None, mer: None }),
+            Surface::Sphere { c, a, x, r } => Some(Revolved { o: c, a, x, y: a.cross(x), cone: None, circle: Some((0.0, r)), mer: None }),
+            Surface::Torus { c, a, x, big, r } => Some(Revolved { o: c, a, x, y: a.cross(x), cone: None, circle: Some((big, r)), mer: None }),
+            Surface::Revolution { p, a, x, m } => Some(Revolved { o: p, a, x, y: a.cross(x), cone: None, circle: None, mer: Some(m) }),
             _ => None,
         }
     }
@@ -545,6 +547,7 @@ impl Revolved {
     fn theta(&self, q: Vec3) -> f64 { let d = q.sub(self.o); d.dot(self.y).atan2(d.dot(self.x)) }
     fn u(&self, q: Vec3) -> f64 {
         let h = q.sub(self.o).dot(self.a);
+        if let Some(m) = self.mer { return m.param_of((self.radial(q).length(), h), 0.0); }
         match (self.cone, self.circle) {
             (Some(_), _) => h,
             (_, Some((big, _))) => h.atan2(self.radial(q).length() - big),
@@ -552,6 +555,7 @@ impl Revolved {
         }
     }
     fn radius(&self, u: f64) -> f64 {
+        if let Some(m) = self.mer { return m.eval(u).0; }
         match (self.cone, self.circle) {
             (Some((r, k)), _) => r + k * u,
             (_, Some((big, rho))) => big + rho * u.cos(),
@@ -560,11 +564,21 @@ impl Revolved {
     }
     fn rho(&self, t: f64) -> Vec3 { self.x.scale(t.cos()).add(self.y.scale(t.sin())) }
     fn point(&self, t: f64, u: f64) -> Vec3 {
-        let along = match (self.cone, self.circle) { (Some(_), _) => u, (_, Some((_, rho))) => rho * u.sin(), _ => unreachable!() };
+        let along = match (self.cone, self.circle, self.mer) {
+            (_, _, Some(m)) => m.eval(u).1,
+            (Some(_), _, _) => u,
+            (_, Some((_, rho)), _) => rho * u.sin(),
+            _ => unreachable!(),
+        };
         self.o.add(self.a.scale(along)).add(self.rho(t).scale(self.radius(u).max(0.0)))
     }
     /// The unit natural normal (away from the axis, or from the torus's centre circle).
     fn normal(&self, t: f64, u: f64) -> Vec3 {
+        if let Some(m) = self.mer {
+            let (dr, dz) = m.deriv(u);
+            let l = dr.hypot(dz).max(1e-300);
+            return self.rho(t).scale(dz / l).sub(self.a.scale(dr / l));
+        }
         match (self.cone, self.circle) {
             (Some((_, k)), _) => self.rho(t).sub(self.a.scale(k)).scale(1.0 / (1.0 + k * k).sqrt()),
             (_, Some(_)) => self.rho(t).scale(u.cos()).add(self.a.scale(u.sin())),
@@ -575,6 +589,12 @@ impl Revolved {
     /// meridian circle; exact).
     fn off(&self, q: Vec3) -> f64 {
         let (h, rad) = (q.sub(self.o).dot(self.a), self.radial(q).length());
+        if let Some(m) = self.mer {
+            return match m {
+                crate::meridian::Meridian::Bezier(_) => m.distance((rad, h), 0.0, 1.0),
+                crate::meridian::Meridian::Ellipse { .. } => m.distance((rad, h), 0.0, TAU),
+            };
+        }
         match (self.cone, self.circle) {
             (Some((r, k)), _) => (rad - (r + k * h)).abs() / (1.0 + k * k).sqrt(),
             (_, Some((big, rho))) => ((rad - big).hypot(h) - rho).abs(),
@@ -583,6 +603,12 @@ impl Revolved {
     }
     /// Length along the surface per unit of u.
     fn u_scale(&self) -> f64 {
+        if let Some(m) = self.mer {
+            return match m {
+                crate::meridian::Meridian::Bezier(_) => m.max_speed(0.0, 1.0),
+                crate::meridian::Meridian::Ellipse { .. } => m.max_speed(0.0, TAU),
+            }.max(1e-300);
+        }
         match (self.cone, self.circle) { (Some((_, k)), _) => (1.0 + k * k).sqrt(), (_, Some((_, rho))) => rho, _ => unreachable!() }
     }
 }
@@ -596,7 +622,7 @@ fn revolved_mesh(rev: &Revolved, loops3: &[Vec<Vec3>], side: f64, chord: f64, f:
     -> Result<(Vec<Vec3>, Vec<[usize; 3]>, Vec<Vec3>), KernelError> {
     let scale = loops3.iter().flatten().map(|q| q.distance(rev.o)).fold(1.0, f64::max);
     let on_axis = |q: Vec3| rev.radial(q).length() <= 1e-10 * scale;
-    let wraps_u = matches!(rev.circle, Some((big, _)) if big > 0.0);
+    let wraps_u = matches!(rev.circle, Some((big, _)) if big > 0.0) || matches!(rev.mer, Some(crate::meridian::Meridian::Ellipse { .. }));
     let mut points3 = Vec::new();
     let mut tu: Vec<(f64, f64)> = Vec::new();
     let mut index = Vec::new();
@@ -676,7 +702,7 @@ fn revolved_mesh(rev: &Revolved, loops3: &[Vec<Vec3>], side: f64, chord: f64, f:
     };
     let flip = side;
     let mut p2: Vec<[f64; 2]> = tu.iter().map(|&(t, u)| [big_r * t, flip * ys * u]).collect();
-    let mut tris = triangulate_runs(&p2, &index, true, if rev.circle.is_some() { Runs::None } else { Runs::Axis })?;
+    let mut tris = triangulate_runs(&p2, &index, true, if rev.cone.is_some() { Runs::Axis } else { Runs::None })?;
     // Refinement by true distance from the surface (exact for these surfaces): an inner edge whose midpoint departs by
     // more than 0.6 of the chord is split, and so is the longest inner edge of a triangle whose centre departs by more than
     // 0.95 of it. A triangle's centre lies at most 4/9 of its edges' midpoint departures below them, so with boundary

@@ -8,14 +8,14 @@ fn boundary_volume(body: &Body) -> f64 {
     for face in &body.faces {
         let sign = if face.sense { 1. } else { -1. };
         match face.surface {
-            Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+            Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
             Surface::Plane { p, n, .. } => {
                 let outward = n.scale(sign);
                 let mut area = 0.;
                 for (i, forward) in face.loops.iter().flatten() {
                     let curve = &body.edges[*i].curve;
                     let integral = match *curve {
-                        Curve::CylinderPair { .. } => {
+                        Curve::CylinderPair { .. } | Curve::Bezier { .. } => {
                             panic!("this independent prism integral excludes cylinder pairs")
                         }
                         Curve::Conic { c, u, v, t0, t1 } => c
@@ -381,7 +381,7 @@ fn translate(body: &Body, offset: Vec3) -> Body {
     }
     for f in &mut out.faces {
         match &mut f.surface {
-            Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+            Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
             Surface::Plane { p, .. } | Surface::Cylinder { p, .. } => *p = p.add(offset),
         }
     }

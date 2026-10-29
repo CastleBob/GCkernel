@@ -153,6 +153,14 @@ impl<'a> Reader<'a> {
                 }
                 Ok(Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 })
             }
+            t if t == 5.0 => {
+                let p = [self.point()?, self.point()?, self.point()?, self.point()?];
+                if p.iter().any(|q| !q.is_finite()) { return invalid("a Bezier curve needs finite control points"); }
+                if p[0].distance(p[3]) <= self.tolerance && p.iter().all(|q| q.distance(p[0]) <= self.tolerance) {
+                    return invalid("a Bezier curve has no length");
+                }
+                Ok(Curve::Bezier { p })
+            }
             t => invalid(format!("unknown curve type {t}")),
         }
     }
@@ -211,6 +219,25 @@ impl<'a> Reader<'a> {
                 // Ring, horn or spindle: a face on it is admitted only where its radius from the axis stays positive.
                 if !(r > 0.0 && big > 0.0) { return invalid("a torus needs a positive centre-circle radius and tube radius"); }
                 Ok(Surface::Torus { c, a, x, big, r })
+            }
+            t if t == 7.0 => {
+                let p = self.point()?;
+                let (a, x) = self.frame()?;
+                let kind = self.next()?;
+                let m = if kind == 2.0 {
+                    let v: Vec<f64> = (0..6).map(|_| self.next()).collect::<Result<_, _>>()?;
+                    let det = v[2] * v[5] - v[3] * v[4];
+                    if !det.is_finite() || det.abs() <= 1e-12 * (v[2].hypot(v[3]) * v[4].hypot(v[5])).max(1e-300) {
+                        return invalid("a revolved ellipse needs independent semi-diameters");
+                    }
+                    crate::meridian::Meridian::Ellipse { c: (v[0], v[1]), u: (v[2], v[3]), v: (v[4], v[5]) }
+                } else if kind == 3.0 {
+                    let v: Vec<f64> = (0..8).map(|_| self.next()).collect::<Result<_, _>>()?;
+                    crate::meridian::Meridian::Bezier([(v[0], v[1]), (v[2], v[3]), (v[4], v[5]), (v[6], v[7])])
+                } else {
+                    return invalid(format!("unknown meridian kind {kind}"));
+                };
+                Ok(Surface::Revolution { p, a, x, m })
             }
             t => invalid(format!("unknown surface type {t}")),
         }
@@ -285,6 +312,7 @@ pub fn put_curve(out: &mut Vec<f64>, c: &Curve) {
             out.push(4.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho);
             put(out, *p); put(out, *b); out.extend_from_slice(&[*r, *branch, *t0, *t1]);
         }
+        Curve::Bezier { p } => { out.push(5.0); for q in p { put(out, *q); } }
     }
 }
 
@@ -296,6 +324,13 @@ pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
         Surface::Cone { p, a, x, r, k } => { out.push(4.0); put(out, *p); put(out, *a); put(out, *x); out.extend_from_slice(&[*r, *k]); }
         Surface::Sphere { c, a, x, r } => { out.push(5.0); put(out, *c); put(out, *a); put(out, *x); out.push(*r); }
         Surface::Torus { c, a, x, big, r } => { out.push(6.0); put(out, *c); put(out, *a); put(out, *x); out.extend_from_slice(&[*big, *r]); }
+        Surface::Revolution { p, a, x, m } => {
+            out.push(7.0); put(out, *p); put(out, *a); put(out, *x);
+            match m {
+                crate::meridian::Meridian::Ellipse { c, u, v } => out.extend_from_slice(&[2.0, c.0, c.1, u.0, u.1, v.0, v.1]),
+                crate::meridian::Meridian::Bezier(b) => { out.push(3.0); for q in b { out.extend_from_slice(&[q.0, q.1]); } }
+            }
+        }
     }
 }
 
