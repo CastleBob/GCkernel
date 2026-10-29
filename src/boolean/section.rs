@@ -533,9 +533,10 @@ fn prism_along(tool: &Body, k: usize) -> bool {
     }) && caps >= 2
 }
 
-/// Domain selection, before anything is built (reviewed rule pending with Codex): both operands are right prisms
-/// along one axis with the tool spanning the body, and the tool's section is NOT strictly inside the body's - it
-/// meets or crosses the outline or a hole. Clear interior passages keep their existing domains.
+/// Domain selection, before anything is built (rule proposed to Codex 2026-10-29): both operands are right prisms
+/// along one axis with the tool spanning the body, and either the tool's section is not strictly inside the body's
+/// (it meets or crosses the outline or a hole) or the body is no longer a plain box. Clear interior cuts in a plain
+/// box keep their existing domains.
 pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
     for k in (0..3).filter(|&k| prism_along(tool, k) && prism_along(body, k)) {
         let (Ok(Some((a, lo, hi))), Ok(Some((b, tlo, thi)))) = (prism(body, k, tol), prism(tool, k, tol)) else {
@@ -545,7 +546,11 @@ pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
             continue;
         }
         let meets = a.iter().flatten().any(|s| b.iter().flatten().any(|t| !meetings(s, t, tol).is_empty()));
-        return meets || !matches!(winding(&a, b[0][0].start()), Ok(1));
+        // A plain box keeps its passage domains for interior cuts; a prism already cut to another outline does not
+        // fit them (Bob's p9999: a hole after its corner cut).
+        let plain_box = body.faces.len() == 6
+            && body.faces.iter().all(|f| matches!(f.surface, Surface::Plane { n, .. } if [n.x, n.y, n.z].iter().filter(|c| **c != 0.).count() == 1));
+        return meets || !plain_box || !matches!(winding(&a, b[0][0].start()), Ok(1));
     }
     false
 }
