@@ -7,6 +7,7 @@ mod box_cut;
 mod capsule;
 mod endcut;
 mod passage;
+mod radial;
 mod rectilinear;
 mod section;
 
@@ -18,6 +19,10 @@ pub fn cut(
     // Through cuts reaching a prism's outline or holes: the section domain (selected before execution).
     if section::selects(body, tool, tolerance) {
         return section::cut(body, tool, tolerance);
+    }
+    // Round cutters crossing a pipe wall radially, at any clock angle (selected before execution).
+    if radial::selects(body, tool, tolerance) {
+        return radial::cut(body, tool, tolerance);
     }
     let cylinders = tool
         .faces

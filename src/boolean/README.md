@@ -159,6 +159,28 @@ independently. Tests: corner triangle on the plate faces (exact, +-1 ulp), arc
 notch both ways round, cut across a hole, re-cutting a hole or slot (no change),
 crossing bores and slots, Bob's p9999 corner cut, all against analytic volumes.
 
+### Radial bores through a pipe wall at any clock angle (Claude, 2026-10-29)
+
+`radial.rs`. Selected (after the section domain) only when EVERY condition holds,
+clearances included, from the geometry before anything is built: the tool is a
+full round cutter (one cylinder, two caps, two full-circle cap edges); its axis is
+perpendicular to a pipe's axis (outer cylinder face facing out, one coaxial inner
+face facing in); hole radius plus axis offset is below the inner radius; its start
+cap lies beyond the outer wall along the cutter (|(s - p).d| > Ro, a cap disk only
+moves away from the axis sideways) and its end cap is either in the bore
+(sqrt(((e - p).d)^2 + (offset + rho)^2) < Ri) or past the far wall ((e - p).d > Ro);
+each wall is ONE face whose boundary boxes (ends, seam, earlier holes) are clear of
+the new loops' box and whose end rings lie beyond the loops along the axis; every
+other face's boundary boxes are clear of the cutter's box. Otherwise the earlier
+domains keep the cut. Result: the body unchanged except, per pierced wall, an inner
+loop on the outer and inner faces (exact CylinderPair intersections, closed, one
+vertex each), one straight seam and the cutter's cylinder face between them. Pair
+edge boxes: Q - c is within rho along b and w = b x a, and the point's part along a
+is branch sqrt(r^2 - w^2). Tests: Bob's Pipe Drill Test holes at 0, 340 and 320
+degrees from his placement (surface + 0.001, 1 deep) each remove the exact one-wall
+integral; a 37-degree hole through both walls removes two; ends, seam, overlapping
+holes and wall pockets are refused or left to other domains.
+
 ## Admission, errors and representation
 
 ### Transverse analytic end cuts
