@@ -247,8 +247,19 @@ fn meetings(s: &Seg, t: &Seg, tol: f64) -> Result<Vec<P>> {
         }
         (Seg::Conic { c, u, v, .. }, other @ (Seg::Arc { .. } | Seg::Conic { .. }))
         | (other @ Seg::Arc { .. }, Seg::Conic { c, u, v, .. }) => {
-            let on = |q: P| { let (x, y) = unit_coords(u, v, q.sub(c)); (x.hypot(y) - 1.).abs() * u.len().max(v.len()) <= tol };
-            let same = (0..5).all(|i| on(other.at(i as f64 / 4.)));
+            // Same support, proven analytically (Codex review: sample points can lie on two different ellipses): the
+            // other curve is A + B cos t + C sin t in this ellipse's unit-circle coordinates, so c^2 + n^2 - 1 =
+            // k0 + k1 cos t + k2 sin t + k3 cos 2t + k4 sin 2t vanishes identically only if every k does.
+            let (oc, ou, ov) = match other {
+                Seg::Arc { c: oc, r, .. } => (oc, P::new(r, 0.), P::new(0., r)),
+                Seg::Conic { c: oc, u: ou, v: ov, .. } => (oc, ou, ov),
+                Seg::Line { .. } => unreachable!("lines meet ellipses above"),
+            };
+            let (a2, b2, c2) = (unit_coords(u, v, oc.sub(c)), unit_coords(u, v, ou), unit_coords(u, v, ov));
+            let dot = |x: (f64, f64), y: (f64, f64)| x.0 * y.0 + x.1 * y.1;
+            let k = [dot(a2, a2) + (dot(b2, b2) + dot(c2, c2)) / 2. - 1., 2. * dot(a2, b2), 2. * dot(a2, c2),
+                (dot(b2, b2) - dot(c2, c2)) / 2., dot(b2, c2)];
+            let same = k.iter().map(|x| x.abs()).sum::<f64>() * u.len().max(v.len()) / 2. <= tol;
             if !same {
                 let (l1, h1) = s.bounds();
                 let (l2, h2) = t.bounds();
