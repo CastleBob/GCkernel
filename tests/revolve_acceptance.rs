@@ -128,8 +128,8 @@ fn wire_revolve_checks_lengths_and_preserves_exact_body() {
 }
 
 #[test]
-fn crossed_axis_apex_and_self_intersecting_profiles_fail_explicitly() {
-    for pts in [vec![(-1.,0.),(2.,0.),(2.,3.),(-1.,3.)],vec![(0.,0.),(2.,0.),(0.,3.)],
+fn crossed_axis_pinched_and_self_intersecting_profiles_fail_explicitly() {
+    for pts in [vec![(-1.,0.),(2.,0.),(2.,3.),(-1.,3.)],vec![(0.,0.),(2.,0.),(0.,1.),(2.,2.),(0.,2.)],
         vec![(1.,0.),(3.,3.),(3.,0.),(1.,3.)],vec![(1.,0.),(1.,0.),(2.,2.)]] {
         assert!(revolve(&section(pts),TOL).is_err());
     }
