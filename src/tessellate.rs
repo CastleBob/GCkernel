@@ -56,6 +56,16 @@ fn same_support(a: &crate::neutral::Face, b: &crate::neutral::Face) -> bool {
                 && d.cross(*n).length() <= ROUND * d.length().max(1.0)
                 && u.sub(*u2).length() <= ROUND * scale && v.sub(*v2).length() <= ROUND * scale
         }
+        // One cone: the same axis line and orientation-independent radius function (radius at p, slope along the axis).
+        (Surface::Cone { p, a: n, r, k, .. }, Surface::Cone { p: q, a: m, r: r2, k: k2, .. }) => {
+            let d = p.sub(*q);
+            let along = n.dot(*m).signum();
+            let there = r2 + k2 * d.dot(*m);
+            a.sense == b.sense && n.cross(*m).length() <= ROUND
+                && d.cross(*n).length() <= ROUND * d.length().max(1.0)
+                && (r - there).abs() <= ROUND * r.abs().max(there.abs()).max(1.0)
+                && (k - k2 * along).abs() <= ROUND * k.abs().max(k2.abs()).max(1.0)
+        }
         _ => false,
     }
 }
@@ -381,6 +391,93 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
                 let normals = points3.iter().map(|q| {
                     let d = q.sub(p);
                     d.sub(a.scale(d.dot(a))).scale(side / r)
+                }).collect();
+                (tris, normals)
+            }
+            Surface::Cone { p, a, x, r, k } => {
+                // As the cylinder (Claude 2026-10-29), in (R theta, L s) with R the face's largest radius and L = sqrt(1 + k^2)
+                // the slant per unit along the axis: the parameter orientation is the cylinder's, so loops run the same way.
+                // Inner edges spanning more angle than the chord allows at R are split, new points lifted onto the cone.
+                let y = a.cross(x);
+                let slant = (1.0 + k * k).sqrt();
+                let flip = side;
+                let big_r = points3.iter().map(|q| r + k * q.sub(p).dot(a)).fold(0.0, f64::max);
+                if !(big_r > 0.0) { return unsupported(format!("conical face {f} has no positive radius")); }
+                let mut p2 = Vec::with_capacity(points3.len());
+                let mut spans = Vec::new();
+                for l in &index {
+                    let mut prev: Option<f64> = None;
+                    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                    for &i in l {
+                        let d = points3[i].sub(p);
+                        let raw = d.dot(y).atan2(d.dot(x));
+                        let theta = match prev { None => raw, Some(t) => t + (raw - t + PI).rem_euclid(TAU) - PI };
+                        prev = Some(theta);
+                        lo = lo.min(theta);
+                        hi = hi.max(theta);
+                        p2.push([big_r * theta, flip * slant * d.dot(a)]);
+                    }
+                    let (first, last) = (p2[l[0]][0] / big_r, prev.unwrap());
+                    let close = last + (first - last + PI).rem_euclid(TAU) - PI;
+                    if (close - first).abs() > PI {
+                        return unsupported("a conical face loop wraps the axis without a seam edge");
+                    }
+                    spans.push((lo, hi));
+                }
+                if let Some(kk) = (0..index.len()).max_by(|&i, &j| (spans[i].1 - spans[i].0).total_cmp(&(spans[j].1 - spans[j].0))) {
+                    let (lo, hi) = spans[kk];
+                    for (j, l) in index.iter().enumerate() {
+                        if j == kk { continue; }
+                        let mid = (spans[j].0 + spans[j].1) / 2.0;
+                        let turns = if mid < lo { ((lo - mid) / TAU).ceil() } else if mid > hi { -((mid - hi) / TAU).ceil() } else { 0.0 };
+                        for &i in l { p2[i][0] += turns * TAU * big_r; }
+                    }
+                }
+                let mut tris = triangulate(&p2, &index, true)?;
+                // An edge's allowed angle is the step at its smaller end's radius: the boundary circles were divided at their
+                // own radius, so a fixed limit at R would split the small end's triangles forever.
+                let radius_at = |q: [f64; 2]| r + k * q[1] / (flip * slant);
+                let limit = |e: &(usize, usize), p2: &Vec<[f64; 2]>| big_r * angle_step(radius_at(p2[e.0]).min(radius_at(p2[e.1])), chord);
+                let boundary: std::collections::HashSet<(usize, usize)> = index.iter()
+                    .flat_map(|l| (0..l.len()).map(move |j| { let (s0, w) = (l[j], l[(j + 1) % l.len()]); (s0.min(w), s0.max(w)) }))
+                    .collect();
+                for _pass in 0..64 {
+                    let mut by_edge: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+                    for (t, tri) in tris.iter().enumerate() {
+                        for j in 0..3 { let (s0, w) = (tri[j], tri[(j + 1) % 3]); by_edge.entry((s0.min(w), s0.max(w))).or_default().push(t); }
+                    }
+                    let mut long: Vec<(usize, usize)> = by_edge.keys().copied()
+                        .filter(|e| !boundary.contains(e) && (p2[e.0][0] - p2[e.1][0]).abs() > limit(e, &p2)).collect();
+                    if long.is_empty() { break; }
+                    long.sort_by(|e1, e2| (p2[e2.0][0] - p2[e2.1][0]).abs().total_cmp(&(p2[e1.0][0] - p2[e1.1][0]).abs()).then(e1.cmp(e2)));
+                    let mut touched = vec![false; tris.len()];
+                    for (s0, w) in long {
+                        let around = &by_edge[&(s0, w)];
+                        if around.iter().any(|&t| touched[t]) { continue; }
+                        let m = p2.len();
+                        let mid = [(p2[s0][0] + p2[w][0]) / 2.0, (p2[s0][1] + p2[w][1]) / 2.0];
+                        p2.push(mid);
+                        let (theta, along) = (mid[0] / big_r, mid[1] / (flip * slant));
+                        let radius = r + k * along;
+                        points3.push(p.add(a.scale(along)).add(x.scale(radius * theta.cos())).add(y.scale(radius * theta.sin())));
+                        for &t in around {
+                            touched[t] = true;
+                            let tri = tris[t];
+                            let j = (0..3).find(|&j| { let (b0, e0) = (tri[j], tri[(j + 1) % 3]); (b0 == s0 && e0 == w) || (b0 == w && e0 == s0) }).unwrap();
+                            let (b0, e0, o) = (tri[j], tri[(j + 1) % 3], tri[(j + 2) % 3]);
+                            tris[t] = [b0, m, o];
+                            tris.push([m, e0, o]);
+                            touched.push(true);
+                        }
+                    }
+                    if _pass == 63 { return unsupported("a conical face needs too many display triangles"); }
+                }
+                let normals = points3.iter().map(|q| {
+                    let d = q.sub(p);
+                    let radial = d.sub(a.scale(d.dot(a)));
+                    let l = radial.length();
+                    let rho = if l > 0.0 { radial.scale(1.0 / l) } else { x };
+                    rho.sub(a.scale(k)).scale(side / slant)
                 }).collect();
                 (tris, normals)
             }

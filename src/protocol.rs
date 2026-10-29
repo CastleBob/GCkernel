@@ -13,12 +13,14 @@
 //!      5 rebuild prism (a body -> the kernel's own extrusion of it, when it is a straight prism; rebuild.rs),
 //!      6 tessellate (a chord tolerance then a body -> its display mesh and edge polylines; tessellate.rs, the
 //!        contract with Astra's viewport),
-//!      7 transform (one rigid motion and a batch of items -> the items moved; frame.rs, `transform`).
+//!      7 transform (one rigid motion and a batch of items -> the items moved; frame.rs, `transform`),
+//!      8 revolve (axis point, unit axis, unit seam direction, n, then n (radius, height) points -> the solid of
+//!        revolution, followed by its exact volume; revolve.rs).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
 use crate::neutral::{put_curve, put_surface, write_body, Reader};
-use crate::{boolean, extrude, mass, rebuild, tessellate, topology, KernelError};
+use crate::{boolean, extrude, mass, rebuild, revolve, tessellate, topology, KernelError};
 
 pub const VERSION: u32 = 1;
 pub const UNITS_INCH: u32 = 1;
@@ -30,6 +32,7 @@ pub const OP_MEASURE: u32 = 4;
 pub const OP_REBUILD_PRISM: u32 = 5;
 pub const OP_TESSELLATE: u32 = 6;
 pub const OP_TRANSFORM: u32 = 7;
+pub const OP_REVOLVE: u32 = 8;
 
 pub struct Request {
     pub op: u32,
@@ -131,6 +134,19 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             Ok(tessellate::write_mesh(&tessellate::tessellate(&body, chord)?))
         }
         OP_TRANSFORM => transform(&request.data, tol),
+        OP_REVOLVE => {
+            let (p, a, x) = (reader.point()?, reader.point()?, reader.point()?);
+            let n = reader.count()?;
+            let mut points = Vec::with_capacity(n);
+            for _ in 0..n { points.push((reader.next()?, reader.next()?)); }
+            reader.finish()?;
+            let section = revolve::Section { p, a, x, points };
+            let body = revolve::revolve(&section, tol)?;
+            topology::check(&body, tol).map_err(|e| KernelError::Internal(format!("revolve built an invalid solid: {e}")))?;
+            let mut out = write_body(&body);
+            out.push(revolve::volume(&section));
+            Ok(out)
+        }
         op => Err(KernelError::Unsupported(format!("op {op}"))),
     }
 }

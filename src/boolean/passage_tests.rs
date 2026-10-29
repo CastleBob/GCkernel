@@ -75,7 +75,7 @@ fn volume(body: &Body) -> f64 {
     let mut sum = 0.;
     for face in &body.faces {
         match face.surface {
-            Surface::EllipticCylinder { .. } => unreachable!("no elliptic-cylinder faces in these test bodies"),
+            Surface::EllipticCylinder { .. } | Surface::Cone { .. } => unreachable!("no elliptic-cylinder or conical faces in these test bodies"),
             Surface::Plane { p, n, .. } => {
                 let outward = n.scale(sign(face.sense));
                 let area: f64 = face
@@ -287,7 +287,7 @@ fn permute(body: &Body, shift: usize) -> Body {
     }
     for f in &mut result.faces {
         match &mut f.surface {
-            Surface::EllipticCylinder { .. } => unreachable!("no elliptic-cylinder faces in these test bodies"),
+            Surface::EllipticCylinder { .. } | Surface::Cone { .. } => unreachable!("no elliptic-cylinder or conical faces in these test bodies"),
             Surface::Plane { p, n, x } => {
                 *p = map(*p);
                 *n = map(*n);

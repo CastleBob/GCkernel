@@ -120,6 +120,19 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
                 volume -= flux / 3.0;
                 area -= sense * sweep;
             }
+            Surface::Cone { p, a, x, r, k } => {
+                let p = p.add(shift);
+                let y = a.cross(*x);
+                let (mut flux, mut sweep) = (0.0, 0.0);
+                for &(e, fwd) in face.loops.iter().flatten() {
+                    let (j, s) = cone_terms(&segment(body, e, fwd, shift), p, *a, *x, y, *r, *k, tolerance)
+                        .map_err(|m| KernelError::InvalidInput(format!("face {f}, edge {e}: {m}")))?;
+                    flux += j;
+                    sweep += s;
+                }
+                volume -= flux / 3.0;
+                area -= sense * sweep;
+            }
             Surface::EllipticCylinder { p, a, u, v } => {
                 let p = p.add(shift);
                 let (mut flux, mut sweep) = (0.0, 0.0);
@@ -199,6 +212,42 @@ fn elliptic_terms(curve: &Curve, p: Vec3, a: Vec3, u: Vec3, v: Vec3, size: f64) 
     let j = quadrature(&|tau| { let (s, g, _, dt) = parts(tau); s * g * dt }, t0, t1, 1e-14 * size.powi(3))?;
     let k = quadrature(&|tau| { let (s, _, len, dt) = parts(tau); s * len * dt }, t0, t1, 1e-14 * size.powi(2))?;
     Ok((j, k))
+}
+
+/// For one boundary curve on a cone X = P + s a + R(s) rho(theta), R = r + k s (Claude 2026-10-29): the natural normal
+/// X_theta x X_s = R (rho - k a), so X.N = R(s) g(theta) with g = P.rho - k (P.a) + r (the s terms cancel), and
+/// |N| = R sqrt(1 + k^2). As for the cylinder, Green's theorem in (theta, s) turns the face integrals into loop integrals
+/// of G(s) g dtheta and G(s) sqrt(1 + k^2) dtheta, G = r s + k s^2 / 2 (s from P). Generators have dtheta = 0; circles
+/// across the axis have s constant, so both are closed form. Other curves on a cone are refused.
+#[allow(clippy::too_many_arguments)]
+fn cone_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, k: f64, tol: f64) -> Result<(f64, f64), String> {
+    let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
+    let (c, u, v, t0, t1) = match *curve {
+        Curve::Line { a: s, b: e } => {
+            let (w, d) = (perp(s.sub(p)), perp(e.sub(s)));
+            if w.length() <= tol || d.cross(w.scale(1.0 / w.length())).length() > tol * e.sub(s).length().max(1.0) {
+                return Err("a line on a cone must be a generator".into());
+            }
+            return Ok((0.0, 0.0));
+        }
+        Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
+        Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
+        Curve::CylinderPair { .. } => return Err("intersection curves on a cone are not supported yet".into()),
+    };
+    let sc = c.sub(p).dot(a);
+    let radius = r + k * sc;
+    let (up, vp) = (perp(u), perp(v));
+    if u.dot(a).abs() > tol || v.dot(a).abs() > tol || perp(c.sub(p)).length() > tol || radius <= tol
+        || (up.length() - radius).abs() > tol || (vp.length() - radius).abs() > tol || up.dot(vp).abs() > tol * radius {
+        return Err("a circle that does not lie across its cone".into());
+    }
+    let e = up.cross(vp).dot(a).signum();
+    let theta_u = up.dot(y).atan2(up.dot(x));
+    let (ta, tb) = (theta_u + e * t0, theta_u + e * t1);
+    let (px, py, pa) = (p.dot(x), p.dot(y), p.dot(a));
+    let g = px * (tb.sin() - ta.sin()) - py * (tb.cos() - ta.cos()) + (r - k * pa) * (tb - ta);
+    let big_g = r * sc + k * sc * sc / 2.0;
+    Ok((big_g * g, big_g * (1.0 + k * k).sqrt() * (tb - ta)))
 }
 
 /// The same two integrals for any curve on the cylinder, by quadrature: with w = point - P, s = (point - o) . a,

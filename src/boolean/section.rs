@@ -580,6 +580,7 @@ fn prism(body: &Body, k: usize, tol: f64) -> Result<Option<(Vec<Vec<Seg>>, f64, 
                     return Ok(None);
                 }
             }
+            Surface::Cone { .. } => return Ok(None),
         }
     }
     let lo = caps.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
@@ -674,6 +675,7 @@ fn prism_along(tool: &Body, k: usize) -> bool {
             }
         }
         Surface::Cylinder { a, .. } | Surface::EllipticCylinder { a, .. } => coord(a, k).abs() >= 1. - 1e-12,
+        Surface::Cone { .. } => false,
     }) && caps >= 2
 }
 

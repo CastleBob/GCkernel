@@ -91,6 +91,12 @@ fn distance(q: Vec3, surface: &Surface) -> f64 {
             let s = q.sub(p).dot(a);
             q.distance(p.add(u.scale(c / rho)).add(v.scale(n / rho)).add(a.scale(s)))
         }
+        // In the half-plane through the axis the cone is the line rho = r + k s: the distance to it.
+        Surface::Cone { p, a, r, k, .. } => {
+            let w = q.sub(p);
+            let s = w.dot(a);
+            (w.sub(a.scale(s)).length() - (r + k * s)).abs() / (1.0 + k * k).sqrt()
+        }
     }
 }
 
@@ -124,6 +130,18 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
                     let across = d.sub(axis.scale(d.dot(axis))).length();
                     across.max(distance(a, surface)).max(distance(b, surface))
                 }
+                // Only a generator lies on a cone: both ends on it in one half-plane through the axis. Across that half-
+                // plane the line departs linearly (its far end's offset bounds it); within it the radius and the cone's
+                // are both linear, so the ends bound the rest.
+                Surface::Cone { p, a: axis, .. } => {
+                    let perp = |w: Vec3| w.sub(axis.scale(w.dot(axis)));
+                    let (e0, e1) = (perp(a.sub(p)), perp(b.sub(p)));
+                    let l0 = e0.length();
+                    if l0 <= tolerance || e1.dot(e0) <= 0.0 { f64::INFINITY } else {
+                        let off = e1.cross(e0.scale(1.0 / l0)).length();
+                        distance(a, surface).max(distance(b, surface)) + off
+                    }
+                }
             };
             return (worst > tolerance).then_some(worst);
         }
@@ -135,7 +153,7 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
                     let w = q.sub(fp);
                     fa.cross(axis).length() <= 1e-9 && w.sub(fa.scale(w.dot(fa))).length() <= tolerance && (fr - radius).abs() <= tolerance
                 }
-                Surface::Plane { .. } | Surface::EllipticCylinder { .. } => false,
+                Surface::Plane { .. } | Surface::EllipticCylinder { .. } | Surface::Cone { .. } => false,
             };
             return if same(c, a, rho) || same(p, b, r) { None } else { Some(f64::INFINITY) };
         }
@@ -166,6 +184,21 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
             let residual: f64 = k.iter().map(|x| x.abs()).sum();
             let tilt = u.dot(a).abs().max(v.dot(a).abs());
             residual * su.length().max(sv.length()) / 2.0 + tilt
+        }
+        // A circle across the axis at height s = (c - p).a, radius r + k s there: the cylinder's residual at that radius,
+        // plus the curve's tilt along the axis (which moves both height and required radius).
+        Surface::Cone { p, a, r: r0, k, .. } => {
+            let r = r0 + k * c.sub(p).dot(a);
+            if r <= tolerance { f64::INFINITY } else {
+                let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
+                let (w, pu, pv) = (perp(c.sub(p)), perp(u), perp(v));
+                let k2 = [w.dot(w) + (pu.dot(pu) + pv.dot(pv)) / 2.0 - r * r, 2.0 * w.dot(pu), 2.0 * w.dot(pv),
+                          (pu.dot(pu) - pv.dot(pv)) / 2.0, pu.dot(pv)];
+                let residual: f64 = k2.iter().map(|x| x.abs()).sum();
+                let tilt = u.dot(a).abs().max(v.dot(a).abs());
+                let radial = if r > tolerance && residual <= tolerance * (2.0 * r - tolerance) { 0.0 } else { (residual / r).max(tolerance * 2.0) };
+                radial + tilt * (1.0 + k.abs())
+            }
         }
     };
     (worst > tolerance).then_some(worst)

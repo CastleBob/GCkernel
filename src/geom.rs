@@ -256,6 +256,11 @@ pub enum Surface {
     /// `v` independent semi-diameters perpendicular to `a` (conjugate, as a Conic carries them) with (u x v).a > 0; wire
     /// type 3. Its normal (v cos t - u sin t) x a points away from the axis.
     EllipticCylinder { p: Vec3, a: Vec3, u: Vec3, v: Vec3 },
+    /// A circular cone (Claude 2026-10-29, Bob: tapered Pole stock): p + s a + (r + k s)(x cos t + y sin t), y = a x x,
+    /// unit axis `a`, unit `x` perpendicular to it, radius `r` at p and slope `k` (radius change per unit along a).
+    /// Wire type 4. Its normal (x cos t + y sin t) - k a points away from the axis (as the cylinder's, which is k = 0).
+    /// Faces stay where the radius is positive (no apex in a face).
+    Cone { p: Vec3, a: Vec3, x: Vec3, r: f64, k: f64 },
 }
 
 impl Surface {

@@ -16,6 +16,10 @@ pub fn cut(
     tool: &crate::neutral::Body,
     tolerance: f64,
 ) -> Result<crate::neutral::Body, crate::KernelError> {
+    // No boolean domain handles conical faces yet (tapered Pole stock): refused by name before any selector reads them.
+    if body.faces.iter().chain(&tool.faces).any(|f| matches!(f.surface, crate::geom::Surface::Cone { .. })) {
+        return Err(crate::KernelError::Unsupported("cuts on bodies with conical faces are not supported yet".into()));
+    }
     // Through cuts reaching a prism's outline or holes: the section domain (selected before execution).
     if section::selects(body, tool, tolerance) {
         return section::cut(body, tool, tolerance);

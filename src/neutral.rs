@@ -190,6 +190,13 @@ impl<'a> Reader<'a> {
                 }
                 Ok(Surface::EllipticCylinder { p, a, u, v })
             }
+            t if t == 4.0 => {
+                let p = self.point()?;
+                let (a, x) = self.frame()?;
+                let (r, k) = (self.next()?, self.next()?);
+                if !(r.is_finite() && k.is_finite()) || r <= 0.0 { return invalid("a cone needs a positive radius at its point and a finite slope"); }
+                Ok(Surface::Cone { p, a, x, r, k })
+            }
             t => invalid(format!("unknown surface type {t}")),
         }
     }
@@ -271,6 +278,7 @@ pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
         Surface::Plane { p, n, x } => { out.push(0.0); put(out, *p); put(out, *n); put(out, *x); }
         Surface::Cylinder { p, a, x, r } => { out.push(1.0); put(out, *p); put(out, *a); put(out, *x); out.push(*r); }
         Surface::EllipticCylinder { p, a, u, v } => { out.push(3.0); put(out, *p); put(out, *a); put(out, *u); put(out, *v); }
+        Surface::Cone { p, a, x, r, k } => { out.push(4.0); put(out, *p); put(out, *a); put(out, *x); out.extend_from_slice(&[*r, *k]); }
     }
 }
 

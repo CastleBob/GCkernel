@@ -196,6 +196,7 @@ impl Rigid {
             Surface::EllipticCylinder { p, a, u, v } => Surface::EllipticCylinder {
                 p: self.position(p), a: self.vector(a), u: self.vector(u), v: self.vector(v),
             },
+            Surface::Cone { p, a, x, r, k } => Surface::Cone { p: self.position(p), a: self.vector(a), x: self.vector(x), r, k },
         }
     }
     /// The body moved exactly; topology (indices, senses, loops) is untouched.

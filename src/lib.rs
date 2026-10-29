@@ -13,6 +13,7 @@ pub mod mass;
 pub mod neutral;
 pub mod protocol;
 pub mod rebuild;
+pub mod revolve;
 pub mod tessellate;
 pub mod topology;
 
