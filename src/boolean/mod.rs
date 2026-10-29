@@ -8,6 +8,7 @@ mod capsule;
 mod endcut;
 mod passage;
 mod rectilinear;
+mod section;
 
 pub fn cut(
     body: &crate::neutral::Body,
