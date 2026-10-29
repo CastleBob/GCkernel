@@ -120,20 +120,26 @@ fn exact_eccentric_prisms_roundtrip_and_display_in_rotated_planes() {
 
 #[test]
 fn repeated_rotated_elliptical_through_cuts_have_analytic_removed_volume() {
-    let pts = [Vec3::new(0.0,0.0,0.0),Vec3::new(10.0,0.0,0.0),
-        Vec3::new(10.0,8.0,0.0),Vec3::new(0.0,8.0,0.0)];
-    let lines = (0..4).map(|i| Curve::Line { a:pts[i], b:pts[(i+1)%4] }).collect();
-    let mut body = extrude::extrude(&Profile { loops:vec![lines],n:Z,low:0.0,high:0.5 },TOL).unwrap();
-    let mut expected = 40.0;
-    for (cx,cy,a,b,degrees) in [(2.0,2.0,1.2,0.4,37.0_f64),(7.0,5.0,0.8,0.25,-23.0)] {
-        let t = degrees.to_radians();
-        let x = Vec3::new(t.cos(),t.sin(),0.0);
-        let y = Z.cross(x);
-        let tool = extrude::extrude(&ellipse(Vec3::new(cx,cy,0.0),x,y,a,b,-0.1,0.6),TOL).unwrap();
-        body = boolean::cut(&body,&tool,TOL).expect("an interior elliptical through-cut must complete");
-        expected -= PI*a*b*0.5;
-        close(mass::measure(&body,TOL).unwrap().volume,expected);
-        checked_mesh(&body,0.001);
+    let axes = [Vec3::new(1.0,0.0,0.0),Vec3::new(0.0,1.0,0.0),Z];
+    for axis in 0..3 {
+        let (base_x,base_y) = (axes[axis],axes[(axis+1)%3]);
+        let n = base_x.cross(base_y);
+        let origin = Vec3::new(17.0,-23.0,5.0);
+        let at = |x:f64,y:f64| origin.add(base_x.scale(x)).add(base_y.scale(y));
+        let pts = [at(0.0,0.0),at(10.0,0.0),at(10.0,8.0),at(0.0,8.0)];
+        let lines = (0..4).map(|i| Curve::Line { a:pts[i], b:pts[(i+1)%4] }).collect();
+        let mut body = extrude::extrude(&Profile { loops:vec![lines],n,low:0.0,high:0.5 },TOL).unwrap();
+        let mut expected = 40.0;
+        for (cx,cy,a,b,degrees) in [(2.0,2.0,1.2,0.4,37.0_f64),(7.0,5.0,0.8,0.25,-23.0)] {
+            let t = degrees.to_radians();
+            let x = base_x.scale(t.cos()).add(base_y.scale(t.sin()));
+            let y = n.cross(x);
+            let tool = extrude::extrude(&ellipse(at(cx,cy),x,y,a,b,-0.1,0.6),TOL).unwrap();
+            body = boolean::cut(&body,&tool,TOL).expect("an interior elliptical through-cut must complete");
+            expected -= PI*a*b*0.5;
+            close(mass::measure(&body,TOL).unwrap().volume,expected);
+            checked_mesh(&body,0.001);
+        }
     }
 }
 
