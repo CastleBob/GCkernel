@@ -13,6 +13,7 @@ pub mod mass;
 pub mod meridian;
 pub mod neutral;
 pub mod protocol;
+pub mod provenance;
 pub mod rebuild;
 pub mod revolve;
 pub mod tessellate;

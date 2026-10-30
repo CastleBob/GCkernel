@@ -4,6 +4,7 @@
 
 use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::{Body, Edge, Face, Profile};
+use crate::provenance::*;
 use crate::KernelError;
 
 /// Signed area of a closed loop about `n`, exact for lines and arcs (Green's theorem in the plane frame
@@ -76,6 +77,11 @@ pub fn volume(profile: &Profile) -> f64 {
 }
 
 pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
+    extrude_named(profile, tolerance).map(|(body, _)| body)
+}
+
+/// The prism and the provenance of its every face, edge and vertex (provenance.rs roles 1-8, request loop/segment indices).
+pub fn extrude_named(profile: &Profile, tolerance: f64) -> Result<(Body, Provenance), KernelError> {
     let n = profile.n;
     for lp in &profile.loops {
         closes(lp, tolerance)?;
@@ -108,10 +114,14 @@ pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
         .max_by(|&a, &b| signed_area(&loops[a], n).abs().total_cmp(&signed_area(&loops[b], n).abs()))
         .unwrap();
     loops.swap(0, outer);
+    // Each built loop's request loop and whether it was reversed.
+    let mut origin: Vec<(usize, bool)> = (0..loops.len()).map(|i| (i, false)).collect();
+    origin.swap(0, outer);
     for (i, lp) in loops.iter_mut().enumerate() {
         let ccw = signed_area(lp, n) > 0.0;
         if (i == 0) != ccw {
             *lp = lp.iter().rev().map(Curve::reversed).collect();
+            origin[i].1 = true;
         }
     }
 
@@ -121,12 +131,20 @@ pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
     let mut top_loops = Vec::new();
     let mut bottom_loops = Vec::new();
     let mut sides = Vec::new();
-    for lp in &loops {
+    let mut prov = Provenance::default();
+    let mut side_prov = Vec::new();
+    for (l, lp) in loops.iter().enumerate() {
         let m = lp.len();
+        let (rl, reversed) = origin[l];
+        // Built segment j is request segment seg(j); its start point is request segment point(j)'s start.
+        let seg = |j: usize| if reversed { m - 1 - j } else { j };
+        let point = |j: usize| if reversed { (m - j) % m } else { j };
         let first_vertex = body.vertices.len();
-        for c in lp {
+        for (j, c) in lp.iter().enumerate() {
             body.vertices.push(c.start().add(down));
             body.vertices.push(c.start().add(up));
+            prov.vertices.push(Record::new(LOW_POINT, &[rl, point(j)]));
+            prov.vertices.push(Record::new(HIGH_POINT, &[rl, point(j)]));
         }
         let bottom_v = |j: usize| first_vertex + 2 * (j % m);
         let top_v = |j: usize| first_vertex + 2 * (j % m) + 1;
@@ -139,6 +157,9 @@ pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
                 start: bottom_v(j),
                 end: top_v(j),
             });
+            prov.edges.push(Record::new(LOW_SEGMENT, &[rl, seg(j)]));
+            prov.edges.push(Record::new(HIGH_SEGMENT, &[rl, seg(j)]));
+            prov.edges.push(Record::new(RULING, &[rl, point(j)]));
         }
         let bottom_e = |j: usize| first_edge + 3 * (j % m);
         let top_e = |j: usize| first_edge + 3 * (j % m) + 1;
@@ -166,11 +187,15 @@ pub fn extrude(profile: &Profile, tolerance: f64) -> Result<Body, KernelError> {
             };
             let lp = vec![(bottom_e(j), true), (up_e(j + 1), true), (top_e(j), false), (up_e(j), false)];
             sides.push(Face { surface: surface_and_sense.0, sense: surface_and_sense.1, loops: vec![lp] });
+            side_prov.push(Record::new(SIDE, &[rl, seg(j)]));
         }
     }
     let anchor = loops[0][0].start();
     body.faces.push(Face { surface: Surface::Plane { p: anchor.add(up), n, x: u }, sense: true, loops: top_loops });
     body.faces.push(Face { surface: Surface::Plane { p: anchor.add(down), n, x: u }, sense: false, loops: bottom_loops });
     body.faces.extend(sides);
-    Ok(body)
+    prov.faces.push(Record::new(HIGH_CAP, &[]));
+    prov.faces.push(Record::new(LOW_CAP, &[]));
+    prov.faces.extend(side_prov);
+    Ok((body, prov))
 }
