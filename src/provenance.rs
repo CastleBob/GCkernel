@@ -60,7 +60,7 @@ pub const FROM_BODY_FACE: u32 = 30;
 pub const FROM_TOOL_FACE: u32 = 31;
 /// From body edge i: [i, trimmed].
 pub const FROM_BODY_EDGE: u32 = 32;
-/// Generated where body face i meets tool face j: [i, j].
+/// The n-th edge generated where body face i meets tool face j (n = 0, 1, ... in the domain's recorded order): [i, j, n].
 pub const MEETING: u32 = 33;
 /// From tool edge j: [j, trimmed].
 pub const FROM_TOOL_EDGE: u32 = 34;
@@ -72,6 +72,10 @@ pub const TOOL_SEAM: u32 = 37;
 pub const SEAM_POINT: u32 = 38;
 /// Tool vertex j: [j].
 pub const FROM_TOOL_VERTEX: u32 = 39;
+/// The end on body face c of meeting edge [i, j, n]: [i, j, n, c].
+pub const MEETING_END: u32 = 40;
+/// The end on body face c of the edge from tool edge j: [j, c].
+pub const TOOL_EDGE_END: u32 = 41;
 
 // Op 12 outcome codes, one per input entity.
 pub const UNCHANGED: u32 = 1;

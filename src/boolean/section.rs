@@ -12,6 +12,7 @@
 //! in the other domains. Independent implementation from published mathematics; no third-party source.
 use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::{Body, Profile};
+use crate::provenance::Provenance;
 use crate::KernelError;
 use std::f64::consts::PI;
 
@@ -355,7 +356,7 @@ fn winding(loops: &[Vec<Seg>], p: P) -> Result<i32> {
 }
 
 /// Orients loops so the region's winding is 1 inside and 0 outside: outer loops counter-clockwise, holes clockwise.
-fn orient(loops: Vec<Vec<Seg>>) -> Result<Vec<Vec<Seg>>> {
+fn orient(loops: Vec<Vec<Seg>>, tags: &mut [Vec<Tag>]) -> Result<Vec<Vec<Seg>>> {
     let mut out = Vec::with_capacity(loops.len());
     for (i, lp) in loops.iter().enumerate() {
         let probe = lp[0].at(0.5);
@@ -366,19 +367,61 @@ fn orient(loops: Vec<Vec<Seg>>) -> Result<Vec<Vec<Seg>>> {
             }
         }
         let ccw = loop_area(lp) > 0.;
-        out.push(if ccw == (depth % 2 == 0) { lp.clone() } else { lp.iter().rev().map(Seg::reversed).collect() });
+        if ccw == (depth % 2 == 0) {
+            out.push(lp.clone());
+        } else {
+            out.push(lp.iter().rev().map(Seg::reversed).collect());
+            tags[i] = tags[i].iter().rev().map(|t| t.reversed()).collect();
+        }
     }
     Ok(out)
+}
+
+/// Where a section piece came from (op 12 history): the operand, its segment in that operand's `Origin` table, and the
+/// parent's parameters at the piece's start and end (0 and 1 are the parent's own ends; a reversed piece has s0 > s1).
+/// Carried beside the geometry and never read by it, so op 3 builds exactly what it built before.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Tag {
+    tool: bool,
+    seg: usize,
+    s0: f64,
+    s1: f64,
+}
+
+/// A piece joined from more than one parent: its history is refused.
+const MIXED: usize = usize::MAX;
+
+impl Tag {
+    fn reversed(self) -> Tag { Tag { s0: self.s1, s1: self.s0, ..self } }
+    fn at(self, s: f64) -> f64 { self.s0 + s * (self.s1 - self.s0) }
+    fn whole(self) -> bool { self.s0.min(self.s1) == 0. && self.s0.max(self.s1) == 1. }
+    /// The parent's join of s then t, if t continues s along one parent (or across its own seam: pieces chained end to
+    /// start meet there only when the parent is closed).
+    fn join(s: Tag, t: Tag) -> Tag {
+        let continues = s.s1 == t.s0 || (s.s1 == 1. && t.s0 == 0.) || (s.s1 == 0. && t.s0 == 1.);
+        if s.seg != MIXED && s.tool == t.tool && s.seg == t.seg && continues { Tag { s1: t.s1, ..s } } else { Tag { seg: MIXED, ..s } }
+    }
+}
+
+/// A prism section segment's solid: its side face, its edge in the bottom cap and its bottom vertices at the segment's
+/// start and end (usize::MAX face: not exactly one side face).
+#[derive(Clone, Copy, Debug)]
+struct Origin {
+    face: usize,
+    low: usize,
+    start: usize,
+    end: usize,
 }
 
 struct Piece {
     v0: usize,
     v1: usize,
     seg: Seg,
+    tag: Tag,
 }
 
 /// Every edge split where it meets the other section, with shared vertex numbers.
-fn split(own: &[Vec<Seg>], other: &[Vec<Seg>], pool: &mut Vec<P>, tol: f64) -> Result<Vec<Piece>> {
+fn split(own: &[Vec<Seg>], own_tags: &[Vec<Tag>], other: &[Vec<Seg>], pool: &mut Vec<P>, tol: f64) -> Result<Vec<Piece>> {
     let vertex = |q: P, pool: &mut Vec<P>| -> usize {
         if let Some(i) = pool.iter().position(|v| v.dist(q) <= tol) {
             return i;
@@ -387,9 +430,10 @@ fn split(own: &[Vec<Seg>], other: &[Vec<Seg>], pool: &mut Vec<P>, tol: f64) -> R
         pool.len() - 1
     };
     let mut pieces = vec![];
-    for seg in own.iter().flatten() {
+    for (seg, tag) in own.iter().flatten().zip(own_tags.iter().flatten()) {
         let len = seg.length();
         let mut cuts = vec![(0., vertex(seg.start(), pool)), (1., vertex(seg.end(), pool))];
+        let (first_vertex, last_vertex) = (cuts[0].1, cuts[1].1);
         for o in other.iter().flatten() {
             for q in meetings(seg, o, tol)? {
                 cuts.push((seg.param(q).clamp(0., 1.), vertex(q, pool)));
@@ -403,7 +447,8 @@ fn split(own: &[Vec<Seg>], other: &[Vec<Seg>], pool: &mut Vec<P>, tol: f64) -> R
                 _ => kept.push(cut),
             }
         }
-        for w in kept.windows(2) {
+        let windows = kept.len() - 1;
+        for (w_index, w) in kept.windows(2).enumerate() {
             let ((s0, v0), (s1, v1)) = (w[0], w[1]);
             if v0 == v1 && (s1 - s0) * len <= 2. * tol {
                 continue;
@@ -413,17 +458,21 @@ fn split(own: &[Vec<Seg>], other: &[Vec<Seg>], pool: &mut Vec<P>, tol: f64) -> R
                 Seg::Arc { c, r, a0, sweep } => Seg::Arc { c, r, a0: a0 + s0 * sweep, sweep: (s1 - s0) * sweep },
                 Seg::Conic { c, u, v, a0, sweep } => Seg::Conic { c, u, v, a0: a0 + s0 * sweep, sweep: (s1 - s0) * sweep },
             };
-            pieces.push(Piece { v0, v1, seg: piece });
+            // The segment's own ends are its parameters 0 and 1 exactly (a meeting merged into an end vertex keeps that
+            // vertex's place).
+            let t0 = if w_index == 0 && v0 == first_vertex { 0. } else { s0 };
+            let t1 = if w_index + 1 == windows && v1 == last_vertex { 1. } else { s1 };
+            pieces.push(Piece { v0, v1, seg: piece, tag: Tag { s0: tag.at(t0), s1: tag.at(t1), ..*tag } });
         }
     }
     Ok(pieces)
 }
 
-/// The regularized difference a - b of two oriented sections.
-fn difference(a: &[Vec<Seg>], b: &[Vec<Seg>], tol: f64) -> Result<Vec<Vec<Seg>>> {
+/// The regularized difference a - b of two oriented sections, and each result piece's tag.
+fn difference(a: &[Vec<Seg>], a_tags: &[Vec<Tag>], b: &[Vec<Seg>], b_tags: &[Vec<Tag>], tol: f64) -> Result<(Vec<Vec<Seg>>, Vec<Vec<Tag>>)> {
     let mut pool = vec![];
-    let pa = split(a, b, &mut pool, tol)?;
-    let pb = split(b, a, &mut pool, tol)?;
+    let pa = split(a, a_tags, b, &mut pool, tol)?;
+    let pb = split(b, b_tags, a, &mut pool, tol)?;
     let mut kept: Vec<Piece> = vec![];
     let mut b_overlap = vec![false; pb.len()];
     for p in &pa {
@@ -437,7 +486,7 @@ fn difference(a: &[Vec<Seg>], b: &[Vec<Seg>], tol: f64) -> Result<Vec<Vec<Seg>>>
             // round the regions only touch and a's boundary stays.
             // Direction from the tangents at the shared midpoint (a closed piece starts and ends at one vertex).
             if pb[j].seg.tangent(0.5).dot(p.seg.tangent(0.5)) < 0. {
-                kept.push(Piece { v0: p.v0, v1: p.v1, seg: p.seg });
+                kept.push(Piece { v0: p.v0, v1: p.v1, seg: p.seg, tag: p.tag });
             }
             continue;
         }
@@ -445,7 +494,7 @@ fn difference(a: &[Vec<Seg>], b: &[Vec<Seg>], tol: f64) -> Result<Vec<Vec<Seg>>>
             return Err(unsupported("section boundaries meet along an unmatched piece"));
         }
         if winding(b, mid)? == 0 {
-            kept.push(Piece { v0: p.v0, v1: p.v1, seg: p.seg });
+            kept.push(Piece { v0: p.v0, v1: p.v1, seg: p.seg, tag: p.tag });
         }
     }
     for (j, q) in pb.iter().enumerate() {
@@ -457,7 +506,7 @@ fn difference(a: &[Vec<Seg>], b: &[Vec<Seg>], tol: f64) -> Result<Vec<Vec<Seg>>>
             return Err(unsupported("section boundaries meet along an unmatched piece"));
         }
         if winding(a, mid)? != 0 {
-            kept.push(Piece { v0: q.v1, v1: q.v0, seg: q.seg.reversed() });
+            kept.push(Piece { v0: q.v1, v1: q.v0, seg: q.seg.reversed(), tag: q.tag.reversed() });
         }
     }
     if kept.len() > 4 * LIMIT {
@@ -466,13 +515,13 @@ fn difference(a: &[Vec<Seg>], b: &[Vec<Seg>], tol: f64) -> Result<Vec<Vec<Seg>>>
     // Chain the kept pieces into loops. Where several leave one vertex, take the first one clockwise from the way
     // back along the arriving piece: each loop then bounds one material sector.
     let mut used = vec![false; kept.len()];
-    let mut loops = vec![];
+    let (mut loops, mut tags) = (vec![], vec![]);
     let mut visited = vec![false; pool.len()];
     for first in 0..kept.len() {
         if used[first] {
             continue;
         }
-        let mut lp = vec![];
+        let (mut lp, mut tg) = (vec![], vec![]);
         let mut at = first;
         loop {
             used[at] = true;
@@ -482,6 +531,7 @@ fn difference(a: &[Vec<Seg>], b: &[Vec<Seg>], tol: f64) -> Result<Vec<Vec<Seg>>>
                 return Err(unsupported("section cut touches a boundary at a point (non-manifold result)"));
             }
             lp.push(kept[at].seg);
+            tg.push(kept[at].tag);
             let end = kept[at].v1;
             let back = kept[at].seg.tangent(1.).scale(-1.);
             let back_angle = back.y.atan2(back.x);
@@ -511,14 +561,16 @@ fn difference(a: &[Vec<Seg>], b: &[Vec<Seg>], tol: f64) -> Result<Vec<Vec<Seg>>>
                 None => return Err(unsupported("section difference does not close")),
             }
         }
-        loops.push(merge(lp, tol));
+        let (lp, tg) = merge(lp, tg, tol);
+        loops.push(lp);
+        tags.push(tg);
     }
-    Ok(loops)
+    Ok((loops, tags))
 }
 
 /// Joins consecutive collinear lines and consecutive arcs of one circle, so no seam vertex remains on a straight or
-/// round boundary.
-fn merge(lp: Vec<Seg>, tol: f64) -> Vec<Seg> {
+/// round boundary; joined tags record one parent or MIXED.
+fn merge(lp: Vec<Seg>, tags: Vec<Tag>, tol: f64) -> (Vec<Seg>, Vec<Tag>) {
     let join = |s: &Seg, t: &Seg| -> Option<Seg> {
         match (*s, *t) {
             (Seg::Line { a, b }, Seg::Line { a: _, b: d }) => {
@@ -538,11 +590,15 @@ fn merge(lp: Vec<Seg>, tol: f64) -> Vec<Seg> {
         }
     };
     let mut out: Vec<Seg> = vec![];
-    for s in lp {
+    let mut out_tags: Vec<Tag> = vec![];
+    for (s, t) in lp.into_iter().zip(tags) {
         if let Some(j) = out.last().and_then(|l| join(l, &s)) {
             *out.last_mut().unwrap() = j;
+            let last = out_tags.last_mut().unwrap();
+            *last = Tag::join(*last, t);
         } else {
             out.push(s);
+            out_tags.push(t);
         }
     }
     while out.len() > 1 {
@@ -550,19 +606,32 @@ fn merge(lp: Vec<Seg>, tol: f64) -> Vec<Seg> {
             Some(j) => {
                 out[0] = j;
                 out.pop();
+                let last = out_tags.pop().unwrap();
+                out_tags[0] = Tag::join(last, out_tags[0]);
             }
             None => break,
         }
     }
-    out
+    (out, out_tags)
 }
 
 fn axes(k: usize) -> (usize, usize) { ((k + 1) % 3, (k + 2) % 3) }
 fn unit(i: usize) -> Vec3 { Vec3::new((i == 0) as u8 as f64, (i == 1) as u8 as f64, (i == 2) as u8 as f64) }
 fn coord(v: Vec3, i: usize) -> f64 { [v.x, v.y, v.z][i] }
 
-/// A right prism along axis k: its section loops (in the (u, v) plane of `axes(k)`) and its extent along k.
-fn prism(body: &Body, k: usize, tol: f64) -> Result<Option<(Vec<Vec<Seg>>, f64, f64)>> {
+/// A right prism along axis k: its section loops (in the (u, v) plane of `axes(k)`), its extent along k, and for op 12
+/// each loop segment's tag, the segments' origins and the bottom and top cap faces.
+struct Prism {
+    loops: Vec<Vec<Seg>>,
+    lo: f64,
+    hi: f64,
+    tags: Vec<Vec<Tag>>,
+    origins: Vec<Origin>,
+    bottom: Vec<usize>,
+    top: Vec<usize>,
+}
+
+fn prism(body: &Body, k: usize, tol: f64) -> Result<Option<Prism>> {
     let (u, v) = axes(k);
     let mut caps: Vec<(usize, f64, f64)> = vec![]; // face, level, outward sign
     for (i, f) in body.faces.iter().enumerate() {
@@ -600,7 +669,14 @@ fn prism(body: &Body, k: usize, tol: f64) -> Result<Option<(Vec<Vec<Seg>>, f64, 
         }
     }
     let to2 = |q: Vec3| P::new(coord(q, u), coord(q, v));
+    let mut faces_of = vec![vec![]; body.edges.len()];
+    for (i, f) in body.faces.iter().enumerate() {
+        for (e, _) in f.loops.iter().flatten() {
+            faces_of[*e].push(i);
+        }
+    }
     let mut segs = vec![];
+    let mut origins = vec![];
     for (e, flags) in &uses {
         if flags.len() == 2 && flags[0] != flags[1] {
             continue;
@@ -629,36 +705,45 @@ fn prism(body: &Body, k: usize, tol: f64) -> Result<Option<(Vec<Vec<Seg>>, f64, 
             _ => return Err(unsupported("prism section edge is not a line, circular arc or ellipse")),
         };
         segs.push(if flags[0] { seg } else { seg.reversed() });
+        let edge = &body.edges[*e];
+        let (start, end) = if flags[0] { (edge.start, edge.end) } else { (edge.end, edge.start) };
+        let sides: Vec<usize> = faces_of[*e].iter().copied().filter(|f| !bottom.iter().any(|c| c.0 == *f)).collect();
+        origins.push(Origin { face: if sides.len() == 1 { sides[0] } else { usize::MAX }, low: *e, start, end });
     }
     if segs.len() > LIMIT {
         return Err(unsupported("prism section exceeds its work limit"));
     }
     // Chain the boundary pieces into loops by their ends.
     let mut used = vec![false; segs.len()];
-    let mut loops = vec![];
+    let (mut loops, mut tags) = (vec![], vec![]);
+    let whole = |seg: usize| Tag { tool: false, seg, s0: 0., s1: 1. };
     for first in 0..segs.len() {
         if used[first] {
             continue;
         }
         used[first] = true;
-        let mut lp = vec![segs[first]];
+        let (mut lp, mut tg) = (vec![segs[first]], vec![whole(first)]);
         while lp.last().unwrap().end().dist(lp[0].start()) > tol {
             let end = lp.last().unwrap().end();
             let next = (0..segs.len()).find(|j| !used[*j] && segs[*j].start().dist(end) <= tol)
                 .ok_or_else(|| unsupported("prism section loop does not close"))?;
             used[next] = true;
             lp.push(segs[next]);
+            tg.push(whole(next));
         }
-        loops.push(merge(lp, tol));
+        let (lp, tg) = merge(lp, tg, tol);
+        loops.push(lp);
+        tags.push(tg);
     }
-    let loops = orient(loops)?;
+    let loops = orient(loops, &mut tags)?;
     // The prism proof: section area times extent is the body's measured volume.
     let area: f64 = loops.iter().map(|l| loop_area(l)).sum();
     let volume = crate::mass::measure(body, tol)?.volume;
     if (area * (hi - lo) - volume).abs() > 1e-9 * volume.abs().max(1.) {
         return Ok(None);
     }
-    Ok(Some((loops, lo, hi)))
+    let top = caps.iter().filter(|c| (c.1 - hi).abs() <= tol).map(|c| c.0).collect();
+    Ok(Some(Prism { loops, lo, hi, tags, origins, bottom: bottom.iter().map(|c| c.0).collect(), top }))
 }
 
 /// Whether the tool is made of caps normal to axis k and side faces parallel to it.
@@ -685,7 +770,7 @@ fn prism_along(tool: &Body, k: usize) -> bool {
 /// box keep their existing domains.
 pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
     for k in (0..3).filter(|&k| prism_along(tool, k) && prism_along(body, k)) {
-        let (Ok(Some((a, lo, hi))), Ok(Some((b, tlo, thi)))) = (prism(body, k, tol), prism(tool, k, tol)) else {
+        let (Ok(Some(Prism { loops: a, lo, hi, .. })), Ok(Some(Prism { loops: b, lo: tlo, hi: thi, .. }))) = (prism(body, k, tol), prism(tool, k, tol)) else {
             continue;
         };
         if tlo > lo + tol || thi < hi - tol {
@@ -704,6 +789,16 @@ pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    section_cut(body, tool, tol, false).map(|(result, _)| result)
+}
+
+/// The section cut and the recorded history of its every entity (provenance.rs op 12 roles), mapped from the extruder's
+/// own records through each result piece's tag. Refused where a piece or corner has no single recorded parent.
+pub(super) fn cut_named(body: &Body, tool: &Body, tol: f64) -> Result<(Body, Provenance)> {
+    section_cut(body, tool, tol, true)
+}
+
+fn section_cut(body: &Body, tool: &Body, tol: f64, named: bool) -> Result<(Body, Provenance)> {
     if !tol.is_finite() || tol <= 0. {
         return Err(KernelError::InvalidInput("invalid section cut tolerance".into()));
     }
@@ -713,17 +808,19 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     // along all three; the body decides). Chosen from the geometry before anything is built.
     let mut chart = None;
     for k in (0..3).filter(|&k| prism_along(tool, k)) {
-        if let (Some((a, lo, hi)), Some((b, tlo, thi))) = (prism(body, k, tol)?, prism(tool, k, tol)?) {
-            if tlo <= lo + tol && thi >= hi - tol {
-                chart = Some((k, a, lo, hi, b));
+        if let (Some(a), Some(b)) = (prism(body, k, tol)?, prism(tool, k, tol)?) {
+            if b.lo <= a.lo + tol && b.hi >= a.hi - tol {
+                chart = Some((k, a, b));
                 break;
             }
         }
     }
-    let (k, a, lo, hi, b) = chart.ok_or_else(|| unsupported("section cut needs a right-prism body and a tool spanning it along one axis"))?;
-    let result = difference(&a, &b, tol)?;
+    let (k, a, mut b) = chart.ok_or_else(|| unsupported("section cut needs a right-prism body and a tool spanning it along one axis"))?;
+    let (lo, hi) = (a.lo, a.hi);
+    b.tags.iter_mut().flatten().for_each(|t| t.tool = true);
+    let (result, tags) = difference(&a.loops, &a.tags, &b.loops, &b.tags, tol)?;
     if result.is_empty() {
-        return Ok(Body::default());
+        return Ok((Body::default(), Provenance::default()));
     }
     let outer = result.iter().filter(|l| loop_area(l) > 0.).count();
     if outer != 1 {
@@ -767,7 +864,139 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
                 .collect()
         })
         .collect();
-    crate::extrude::extrude(&Profile { loops: curves, n: unit(k), low: 0., high: hi - lo }, tol)
+    let profile = Profile { loops: curves, n: unit(k), low: 0., high: hi - lo };
+    if !named {
+        return crate::extrude::extrude(&profile, tol).map(|built| (built, Provenance::default()));
+    }
+    let (built, records) = crate::extrude::extrude_named(&profile, tol)?;
+    let history = history(body, tool, &a, &b, &tags, &records)?;
+    Ok((built, history))
+}
+
+/// What meets at the corner where one result piece ends and the next starts.
+#[derive(Clone, Copy, PartialEq)]
+enum Corner {
+    /// A body vertex (bottom), where two body pieces meet at their parents' own shared end.
+    Body(usize),
+    /// A tool vertex (bottom), likewise for two tool pieces.
+    Tool(usize),
+    /// Body side face, tool side face, and the corner's parameter along the body piece's parent.
+    Meeting(usize, usize, f64),
+}
+
+/// Op 12 history of a section cut: the extruder's records (op 10 roles, in the result profile's loop/segment indices)
+/// mapped to the cut's operands through the result pieces' tags. Generated meetings of one body face and one tool face
+/// are numbered n = 0, 1, ... along the body (side) or tool (cap) parent, so no two share a name.
+fn history(body: &Body, tool: &Body, a: &Prism, b: &Prism, tags: &[Vec<Tag>], records: &Provenance) -> Result<Provenance> {
+    use crate::provenance::*;
+    let refuse = |m: &str| Err(unsupported(&format!("cut history is not recorded for this section cut: {m}")));
+    let ([bottom], [top]) = (&a.bottom[..], &a.top[..]) else { return refuse("the body has more than one cap face at an end") };
+    let ([tool_bottom], [_]) = (&b.bottom[..], &b.top[..]) else { return refuse("the tool has more than one cap face at an end") };
+    let (bottom, top, tool_bottom) = (*bottom, *top, *tool_bottom);
+    for t in tags.iter().flatten() {
+        if t.seg == MIXED {
+            return refuse("a result edge joins pieces of different parents");
+        }
+        if (if t.tool { &b.origins } else { &a.origins })[t.seg].face == usize::MAX {
+            return refuse("a section edge has no single side face");
+        }
+    }
+    let origin = |t: Tag| if t.tool { b.origins[t.seg] } else { a.origins[t.seg] };
+    let vertex_at = |t: Tag, s: f64| { let o = origin(t); if s == 0. { Some(o.start) } else if s == 1. { Some(o.end) } else { None } };
+    // The edge at a bottom vertex that is not in the bottom cap: the ruling (unique in a right prism).
+    let ruling = |solid: &Body, cap: usize, v: usize| -> Result<usize> {
+        let in_cap: Vec<usize> = solid.faces[cap].loops.iter().flatten().map(|(e, _)| *e).collect();
+        let r: Vec<usize> = (0..solid.edges.len()).filter(|e| !in_cap.contains(e) && (solid.edges[*e].start == v || solid.edges[*e].end == v)).collect();
+        match r[..] { [e] => Ok(e), _ => Err(unsupported("cut history is not recorded for this section cut: a prism vertex has no single ruling")) }
+    };
+    // Corners: at the start of each result piece, between the previous piece (arriving) and it (leaving).
+    let mut corners: Vec<Vec<Corner>> = vec![];
+    for lp in tags {
+        let mut row = vec![];
+        for s in 0..lp.len() {
+            let (p, q) = (lp[(s + lp.len() - 1) % lp.len()], lp[s]);
+            row.push(match (p.tool, q.tool) {
+                (false, false) | (true, true) => match (vertex_at(p, p.s1), vertex_at(q, q.s0)) {
+                    (Some(x), Some(y)) if x == y => if p.tool { Corner::Tool(x) } else { Corner::Body(x) },
+                    _ => return refuse("two pieces of one operand meet where it had no edge"),
+                },
+                (false, true) => Corner::Meeting(origin(p).face, origin(q).face, p.s1),
+                (true, false) => Corner::Meeting(origin(q).face, origin(p).face, q.s0),
+            });
+        }
+        corners.push(row);
+    }
+    // Ordinals: meetings by (body face, tool face) along the body parent; tool pieces by tool face along the tool parent.
+    let number = |mut keyed: Vec<((usize, usize), f64, (usize, usize))>| -> Result<std::collections::HashMap<(usize, usize), usize>> {
+        keyed.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)));
+        let mut out = std::collections::HashMap::new();
+        for (i, item) in keyed.iter().enumerate() {
+            let n = (0..i).rev().take_while(|&j| keyed[j].0 == item.0).count();
+            if n > 0 && keyed[i - 1].1 == item.1 {
+                return Err(unsupported("cut history is not recorded for this section cut: two meetings at one place"));
+            }
+            out.insert(item.2, n);
+        }
+        Ok(out)
+    };
+    let meeting_n = number(corners.iter().enumerate().flat_map(|(l, row)| row.iter().enumerate().filter_map(move |(s, c)| match *c {
+        Corner::Meeting(f, j, t) => Some(((f, j), t, (l, s))),
+        _ => None,
+    })).collect())?;
+    let piece_n = number(tags.iter().enumerate().flat_map(|(l, lp)| lp.iter().enumerate().filter(|(_, t)| t.tool).map(move |(s, t)| {
+        ((b.origins[t.seg].face, t.seg), t.s0.min(t.s1), (l, s))
+    })).collect())?;
+    let kept = |l: usize, s: usize| {
+        let t = tags[l][s];
+        !t.tool && t.whole() && matches!(corners[l][s], Corner::Body(_)) && matches!(corners[l][(s + 1) % tags[l].len()], Corner::Body(_))
+    };
+    let cap_kept = tags.iter().map(Vec::len).sum::<usize>() == a.origins.len() && (0..tags.len()).all(|l| (0..tags[l].len()).all(|s| kept(l, s)));
+    // The body's top edge of side face f: the one edge it shares with the top cap.
+    let top_edge = |f: usize| -> Result<usize> {
+        let in_top: Vec<usize> = body.faces[top].loops.iter().flatten().map(|(e, _)| *e).collect();
+        let r: Vec<usize> = body.faces[f].loops.iter().flatten().map(|(e, _)| *e).filter(|e| in_top.contains(e)).collect();
+        match r[..] { [e] => Ok(e), _ => Err(unsupported("cut history is not recorded for this section cut: a side face has no single top edge")) }
+    };
+    let other_end = |solid: &Body, e: usize, v: usize| if solid.edges[e].start == v { solid.edges[e].end } else { solid.edges[e].start };
+    let mut out = Provenance::default();
+    for r in &records.faces {
+        out.faces.push(match r.role {
+            LOW_CAP => Record::new(FROM_BODY_FACE, &[bottom, !cap_kept as usize]),
+            HIGH_CAP => Record::new(FROM_BODY_FACE, &[top, !cap_kept as usize]),
+            _ => {
+                let (l, s) = (r.refs[0], r.refs[1]);
+                let t = tags[l][s];
+                if t.tool { Record::new(FROM_TOOL_FACE, &[origin(t).face, 1]) } else { Record::new(FROM_BODY_FACE, &[origin(t).face, !kept(l, s) as usize]) }
+            }
+        });
+    }
+    for r in &records.edges {
+        let (l, s) = (r.refs[0], r.refs[1]);
+        let t = tags[l][s];
+        out.edges.push(match r.role {
+            LOW_SEGMENT | HIGH_SEGMENT if t.tool => {
+                let n = piece_n[&(l, s)];
+                Record::new(MEETING, &[if r.role == LOW_SEGMENT { bottom } else { top }, origin(t).face, n])
+            }
+            LOW_SEGMENT => Record::new(FROM_BODY_EDGE, &[origin(t).low, !kept(l, s) as usize]),
+            HIGH_SEGMENT => Record::new(FROM_BODY_EDGE, &[top_edge(origin(t).face)?, !kept(l, s) as usize]),
+            _ => match corners[l][s] {
+                Corner::Body(v) => Record::new(FROM_BODY_EDGE, &[ruling(body, bottom, v)?, 0]),
+                Corner::Tool(v) => Record::new(FROM_TOOL_EDGE, &[ruling(tool, tool_bottom, v)?, 1]),
+                Corner::Meeting(f, j, _) => Record::new(MEETING, &[f, j, meeting_n[&(l, s)]]),
+            },
+        });
+    }
+    for r in &records.vertices {
+        let (l, s) = (r.refs[0], r.refs[1]);
+        let (low, cap) = (r.role == LOW_POINT, if r.role == LOW_POINT { bottom } else { top });
+        out.vertices.push(match corners[l][s] {
+            Corner::Body(v) => Record::new(FROM_BODY_VERTEX, &[if low { v } else { other_end(body, ruling(body, bottom, v)?, v) }]),
+            Corner::Tool(v) => Record::new(TOOL_EDGE_END, &[ruling(tool, tool_bottom, v)?, cap]),
+            Corner::Meeting(f, j, _) => Record::new(MEETING_END, &[f, j, meeting_n[&(l, s)], cap]),
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -96,6 +96,7 @@ pub fn cut_named(
     use crate::provenance::*;
     let (result, history) = match select(body, tool, tolerance)? {
         Domain::Bore => bore::cut_named(body, tool, tolerance)?,
+        Domain::Section => section::cut_named(body, tool, tolerance)?,
         domain => {
             return Err(crate::KernelError::Unsupported(format!(
                 "cut history is not recorded for the {domain:?} cut domain yet"
@@ -109,7 +110,7 @@ pub fn cut_named(
     // Generated entities must be told apart by their records alone.
     for list in [&history.faces, &history.edges, &history.vertices] {
         for (i, r) in list.iter().enumerate() {
-            if matches!(r.role, MEETING | TOOL_SEAM | SEAM_POINT) && list[i + 1..].contains(r) {
+            if matches!(r.role, MEETING | TOOL_SEAM | SEAM_POINT | MEETING_END | TOOL_EDGE_END) && list[i + 1..].contains(r) {
                 return Err(crate::KernelError::Unsupported(format!("cut history would name two entities {r:?}")));
             }
         }

@@ -342,8 +342,8 @@ fn bore(body: &Body, tool: &Body, tolerance: f64, named: bool) -> Result<(Body, 
         });
         history.vertices.extend([Record::new(SEAM_POINT, &[bottom_face, wall]), Record::new(SEAM_POINT, &[top_face, wall])]);
         history.edges.extend([
-            Record::new(MEETING, &[bottom_face, wall]),
-            Record::new(MEETING, &[top_face, wall]),
+            Record::new(MEETING, &[bottom_face, wall, 0]),
+            Record::new(MEETING, &[top_face, wall, 0]),
             Record::new(TOOL_SEAM, &[bottom_face, wall]),
         ]);
         history.faces[bottom_face] = Record::new(FROM_BODY_FACE, &[bottom_face, 1]);
