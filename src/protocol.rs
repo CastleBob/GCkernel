@@ -20,7 +20,9 @@
 //!        count and segments [kind, r, z, ...]: 0 line, 1 arc (centre r, z, direction +1/-1), 2 ellipse arc (centre, u, v,
 //!        direction), 3 cubic Bezier (two control points) -> the solid followed by its exact volume; revolve.rs),
 //!     10 named extrude (op 2's request -> op 2's reply, then the provenance envelope; provenance.rs),
-//!     11 named revolve (op 9's request -> op 9's reply, then the provenance envelope; provenance.rs).
+//!     11 named revolve (op 9's request -> op 9's reply, then the provenance envelope; provenance.rs),
+//!     12 named cut (op 3's request -> op 3's reply, then the provenance envelope with its outcome section; refused by
+//!        name in a domain that records no history; boolean::cut_named).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
@@ -41,6 +43,7 @@ pub const OP_REVOLVE: u32 = 8;
 pub const OP_REVOLVE_GENERAL: u32 = 9;
 pub const OP_EXTRUDE_NAMED: u32 = 10;
 pub const OP_REVOLVE_NAMED: u32 = 11;
+pub const OP_CUT_NAMED: u32 = 12;
 
 pub struct Request {
     pub op: u32,
@@ -128,6 +131,21 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
                 topology::check(&result, tol).map_err(|e| KernelError::Internal(format!("cut built an invalid solid: {e}")))?;
             }
             Ok(write_body(&result))
+        }
+        OP_CUT_NAMED => {
+            let body = reader.body()?;
+            let tool = reader.body()?;
+            reader.finish()?;
+            topology::check(&body, tol)?;
+            topology::check(&tool, tol)?;
+            let (result, history, outcomes) = boolean::cut_named(&body, &tool, tol)?;
+            if !result.faces.is_empty() {
+                topology::check(&result, tol).map_err(|e| KernelError::Internal(format!("cut built an invalid solid: {e}")))?;
+            }
+            let mut out = write_body(&result);
+            let inputs = [body.faces.len(), body.edges.len(), body.vertices.len(), tool.faces.len(), tool.edges.len(), tool.vertices.len()];
+            provenance::write_cut(&mut out, &history, inputs, &outcomes);
+            Ok(out)
         }
         OP_MEASURE => {
             let body = reader.body()?;

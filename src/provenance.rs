@@ -52,6 +52,42 @@ pub const MID_POINT: u32 = 20;
 /// Segment seg lying on the axis, shared by the two caps of a part turn: [loop, seg].
 pub const AXIS_SEGMENT: u32 = 21;
 
+// Op 12 (named cut, op 3's request: body then tool). Refs are the request bodies' own entity indices. trimmed: 0 when the
+// output has its source's support and the same bounding edges (by provenance), 1 otherwise.
+/// From body face i: [i, trimmed].
+pub const FROM_BODY_FACE: u32 = 30;
+/// From tool face j: [j, trimmed].
+pub const FROM_TOOL_FACE: u32 = 31;
+/// From body edge i: [i, trimmed].
+pub const FROM_BODY_EDGE: u32 = 32;
+/// Generated where body face i meets tool face j: [i, j].
+pub const MEETING: u32 = 33;
+/// From tool edge j: [j, trimmed].
+pub const FROM_TOOL_EDGE: u32 = 34;
+/// Body vertex i: [i].
+pub const FROM_BODY_VERTEX: u32 = 35;
+/// The seam line a domain places on the face it makes from tool face j, starting where body face i meets it: [i, j].
+pub const TOOL_SEAM: u32 = 37;
+/// The seam point on the meeting edge of body face i and tool face j: [i, j].
+pub const SEAM_POINT: u32 = 38;
+/// Tool vertex j: [j].
+pub const FROM_TOOL_VERTEX: u32 = 39;
+
+// Op 12 outcome codes, one per input entity.
+pub const UNCHANGED: u32 = 1;
+pub const MODIFIED: u32 = 2;
+pub const SPLIT: u32 = 3;
+pub const DELETED: u32 = 4;
+/// A tool entity contributing nothing to the result's boundary.
+pub const CONSUMED: u32 = 5;
+
+/// What became of one input entity: its code and the output entities (of its own kind) descending from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Outcome {
+    pub code: u32,
+    pub outputs: Vec<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Record {
     pub role: u32,
@@ -69,14 +105,62 @@ pub struct Provenance {
     pub vertices: Vec<Record>,
 }
 
+/// Each input entity's outcome (body faces, edges, vertices, then the tool's; `inputs` = their counts), from the outputs
+/// whose records descend from it (roles 30, 31, 32, 34, 35, 39): none = deleted (body) or consumed (tool), one = unchanged
+/// or modified by its trimmed flag (vertices: unchanged), more = split.
+pub fn outcomes(p: &Provenance, inputs: [usize; 6]) -> Vec<Outcome> {
+    let lists = [
+        (&p.faces, FROM_BODY_FACE, DELETED),
+        (&p.edges, FROM_BODY_EDGE, DELETED),
+        (&p.vertices, FROM_BODY_VERTEX, DELETED),
+        (&p.faces, FROM_TOOL_FACE, CONSUMED),
+        (&p.edges, FROM_TOOL_EDGE, CONSUMED),
+        (&p.vertices, FROM_TOOL_VERTEX, CONSUMED),
+    ];
+    let mut out = Vec::new();
+    for ((records, role, none), &count) in lists.into_iter().zip(&inputs) {
+        for i in 0..count {
+            let outputs: Vec<usize> = (0..records.len()).filter(|&o| records[o].role == role && records[o].refs[0] == i).collect();
+            let code = match outputs.len() {
+                0 => none,
+                1 if records[outputs[0]].refs.get(1).map_or(true, |&t| t == 0) => UNCHANGED,
+                1 => MODIFIED,
+                _ => SPLIT,
+            };
+            out.push(Outcome { code, outputs });
+        }
+    }
+    out
+}
+
 /// The envelope, appended to `out`.
 pub fn write(out: &mut Vec<f64>, p: &Provenance) {
+    envelope(out, records(p));
+}
+
+/// Op 12's envelope: the records, then the input counts and one outcome per input entity in that order.
+pub fn write_cut(out: &mut Vec<f64>, p: &Provenance, inputs: [usize; 6], outcomes: &[Outcome]) {
+    let mut body = records(p);
+    body.extend(inputs.iter().map(|&n| n as f64));
+    for o in outcomes {
+        body.push(o.code as f64);
+        body.push(o.outputs.len() as f64);
+        body.extend(o.outputs.iter().map(|&i| i as f64));
+    }
+    envelope(out, body);
+}
+
+fn records(p: &Provenance) -> Vec<f64> {
     let mut body = vec![p.faces.len() as f64, p.edges.len() as f64, p.vertices.len() as f64];
     for r in p.faces.iter().chain(&p.edges).chain(&p.vertices) {
         body.push(r.role as f64);
         body.push(r.refs.len() as f64);
         body.extend(r.refs.iter().map(|&i| i as f64));
     }
+    body
+}
+
+fn envelope(out: &mut Vec<f64>, body: Vec<f64>) {
     out.push(START);
     out.push(VERSION);
     out.push(body.len() as f64);

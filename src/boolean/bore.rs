@@ -4,6 +4,7 @@
 //! and introduces one inward-facing analytic cylinder. No mesh or offsets.
 use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::{Body, Edge, Face};
+use crate::provenance::*;
 use crate::KernelError;
 use std::f64::consts::TAU;
 
@@ -39,6 +40,7 @@ fn cardinal(v: Vec3) -> Result<(usize, f64)> {
 }
 
 struct Cylinder {
+    face: usize,
     axis: usize,
     center: Vec3,
     radius: f64,
@@ -172,6 +174,7 @@ fn cylinder(tool: &Body, tolerance: f64) -> Result<Cylinder> {
     }
     crate::topology::check(tool, tolerance)?;
     Ok(Cylinder {
+        face: cylinders[0],
         axis,
         center: p,
         radius: r,
@@ -221,6 +224,17 @@ fn box_passage(body: &Body, cutter: &Cylinder, tolerance: f64) -> Result<(f64, f
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tolerance: f64) -> Result<Body> {
+    bore(body, tool, tolerance, false).map(|(result, _)| result)
+}
+
+/// The bore and the recorded history of its every entity (provenance.rs op 12 roles): the body is kept as it is, its
+/// passage caps modified; each passage adds two meeting circles, a seam, two seam points and the wall from the tool's
+/// cylinder. A cutter crossing a cylindrical wall (the cross-cut route) records no history and refuses.
+pub(super) fn cut_named(body: &Body, tool: &Body, tolerance: f64) -> Result<(Body, Provenance)> {
+    bore(body, tool, tolerance, true)
+}
+
+fn bore(body: &Body, tool: &Body, tolerance: f64, named: bool) -> Result<(Body, Provenance)> {
     if !tolerance.is_finite() || tolerance <= 0. {
         return Err(invalid("bore tolerance must be finite and positive"));
     }
@@ -237,7 +251,10 @@ pub(super) fn cut(body: &Body, tool: &Body, tolerance: f64) -> Result<Body> {
         cutter.high,
         tolerance,
     ) {
-        return super::endcut::cross_cut(body, tool, tolerance);
+        if named {
+            return Err(unsupported("cut history is not recorded for a bore crossing a cylindrical wall yet"));
+        }
+        return super::endcut::cross_cut(body, tool, tolerance).map(|result| (result, Provenance::default()));
     }
     // Admission is selected by the operand representation before execution.
     // A failed box admission never retries against the general passage checker.
@@ -255,6 +272,12 @@ pub(super) fn cut(body: &Body, tool: &Body, tolerance: f64) -> Result<Body> {
         )?
     };
     let mut result = body.clone();
+    let mut history = Provenance {
+        faces: (0..body.faces.len()).map(|i| Record::new(FROM_BODY_FACE, &[i, 0])).collect(),
+        edges: (0..body.edges.len()).map(|i| Record::new(FROM_BODY_EDGE, &[i, 0])).collect(),
+        vertices: (0..body.vertices.len()).map(|i| Record::new(FROM_BODY_VERTEX, &[i])).collect(),
+    };
+    let wall = cutter.face;
     let mut normal = [0.; 3];
     normal[axis] = 1.;
     let normal = vec(normal);
@@ -317,10 +340,19 @@ pub(super) fn cut(body: &Body, tool: &Body, tolerance: f64) -> Result<Body> {
             sense: false,
             loops: vec![vec![(eb, false), (seam, true), (et, true), (seam, false)]],
         });
+        history.vertices.extend([Record::new(SEAM_POINT, &[bottom_face, wall]), Record::new(SEAM_POINT, &[top_face, wall])]);
+        history.edges.extend([
+            Record::new(MEETING, &[bottom_face, wall]),
+            Record::new(MEETING, &[top_face, wall]),
+            Record::new(TOOL_SEAM, &[bottom_face, wall]),
+        ]);
+        history.faces[bottom_face] = Record::new(FROM_BODY_FACE, &[bottom_face, 1]);
+        history.faces[top_face] = Record::new(FROM_BODY_FACE, &[top_face, 1]);
+        history.faces.push(Record::new(FROM_TOOL_FACE, &[wall, 1]));
     }
     crate::topology::check(&result, tolerance)
         .map_err(|e| KernelError::Internal(format!("bore result failed topology checks: {e}")))?;
-    Ok(result)
+    Ok((result, history))
 }
 
 #[cfg(test)]

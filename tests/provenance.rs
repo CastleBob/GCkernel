@@ -322,3 +322,158 @@ fn op11_reply_is_op9_reply_plus_envelope() {
         assert_eq!(eleven[nine.len()..], want[..]);
     }
 }
+
+// ---- op 12 named cut ----
+
+use gc_kernel::protocol::{OP_CUT, OP_CUT_NAMED};
+
+fn plate() -> Body {
+    let r = |x0: f64, y0: f64, x1: f64, y1: f64| vec![line((x0, y0), (x1, y0)), line((x1, y0), (x1, y1)), line((x1, y1), (x0, y1)), line((x0, y1), (x0, y0))];
+    extrude(&Profile { loops: vec![r(0.0, 0.0, 6.0, 4.0)], n: Z, low: 0.0, high: 0.5 }, TOL).unwrap()
+}
+
+/// A drill extruded along z through the plate (spanning it), centre (x, y).
+fn drill(x: f64, y: f64, r: f64) -> Body {
+    let circle = Curve::Arc { c: p(x, y), n: Z, x: Vec3::new(1.0, 0.0, 0.0), r, t0: 0.0, t1: 2.0 * PI };
+    extrude(&Profile { loops: vec![vec![circle]], n: Z, low: -1.0, high: 1.5 }, TOL).unwrap()
+}
+
+fn cut_reply(op: u32, body: &Body, tool: &Body) -> Result<Vec<f64>, gc_kernel::KernelError> {
+    let data: Vec<f64> = gc_kernel::neutral::write_body(body).into_iter().chain(gc_kernel::neutral::write_body(tool)).collect();
+    handle(&parse_request(&encode_request(op, TOL, &data)).unwrap())
+}
+
+fn on_plane(s: &Surface, q: Vec3) -> bool { let Surface::Plane { p, n, .. } = *s else { panic!("not a plane") }; q.sub(p).dot(n).abs() <= TOL }
+fn on_cylinder(s: &Surface, q: Vec3) -> bool {
+    let Surface::Cylinder { p, a, r, .. } = *s else { panic!("not a cylinder") };
+    let w = q.sub(p);
+    (w.sub(a.scale(w.dot(a))).length() - r).abs() <= TOL
+}
+
+fn prove_cut(body: &Body, tool: &Body, result: &Body, prov: &Provenance, outcomes: &[Outcome]) {
+    assert_eq!((prov.faces.len(), prov.edges.len(), prov.vertices.len()), (result.faces.len(), result.edges.len(), result.vertices.len()));
+    let arity = |role: u32| match role { FROM_BODY_VERTEX | FROM_TOOL_VERTEX => 1, _ => 2 };
+    for r in prov.faces.iter().chain(&prov.edges).chain(&prov.vertices) { assert_eq!(r.refs.len(), arity(r.role), "{r:?}"); }
+    for (v, r) in prov.vertices.iter().enumerate() {
+        let q = result.vertices[v];
+        match r.role {
+            FROM_BODY_VERTEX => assert_eq!(q, body.vertices[r.refs[0]]),
+            SEAM_POINT => assert!(on_plane(&body.faces[r.refs[0]].surface, q) && on_cylinder(&tool.faces[r.refs[1]].surface, q), "vertex {v} {r:?}"),
+            other => panic!("vertex role {other}"),
+        }
+    }
+    for (e, r) in prov.edges.iter().enumerate() {
+        let edge = &result.edges[e];
+        let (s, t) = (&prov.vertices[edge.start], &prov.vertices[edge.end]);
+        match r.role {
+            FROM_BODY_EDGE => {
+                let source = &body.edges[r.refs[0]];
+                assert_eq!((r.refs[1], format!("{:?}", edge.curve)), (0, format!("{:?}", source.curve)), "edge {e} {r:?}");
+                assert!(s.role == FROM_BODY_VERTEX && s.refs == [source.start] && t.role == FROM_BODY_VERTEX && t.refs == [source.end], "edge {e} ends");
+            }
+            MEETING => {
+                let (plane, wall) = (&body.faces[r.refs[0]].surface, &tool.faces[r.refs[1]].surface);
+                assert!(matches!(edge.curve, Curve::Arc { .. }), "edge {e} {r:?}");
+                let (t0, t1) = edge.curve.domain();
+                for k in 0..8 {
+                    let q = edge.curve.eval(t0 + (t1 - t0) * k as f64 / 8.0).0;
+                    assert!(on_plane(plane, q) && on_cylinder(wall, q), "edge {e} {r:?} sample {k}");
+                }
+                assert!(s.role == SEAM_POINT && s.refs == r.refs && edge.start == edge.end, "edge {e} is a circle from its seam point");
+            }
+            TOOL_SEAM => {
+                let wall = &tool.faces[r.refs[1]].surface;
+                assert!(matches!(edge.curve, Curve::Line { .. }) && on_cylinder(wall, mid(&edge.curve)), "edge {e} {r:?}");
+                assert!(s.role == SEAM_POINT && s.refs == r.refs && t.role == SEAM_POINT && t.refs[1] == r.refs[1], "edge {e} ends");
+            }
+            other => panic!("edge role {other}"),
+        }
+    }
+    for (f, r) in prov.faces.iter().enumerate() {
+        let face = &result.faces[f];
+        let edges: Vec<&Record> = face.loops.iter().flatten().map(|&(e, _)| &prov.edges[e]).collect();
+        match r.role {
+            FROM_BODY_FACE => {
+                let source = &body.faces[r.refs[0]];
+                assert_eq!((format!("{:?}", face.surface), face.sense), (format!("{:?}", source.surface), source.sense), "face {f} support");
+                assert_eq!(face.loops[..source.loops.len()], source.loops[..], "face {f} keeps its source's loops");
+                let added: Vec<&Record> = face.loops[source.loops.len()..].iter().flatten().map(|&(e, _)| &prov.edges[e]).collect();
+                assert_eq!(r.refs[1] == 1, !added.is_empty(), "face {f} trimmed flag");
+                assert!(added.iter().all(|er| er.role == MEETING && er.refs[0] == r.refs[0]), "face {f} new loops are its meeting edges");
+            }
+            FROM_TOOL_FACE => {
+                assert_eq!(r.refs[1], 1);
+                let wall = &tool.faces[r.refs[0]].surface;
+                let (Surface::Cylinder { p, a, r: ra, .. }, Surface::Cylinder { p: q, a: b, r: rb, .. }) = (face.surface.clone(), wall.clone()) else { panic!("face {f}") };
+                assert!(ra == rb && a.cross(b).length() <= TOL && on_cylinder(wall, p.add(face_x(&face.surface).scale(ra))) && q.sub(p).cross(b).length() <= TOL, "face {f} lies on tool face {r:?}");
+                assert!(edges.iter().all(|er| matches!(er.role, MEETING | TOOL_SEAM) && er.refs[1] == r.refs[0]), "face {f} bounded by its meetings and seam");
+            }
+            other => panic!("face role {other}"),
+        }
+    }
+    // Outcomes: each input entity's descendants, read independently from the records.
+    let inputs = [body.faces.len(), body.edges.len(), body.vertices.len(), tool.faces.len(), tool.edges.len(), tool.vertices.len()];
+    assert_eq!(outcomes.len(), inputs.iter().sum::<usize>());
+    let kinds = [(&prov.faces, FROM_BODY_FACE), (&prov.edges, FROM_BODY_EDGE), (&prov.vertices, FROM_BODY_VERTEX),
+                 (&prov.faces, FROM_TOOL_FACE), (&prov.edges, FROM_TOOL_EDGE), (&prov.vertices, FROM_TOOL_VERTEX)];
+    let mut o = outcomes.iter();
+    for ((records, role), &n) in kinds.into_iter().zip(&inputs) {
+        for i in 0..n {
+            let out = o.next().unwrap();
+            for &k in &out.outputs { assert!(records[k].role == role && records[k].refs[0] == i); }
+            assert_eq!(out.outputs.len(), records.iter().filter(|r| r.role == role && r.refs[0] == i).count());
+        }
+    }
+}
+
+fn face_x(s: &Surface) -> Vec3 { match *s { Surface::Cylinder { x, .. } => x, _ => panic!() } }
+
+#[test]
+fn bore_history_names_the_plate_and_the_drill() {
+    let (body, tool) = (plate(), drill(2.0, 1.5, 0.5));
+    let (result, prov, outcomes) = gc_kernel::boolean::cut_named(&body, &tool, TOL).unwrap();
+    prove_cut(&body, &tool, &result, &prov, &outcomes);
+    assert_eq!(gc_kernel::neutral::write_body(&result), gc_kernel::neutral::write_body(&gc_kernel::boolean::cut(&body, &tool, TOL).unwrap()));
+    // The two plate faces the hole passes through are modified, the rest unchanged; the drill's wall becomes the hole's
+    // wall, everything else of the drill is consumed.
+    let wall = tool.faces.iter().position(|f| matches!(f.surface, Surface::Cylinder { .. })).unwrap();
+    let hole = prov.faces.iter().position(|r| r.role == FROM_TOOL_FACE).unwrap();
+    let (nf, ne, nv) = (body.faces.len(), body.edges.len(), body.vertices.len());
+    for (i, out) in outcomes[..nf].iter().enumerate() {
+        let through = matches!(body.faces[i].surface, Surface::Plane { n, .. } if n.cross(Z).length() <= TOL);
+        assert_eq!((out.code, &out.outputs[..]), (if through { MODIFIED } else { UNCHANGED }, &[i][..]), "plate face {i}");
+    }
+    assert!(outcomes[nf..nf + ne + nv].iter().enumerate().all(|(i, o)| o.code == UNCHANGED && o.outputs == [if i < ne { i } else { i - ne }]));
+    for (j, out) in outcomes[nf + ne + nv..nf + ne + nv + tool.faces.len()].iter().enumerate() {
+        assert_eq!((out.code, out.outputs.clone()), if j == wall { (MODIFIED, vec![hole]) } else { (CONSUMED, vec![]) }, "drill face {j}");
+    }
+    assert!(outcomes[nf + ne + nv + tool.faces.len()..].iter().all(|o| o.code == CONSUMED && o.outputs.is_empty()));
+}
+
+#[test]
+fn op12_reply_is_op3_reply_plus_envelope() {
+    let (body, tool) = (plate(), drill(4.0, 2.5, 0.75));
+    let (three, twelve) = (cut_reply(OP_CUT, &body, &tool).unwrap(), cut_reply(OP_CUT_NAMED, &body, &tool).unwrap());
+    assert_eq!(twelve[..three.len()], three[..]);
+    let (_, prov, outcomes) = gc_kernel::boolean::cut_named(&body, &tool, TOL).unwrap();
+    let mut want = Vec::new();
+    let inputs = [body.faces.len(), body.edges.len(), body.vertices.len(), tool.faces.len(), tool.edges.len(), tool.vertices.len()];
+    write_cut(&mut want, &prov, inputs, &outcomes);
+    assert_eq!(twelve[three.len()..], want[..]);
+    let envelope = &twelve[three.len()..];
+    assert_eq!((envelope[0], envelope[1], *envelope.last().unwrap()), (START, VERSION, END));
+    assert_eq!(envelope[2] as usize, envelope.len() - 4);
+}
+
+/// A second hole runs in the section domain, which records no history yet: op 12 refuses by name, op 3 still cuts.
+#[test]
+fn unrecorded_domain_refuses_the_named_cut() {
+    let once = gc_kernel::boolean::cut(&plate(), &drill(2.0, 1.5, 0.5), TOL).unwrap();
+    let second = drill(4.5, 2.5, 0.5);
+    match gc_kernel::boolean::cut_named(&once, &second, TOL) {
+        Err(gc_kernel::KernelError::Unsupported(m)) => assert!(m.contains("Section"), "{m}"),
+        other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
+    }
+    assert!(cut_reply(OP_CUT_NAMED, &once, &second).is_err());
+    assert!(cut_reply(OP_CUT, &once, &second).is_ok());
+}
