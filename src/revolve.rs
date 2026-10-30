@@ -18,6 +18,7 @@
 use crate::geom::{Curve, Surface, Vec3};
 use crate::meridian::Meridian;
 use crate::neutral::{Body, Edge, Face};
+use crate::provenance::*;
 use crate::KernelError;
 use std::f64::consts::{PI, TAU};
 
@@ -386,7 +387,7 @@ fn ray_crossings(pc: &Piece, q: (f64, f64)) -> usize {
 
 /// Exact volume: |angle| / 2 times the loop integral of r^2 dz over every loop (holes subtract by orientation).
 pub fn volume_of(rev: &Revolution, tol: f64) -> Result<f64, KernelError> {
-    let loops = pieces(rev, tol)?;
+    let (loops, _) = pieces(rev, tol)?;
     let sum: f64 = loops.iter().flatten().map(Piece::r2dz).sum();
     Ok((rev.angle.abs() / 2.0 * sum).abs())
 }
@@ -401,8 +402,9 @@ pub fn volume(section: &Section) -> f64 {
     (PI * sum).abs()
 }
 
-/// The loops resolved, validated and oriented (outer counter-clockwise first, holes clockwise).
-fn pieces(rev: &Revolution, tol: f64) -> Result<Vec<Vec<Piece>>, KernelError> {
+/// The loops resolved, validated and oriented (outer counter-clockwise first, holes clockwise), and each built loop's
+/// request loop and whether it was reversed.
+fn pieces(rev: &Revolution, tol: f64) -> Result<(Vec<Vec<Piece>>, Vec<(usize, bool)>), KernelError> {
     if !(tol.is_finite() && tol > 0.0) { return invalid("the tolerance must be positive and finite"); }
     if rev.loops.is_empty() { return invalid("a revolved section needs a loop"); }
     let mut loops = Vec::new();
@@ -426,8 +428,11 @@ fn pieces(rev: &Revolution, tol: f64) -> Result<Vec<Vec<Piece>>, KernelError> {
     }
     let outer = (0..loops.len()).max_by(|&i, &j| loops[i].0.total_cmp(&loops[j].0)).unwrap();
     loops.swap(0, outer);
+    let mut origin: Vec<(usize, bool)> = (0..loops.len()).map(|i| (i, false)).collect();
+    origin.swap(0, outer);
     let mut out: Vec<Vec<Piece>> = Vec::new();
     for (k, (_, ps, ccw)) in loops.into_iter().enumerate() {
+        origin[k].1 = ccw != (k == 0);
         out.push(if ccw == (k == 0) { ps } else { ps.iter().rev().map(Piece::reversed).collect() });
     }
     // Every segment stays in r >= 0, touching the axis only at its ends and only on the outer loop; an arc centred off the
@@ -495,7 +500,7 @@ fn pieces(rev: &Revolution, tol: f64) -> Result<Vec<Vec<Piece>>, KernelError> {
             return invalid(format!("hole loop {l} is not inside the outer loop"));
         }
     }
-    Ok(out)
+    Ok((out, origin))
 }
 
 pub fn revolve(section: &Section, tol: f64) -> Result<Body, KernelError> {
@@ -505,6 +510,12 @@ pub fn revolve(section: &Section, tol: f64) -> Result<Body, KernelError> {
 
 /// The op 9 construction.
 pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> {
+    revolve_general_named(rev, tol).map(|(body, _)| body)
+}
+
+/// The op 9 construction and the provenance of its every face, edge and vertex (provenance.rs roles 10-21, request
+/// loop/segment indices; angle 0 is the start, the requested signed angle the end).
+pub fn revolve_general_named(rev: &Revolution, tol: f64) -> Result<(Body, Provenance), KernelError> {
     let (p, mut a, x) = (rev.p, rev.a, rev.x);
     // Stated as what must hold, so a NaN fails every test (Codex acceptance 2026-10-29).
     if !(p.is_finite() && a.is_finite() && x.is_finite()
@@ -532,7 +543,7 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
         }
         rev.angle = -rev.angle;
     }
-    let loops = pieces(&rev, tol)?;
+    let (loops, origin) = pieces(&rev, tol)?;
     let full = (rev.angle - TAU).abs() <= 1e-12;
     let phi = if full { TAU } else { rev.angle };
     let y = a.cross(x);
@@ -544,19 +555,26 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
     let touches = |pc: &Piece| pc.s.0 == 0.0 || pc.e.0 == 0.0;
 
     let mut body = Body::default();
+    let mut prov = Provenance::default();
+    // Built piece i of built loop l is request segment seg(l, i); its start point is request segment point(l, i)'s start.
+    let seg = |l: usize, i: usize| { let (rl, rv) = origin[l]; let m = loops[l].len(); (rl, if rv { m - 1 - i } else { i }) };
+    let point = |l: usize, i: usize| { let (rl, rv) = origin[l]; let m = loops[l].len(); (rl, if rv { (m - i) % m } else { i }) };
+    let angle_role = |t: f64, at_start: u32, at_end: u32, at_mid: u32| if t == 0.0 { at_start } else if !full && t == phi { at_end } else { at_mid };
     // Each point clear of the axis: vertices at its boundary angles and the arcs between them (a full turn closes back to
     // the vertex at 0). Each axis point: one vertex.
     struct Rim { angles: Vec<f64>, verts: Vec<usize>, arcs: Vec<usize> }
     let mut rims: Vec<Vec<Option<Rim>>> = Vec::new();
     let mut axis_vertex: Vec<Vec<usize>> = Vec::new();
-    for lp in &loops {
+    for (l, lp) in loops.iter().enumerate() {
         let n = lp.len();
         let (mut lr, mut la) = (Vec::with_capacity(n), vec![usize::MAX; n]);
         for i in 0..n {
             let (r, z) = lp[i].s;
+            let (rl, rs) = point(l, i);
             if r == 0.0 {
                 la[i] = body.vertices.len();
                 body.vertices.push(p.add(a.scale(z)));
+                prov.vertices.push(Record::new(AXIS_POINT, &[rl, rs]));
                 lr.push(None);
                 continue;
             }
@@ -568,7 +586,11 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
                 (false, false) => vec![0.0, phi],
                 (false, true) => vec![0.0, mid, phi],
             };
-            let verts: Vec<usize> = angles.iter().map(|&t| { body.vertices.push(at(r, z, t)); body.vertices.len() - 1 }).collect();
+            let verts: Vec<usize> = angles.iter().map(|&t| {
+                body.vertices.push(at(r, z, t));
+                prov.vertices.push(Record::new(angle_role(t, START_POINT, END_POINT, MID_POINT), &[rl, rs]));
+                body.vertices.len() - 1
+            }).collect();
             let ends: Vec<f64> = if full { angles.iter().cloned().chain([TAU]).collect() } else { angles.clone() };
             let centre = p.add(a.scale(z));
             let mut arcs = Vec::new();
@@ -576,6 +598,7 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
                 let end = if full && k + 1 == angles.len() { verts[0] } else { verts[k + 1] };
                 arcs.push(body.edges.len());
                 body.edges.push(Edge { curve: Curve::Arc { c: centre, n: a, x, r, t0: ends[k], t1: ends[k + 1] }, start: verts[k], end });
+                prov.edges.push(Record::new(PARALLEL, &[rl, rs, if ends.len() == 2 { 0 } else { k + 1 }]));
             }
             lr.push(Some(Rim { angles, verts, arcs }));
         }
@@ -629,11 +652,13 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
         for i in 0..n {
             let j = (i + 1) % n;
             let pc = lp[i];
+            let (rl, rs) = seg(l, i);
             if pc.arc.is_none() && pc.mer.is_none() && pc.s.0 == 0.0 && pc.e.0 == 0.0 {
                 // On the axis: nothing in a full turn; the caps' shared edge in a part turn.
                 if !full {
                     let e = body.edges.len();
                     body.edges.push(Edge { curve: meridian(&pc, 0.0), start: axis_vertex[l][i], end: axis_vertex[l][j] });
+                    prov.edges.push(Record::new(AXIS_SEGMENT, &[rl, rs]));
                     c0.push((e, true));
                     c1.push((e, false));
                 }
@@ -676,6 +701,7 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
                 let second: Vec<(usize, bool)> = arcs_between(l, j, 0.0, TAU).into_iter().rev().map(|e| (e, false)).collect();
                 let ordered = if pc.s.0 >= pc.e.0 { [first, second] } else { [second, first] };
                 body.faces.push(Face { surface, sense, loops: ordered.into_iter().filter(|lp| !lp.is_empty()).collect() });
+                prov.faces.push(Record::new(SWEPT, &[rl, rs, 0]));
                 continue;
             }
             // Meridian edges at the boundary angles (a full turn's last is its first).
@@ -684,6 +710,7 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
                 if full && k + 1 == bounds.len() { me.push(me[0]); continue; }
                 me.push(body.edges.len());
                 body.edges.push(Edge { curve: meridian(&pc, t), start: vertex_at(l, i, t), end: vertex_at(l, j, t) });
+                prov.edges.push(Record::new(angle_role(t, START_MERIDIAN, END_MERIDIAN, MID_MERIDIAN), &[rl, rs]));
             }
             if !full {
                 c0.push((me[0], true));
@@ -696,6 +723,7 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
                 lpf.extend(arcs_between(l, j, t0, t1).into_iter().rev().map(|e| (e, false)));
                 lpf.push((me[k], false));
                 body.faces.push(Face { surface: surface.clone(), sense, loops: vec![lpf] });
+                prov.faces.push(Record::new(SWEPT, &[rl, rs, if bounds.len() == 2 { 0 } else { k + 1 }]));
             }
         }
         c1.reverse();
@@ -707,8 +735,10 @@ pub fn revolve_general(rev: &Revolution, tol: f64) -> Result<Body, KernelError> 
         // at the angle it is the direction of turn there (loops reversed).
         body.faces.push(Face { surface: Surface::Plane { p, n: y, x: a }, sense: false, loops: cap0 });
         body.faces.push(Face { surface: Surface::Plane { p, n: a.cross(rho_at(phi)), x: a }, sense: true, loops: cap1 });
+        prov.faces.push(Record::new(START_CAP, &[]));
+        prov.faces.push(Record::new(END_CAP, &[]));
     }
-    Ok(body)
+    Ok((body, prov))
 }
 
 #[cfg(test)]

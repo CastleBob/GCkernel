@@ -25,6 +25,33 @@ pub const LOW_POINT: u32 = 7;
 /// Segment seg's start point at the high cap: [loop, seg].
 pub const HIGH_POINT: u32 = 8;
 
+// Op 11 (named revolve, op 9's request). Request loop/segment indices, before the reordering, reversal and negative-turn
+// mirroring. Angles: start = 0 (the seam direction x), end = the requested signed angle (part turns only), middle = the
+// split of faces touching the axis (pi in a full turn, half the angle in a part turn of more than pi). part: 0 unsplit,
+// 1 from the start to the middle, 2 from the middle to the end (or back to the start in a full turn).
+/// The surface swept by segment seg: [loop, seg, part].
+pub const SWEPT: u32 = 10;
+pub const START_CAP: u32 = 11;
+pub const END_CAP: u32 = 12;
+/// The circle or arc swept by segment seg's start point: [loop, seg, part].
+pub const PARALLEL: u32 = 13;
+/// Segment seg at the start angle (in a full turn, the seam): [loop, seg].
+pub const START_MERIDIAN: u32 = 14;
+/// Segment seg at the end angle: [loop, seg].
+pub const END_MERIDIAN: u32 = 15;
+/// Segment seg at the middle angle: [loop, seg].
+pub const MID_MERIDIAN: u32 = 16;
+/// Segment seg's start point, on the axis: [loop, seg].
+pub const AXIS_POINT: u32 = 17;
+/// Segment seg's start point at the start angle: [loop, seg].
+pub const START_POINT: u32 = 18;
+/// Segment seg's start point at the end angle: [loop, seg].
+pub const END_POINT: u32 = 19;
+/// Segment seg's start point at the middle angle: [loop, seg].
+pub const MID_POINT: u32 = 20;
+/// Segment seg lying on the axis, shared by the two caps of a part turn: [loop, seg].
+pub const AXIS_SEGMENT: u32 = 21;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Record {
     pub role: u32,
