@@ -6,8 +6,8 @@ use gc_kernel::extrude::extrude;
 use gc_kernel::geom::{Curve, Vec3};
 use gc_kernel::mass::measure;
 use gc_kernel::neutral::{write_body, Body, Profile, Reader};
-use gc_kernel::protocol::{encode_request, handle, parse_request, OP_REBUILD_PRISM};
-use gc_kernel::rebuild::rebuild_prism;
+use gc_kernel::protocol::{encode_request, handle, parse_request, OP_EXTRUDE, OP_PRISM_PROFILE, OP_REBUILD_PRISM};
+use gc_kernel::rebuild::{prism_profile, rebuild_prism};
 use gc_kernel::topology::check;
 use gc_kernel::KernelError;
 
@@ -126,4 +126,94 @@ fn planes_moved_off_their_edges_are_reported_not_rebuilt() {
     assert!(matches!(reply, Err(KernelError::InvalidInput(_))), "{reply:?}");
     // The Rust function itself, not only the protocol, refuses it.
     assert!(matches!(rebuild_prism(&block, TOL), Err(KernelError::InvalidInput(m)) if m.contains("leaves face")));
+}
+
+fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Curve> {
+    vec![line((x0, y0), (x1, y0)), line((x1, y0), (x1, y1)), line((x1, y1), (x0, y1)), line((x0, y1), (x0, y0))]
+}
+
+/// A 6 x 4 x 0.5 plate (top at z = 0.5) drilled through by kernel cuts: a hole, a second hole and a corner notch.
+fn cut_plate() -> Body {
+    let z = Vec3::new(0.0, 0.0, 1.0);
+    let mut plate = extrude(&Profile { loops: vec![rect(0.0, 0.0, 6.0, 4.0)], n: z, low: 0.0, high: 0.5 }, TOL).unwrap();
+    let drill = |cx: f64, cy: f64, r: f64| extrude(&Profile {
+        loops: vec![vec![Curve::Arc { c: Vec3::new(cx, cy, 0.0), n: z, x: Vec3::new(1.0, 0.0, 0.0), r, t0: 0.0, t1: 2.0 * PI }]],
+        n: z, low: -1.0, high: 2.0 }, TOL).unwrap();
+    let notch = extrude(&Profile { loops: vec![rect(5.0, 3.0, 7.0, 5.0)], n: z, low: -1.0, high: 2.0 }, TOL).unwrap();
+    for tool in [drill(1.5, 2.0, 0.5), drill(3.5, 2.0, 0.25), notch] {
+        plate = gc_kernel::boolean::cut(&plate, &tool, TOL).unwrap();
+    }
+    plate
+}
+
+/// Op 13: the plate's own outline and holes, on its top, and sweeping that profile back gives the same solid.
+#[test]
+fn a_cut_plate_gives_its_profile() {
+    let plate = cut_plate();
+    let z = Vec3::new(0.0, 0.0, 1.0);
+    let profile = prism_profile(&plate, z, TOL).unwrap();
+    assert_eq!(profile.loops.len(), 3);
+    assert!(profile.loops.iter().flatten().all(|c| (c.start().z - 0.5).abs() < 1e-12 && (c.end().z - 0.5).abs() < 1e-12));
+    assert!((profile.high - profile.low - 0.5).abs() < 1e-12 && profile.n.add(z).length() < 1e-12);
+    let expected = 0.5 * (24.0 - 1.0 - PI * 0.25 - PI * 0.0625);
+    let rebuilt = extrude(&profile, TOL).unwrap();
+    assert!((measure(&rebuilt, TOL).unwrap().volume - expected).abs() < 1e-9);
+    // Through the worker: the reply is op 2's own request.
+    let mut request = vec![0.0, 0.0, 1.0];
+    request.extend(write_body(&plate));
+    let reply = handle(&parse_request(&encode_request(OP_PRISM_PROFILE, TOL, &request)).unwrap()).unwrap();
+    assert_eq!(reply, gc_kernel::neutral::write_profile(&profile));
+    let swept = handle(&parse_request(&encode_request(OP_EXTRUDE, TOL, &reply)).unwrap()).unwrap();
+    assert!((swept[swept.len() - 1] - expected).abs() < 1e-9);
+}
+
+/// The direction is the caller's: a plain box is a prism three ways and gives the cap it is asked for; a direction
+/// no cap faces is refused by name.
+#[test]
+fn the_profile_follows_the_requested_direction() {
+    let z = Vec3::new(0.0, 0.0, 1.0);
+    let block = extrude(&Profile { loops: vec![rect(0.0, 0.0, 10.0, 8.0)], n: z, low: 0.0, high: 4.0 }, TOL).unwrap();
+    let x = prism_profile(&block, Vec3::new(1.0, 0.0, 0.0), TOL).unwrap();
+    assert!((x.high - 10.0).abs() < 1e-12 && x.loops[0].iter().all(|c| (c.start().x - 10.0).abs() < 1e-12));
+    let tilted = Vec3::new(1.0, 0.0, 1.0).unit().unwrap();
+    assert!(matches!(prism_profile(&block, tilted, TOL), Err(KernelError::Unsupported(m)) if m.contains("0 faces face the top")));
+}
+
+/// A blind pocket's floor also faces the top: refused by name, never nested as a through cut.
+#[test]
+fn a_pocketed_plate_is_refused_by_name() {
+    let z = Vec3::new(0.0, 0.0, 1.0);
+    let block = extrude(&Profile { loops: vec![rect(0.0, 0.0, 10.0, 8.0)], n: z, low: 0.0, high: 4.0 }, TOL).unwrap();
+    let pocket = extrude(&Profile { loops: vec![rect(2.0, 2.0, 4.0, 5.0)], n: z, low: 1.0, high: 5.0 }, TOL).unwrap();
+    let cut = gc_kernel::boolean::cut(&block, &pocket, TOL).unwrap();
+    match prism_profile(&cut, z, TOL) {
+        Err(KernelError::Unsupported(m)) => assert!(m.contains("a pocket"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+/// Rectangle cut-outs through a plate, inside it and across its edge: still one top and one bottom.
+#[test]
+fn rectangle_cutouts_keep_one_top() {
+    let z = Vec3::new(0.0, 0.0, 1.0);
+    let mut plate = extrude(&Profile { loops: vec![rect(0.0, 0.0, 6.0, 4.0)], n: z, low: 0.0, high: 0.5 }, TOL).unwrap();
+    for (x0, y0, x1, y1) in [(1.0, 1.0, 2.0, 3.0), (3.0, 1.5, 4.5, 2.5), (5.5, -1.0, 7.0, 1.0)] {
+        let tool = extrude(&Profile { loops: vec![rect(x0, y0, x1, y1)], n: z, low: -1.0, high: 2.0 }, TOL).unwrap();
+        plate = gc_kernel::boolean::cut(&plate, &tool, TOL).unwrap();
+        let profile = prism_profile(&plate, z, TOL).unwrap_or_else(|e| panic!("after ({x0},{y0})-({x1},{y1}): {e}"));
+        assert!(profile.loops.len() >= 2);
+        assert!((measure(&extrude(&profile, TOL).unwrap(), TOL).unwrap().volume - measure(&plate, TOL).unwrap().volume).abs() < 1e-9);
+    }
+}
+/// The seams between a cap's cells are dropped and the cut outline's pieces join: a plate with one rectangle
+/// cut-out gives exactly two four-line loops.
+#[test]
+fn a_cutout_plate_gives_clean_loops() {
+    let z = Vec3::new(0.0, 0.0, 1.0);
+    let plate = extrude(&Profile { loops: vec![rect(0.0, 0.0, 6.0, 4.0)], n: z, low: 0.0, high: 0.5 }, TOL).unwrap();
+    let tool = extrude(&Profile { loops: vec![rect(1.0, 1.0, 2.0, 3.0)], n: z, low: -1.0, high: 2.0 }, TOL).unwrap();
+    let cut = gc_kernel::boolean::cut(&plate, &tool, TOL).unwrap();
+    let profile = prism_profile(&cut, z, TOL).unwrap();
+    let mut sizes: Vec<usize> = profile.loops.iter().map(|l| l.len()).collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, vec![4, 4], "{:?}", profile.loops);
 }

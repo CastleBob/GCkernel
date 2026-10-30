@@ -22,11 +22,13 @@
 //!     10 named extrude (op 2's request -> op 2's reply, then the provenance envelope; provenance.rs),
 //!     11 named revolve (op 9's request -> op 9's reply, then the provenance envelope; provenance.rs),
 //!     12 named cut (op 3's request -> op 3's reply, then the provenance envelope with its outcome section; refused by
-//!        name in a domain that records no history; boolean::cut_named).
+//!        name in a domain that records no history; boolean::cut_named),
+//!     13 prism profile (a unit direction d then a body -> the op 2 profile whose sweep along -d is exactly the body, its
+//!        loops on the one cap facing d; refused by name when the body is not a straight-through plate; rebuild.rs).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
-use crate::neutral::{put_curve, put_surface, write_body, Reader};
+use crate::neutral::{put_curve, put_surface, write_body, write_profile, Reader};
 use crate::{boolean, extrude, mass, provenance, rebuild, revolve, tessellate, topology, KernelError};
 
 pub const VERSION: u32 = 1;
@@ -44,6 +46,7 @@ pub const OP_REVOLVE_GENERAL: u32 = 9;
 pub const OP_EXTRUDE_NAMED: u32 = 10;
 pub const OP_REVOLVE_NAMED: u32 = 11;
 pub const OP_CUT_NAMED: u32 = 12;
+pub const OP_PRISM_PROFILE: u32 = 13;
 
 pub struct Request {
     pub op: u32,
@@ -161,6 +164,12 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             let rebuilt = rebuild::rebuild_prism(&body, tol)?;
             topology::check(&rebuilt, tol).map_err(|e| KernelError::Internal(format!("rebuild built an invalid solid: {e}")))?;
             Ok(write_body(&rebuilt))
+        }
+        OP_PRISM_PROFILE => {
+            let d = reader.direction()?;
+            let body = reader.body()?;
+            reader.finish()?;
+            Ok(write_profile(&rebuild::prism_profile(&body, d, tol)?))
         }
         OP_TESSELLATE => {
             let chord = reader.next()?;
