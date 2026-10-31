@@ -22,6 +22,7 @@ mod spline_trim;
 pub mod spline_curve;
 pub mod revolve;
 pub mod step;
+pub mod stl;
 pub mod tessellate;
 pub mod topology;
 
