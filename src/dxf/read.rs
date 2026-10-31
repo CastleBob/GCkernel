@@ -9,17 +9,19 @@ use crate::KernelError;
 
 type P3 = [f64; 3];
 
-/// One entity record: its type and pairs; a POLYLINE's VERTEX records (or an INSERT's ATTRIBs) as children.
-struct Entity {
-    kind: String,
-    pairs: Vec<Pair>,
-    children: Vec<Entity>,
+/// One entity record: its type and pairs; a POLYLINE's VERTEX records (or an INSERT's ATTRIBs) as children. The
+/// DWG reader builds the same records (DXF group codes) so both formats share everything below.
+pub(crate) struct Entity {
+    pub(crate) kind: String,
+    pub(crate) pairs: Vec<Pair>,
+    pub(crate) children: Vec<Entity>,
 }
 
-struct Block {
-    base: P3,
-    entities: Vec<Entity>,
-    xref: bool,
+/// A block definition; `blocks` maps are keyed by the upper-cased block name.
+pub(crate) struct Block {
+    pub(crate) base: P3,
+    pub(crate) entities: Vec<Entity>,
+    pub(crate) xref: bool,
 }
 
 /// x -> m x + t.
@@ -87,6 +89,12 @@ impl Affine {
     }
 }
 
+/// The counter-clockwise sweep from angle a to angle b (both in [0, 2 pi)); the whole turn when they meet.
+fn sweep_of(a: f64, b: f64) -> f64 {
+    let sweep = (b - a).rem_euclid(std::f64::consts::TAU);
+    if sweep < 1e-12 { std::f64::consts::TAU } else { sweep }
+}
+
 fn cross(a: P3, b: P3) -> P3 {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
@@ -102,6 +110,15 @@ fn unit(a: P3) -> Option<P3> {
 
 /// Reads a DXF file's bytes.
 pub fn read(bytes: &[u8]) -> Result<Drawing, KernelError> {
+    read_parts(bytes, false)
+}
+
+/// Only the header and layer table (for asking about units before an import).
+pub fn read_header(bytes: &[u8]) -> Result<Drawing, KernelError> {
+    read_parts(bytes, true)
+}
+
+fn read_parts(bytes: &[u8], header_only: bool) -> Result<Drawing, KernelError> {
     let all = pairs(bytes)?;
     let mut drawing = Drawing::default();
     let mut blocks: HashMap<String, Block> = HashMap::new();
@@ -121,8 +138,8 @@ pub fn read(bytes: &[u8]) -> Result<Drawing, KernelError> {
             match name.as_str() {
                 "HEADER" => header(body, &mut drawing),
                 "TABLES" => tables(body, &mut drawing)?,
-                "BLOCKS" => definitions(body, &mut blocks)?,
-                "ENTITIES" => model.extend(records(body)),
+                "BLOCKS" if !header_only => definitions(body, &mut blocks)?,
+                "ENTITIES" if !header_only => model.extend(records(body)),
                 _ => {}
             }
             i = end + 1;
@@ -135,21 +152,43 @@ pub fn read(bytes: &[u8]) -> Result<Drawing, KernelError> {
     if sections == 0 {
         return Err(KernelError::InvalidInput("this is not a DXF file (it has no SECTION)".into()));
     }
+    assemble(drawing, &blocks, &model)
+}
+
+/// Model-space entities (and the blocks they insert) as the drawing seen from above. `drawing` carries the header and
+/// layer table already read; entities flagged 67 = 1 are paper space.
+pub(crate) fn assemble(mut drawing: Drawing, blocks: &HashMap<String, Block>, model: &[Entity])
+    -> Result<Drawing, KernelError>
+{
     if drawing.layers.is_empty() {
         drawing.layer_index("0");
     }
 
-    let mut x = Explode { blocks: &blocks, stack: Vec::new(), notes: Notes::default() };
+    let mut x = Explode { blocks, stack: Vec::new(), notes: Notes::default() };
+    let mut paper = Vec::new();
     for (group, entity) in model.iter().enumerate() {
         if flag(entity, 67) == 1 {
             // A layout's VIEWPORT is how paper space shows model space, not drawing content.
             if entity.kind != "VIEWPORT" {
-                x.notes.paper += 1;
+                paper.push((group, entity));
             }
             continue;
         }
         x.entity(&mut drawing, entity, &Affine::IDENTITY, None, 256, group)?;
+        too_many(&drawing)?;
     }
+    if drawing.curves.is_empty() && !paper.is_empty() {
+        // A sheet-style export: the drawing is on the layout and model space is empty.
+        for (group, entity) in &paper {
+            x.entity(&mut drawing, entity, &Affine::IDENTITY, None, 256, *group)?;
+            too_many(&drawing)?;
+        }
+        if !drawing.curves.is_empty() {
+            drawing.warn("model space is empty; the curves on the paper-space layout were read".into());
+            paper.clear();
+        }
+    }
+    x.notes.paper = paper.len();
     x.notes.finish(&mut drawing);
     Ok(drawing)
 }
@@ -326,6 +365,14 @@ struct Explode<'a> {
 
 const MAX_DEPTH: usize = 64;
 const MAX_ARRAY: i64 = 100_000;
+const MAX_CURVES: usize = 5_000_000;
+
+fn too_many(d: &Drawing) -> Result<(), KernelError> {
+    if d.curves.len() > MAX_CURVES {
+        return Err(KernelError::Unsupported(format!("the drawing expands to more than {MAX_CURVES} curves")));
+    }
+    Ok(())
+}
 
 impl Explode<'_> {
     /// One entity under world transform `m`; `parent` is the enclosing insert's (layer, colour).
@@ -366,11 +413,10 @@ impl Explode<'_> {
                 let (t0, t1) = if e.kind == "CIRCLE" {
                     (0.0, std::f64::consts::TAU)
                 } else {
-                    let a0 = real(e, 50)?.unwrap_or(0.0).to_radians();
-                    let mut a1 = real(e, 51)?.unwrap_or(0.0).to_radians();
-                    while a1 <= a0 { a1 += std::f64::consts::TAU; }
-                    while a1 - a0 > std::f64::consts::TAU { a1 -= std::f64::consts::TAU; }
-                    (a0, a1)
+                    // Counter-clockwise from 50 to 51; equal angles draw the whole circle.
+                    let a0 = real(e, 50)?.unwrap_or(0.0).to_radians().rem_euclid(std::f64::consts::TAU);
+                    let a1 = real(e, 51)?.unwrap_or(0.0).to_radians().rem_euclid(std::f64::consts::TAU);
+                    (a0, a0 + sweep_of(a0, a1))
                 };
                 out.conic(ocs.point(c), ocs.vector([r, 0.0, 0.0]), ocs.vector([0.0, r, 0.0]), t0, t1);
             }
@@ -381,10 +427,8 @@ impl Explode<'_> {
                 let n = unit(extrusion(e)?).unwrap_or([0.0, 0.0, 1.0]);
                 let minor = cross(n, major);
                 let minor = [minor[0] * ratio, minor[1] * ratio, minor[2] * ratio];
-                let t0 = real(e, 41)?.unwrap_or(0.0);
-                let mut t1 = real(e, 42)?.unwrap_or(std::f64::consts::TAU);
-                while t1 <= t0 + 1e-12 { t1 += std::f64::consts::TAU; }
-                while t1 - t0 > std::f64::consts::TAU + 1e-12 { t1 -= std::f64::consts::TAU; }
+                let t0 = real(e, 41)?.unwrap_or(0.0).rem_euclid(std::f64::consts::TAU);
+                let t1 = t0 + sweep_of(t0, real(e, 42)?.unwrap_or(std::f64::consts::TAU).rem_euclid(std::f64::consts::TAU));
                 if norm(major) <= 0.0 || ratio <= 0.0 {
                     out.notes.zero += 1;
                     return Ok(());
@@ -472,6 +516,7 @@ impl Explode<'_> {
                 let total = place.then(&offset).then(&local);
                 for child in &block.entities {
                     self.entity(d, child, &total, Some(layer), color, group)?;
+                    too_many(d)?;
                 }
             }
         }
@@ -594,7 +639,14 @@ impl Emit<'_> {
         } else if fit_points.len() >= 2 {
             if lifted(&fit_points) > 0 { self.notes.off_plane += 1; }
             let through: Vec<P2> = fit_points.iter().map(|p| project(*p)).collect();
-            let Some(spline) = fit::interpolate(&through, degree.min(3)) else {
+            let tangent = |code| -> Result<Option<P2>, KernelError> {
+                Ok(point(e, code)?.map(|t| { let w = m.vector(t); [w[0], w[1]] }))
+            };
+            let ends = match (tangent(12)?, tangent(13)?) {
+                (Some(a), Some(b)) => Some((a, b)),
+                _ => None,
+            };
+            let Some(spline) = fit::interpolate(&through, degree.min(3), ends) else {
                 self.d.warn("a SPLINE given only by fit points could not be built (repeated points); it was left out".into());
                 return Ok(());
             };

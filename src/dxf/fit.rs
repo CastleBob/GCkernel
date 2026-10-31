@@ -84,16 +84,16 @@ pub fn spline_at(degree: usize, knots: &[f64], points: &[P2], weights: &[f64], s
     (c, mul(sub(da, mul(c, dw)), 1.0 / w))
 }
 
-/// The spline of degree <= `degree` through `through` (chord-length parameters, averaged knots), or None when the
-/// points repeat or are too many to solve.
-pub fn interpolate(through: &[P2], degree: usize) -> Option<Geometry> {
+/// The spline of degree <= `degree` through `through` (chord-length parameters, averaged knots), leaving along and
+/// arriving along the `ends` tangents when given; None when the points repeat or are too many to solve.
+pub fn interpolate(through: &[P2], degree: usize, ends: Option<(P2, P2)>) -> Option<Geometry> {
     let mut q: Vec<P2> = Vec::with_capacity(through.len());
     for p in through {
         if q.last().is_none_or(|l| dist(*l, *p) > 0.0) {
             q.push(*p);
         }
     }
-    if q.len() < 2 || q.len() > 4000 {
+    if q.len() < 2 || q.len() > 2000 {
         return None;
     }
     let n = q.len() - 1;
@@ -104,35 +104,64 @@ pub fn interpolate(through: &[P2], degree: usize) -> Option<Geometry> {
         u[k] = u[k - 1] + dist(q[k - 1], q[k]) / total;
     }
     u[n] = 1.0;
-    let mut knots = vec![0.0; n + p + 2];
-    for k in knots.iter_mut().skip(n + 1) {
+    let ends = ends.filter(|_| p >= 2).and_then(|(a, b)| Some((unit(a)?, unit(b)?)));
+    // With end tangents two more control points carry them (The NURBS Book 9.2.2).
+    let size = if ends.is_some() { n + 3 } else { n + 1 };
+    let mut knots = vec![0.0; size + p + 1];
+    for k in knots.iter_mut().skip(size) {
         *k = 1.0;
     }
-    for j in 1..=(n - p) {
-        knots[j + p] = u[j..j + p].iter().sum::<f64>() / p as f64;
-    }
-    // Banded collocation matrix N(u_k) P = Q, solved with partial pivoting.
-    let size = n + 1;
-    let mut a = vec![vec![0.0; size]; size];
-    for k in 0..=n {
-        let span = find_span(size, p, u[k], &knots);
-        let (values, _) = basis(span, u[k], p, &knots);
-        for j in 0..=p {
-            a[k][span - p + j] = values[j];
+    if ends.is_some() {
+        for j in 1..=(n + 2 - p) {
+            knots[j + p] = u[j - 1..j - 1 + p].iter().sum::<f64>() / p as f64;
+        }
+    } else {
+        for j in 1..=(n - p) {
+            knots[j + p] = u[j..j + p].iter().sum::<f64>() / p as f64;
         }
     }
-    let mut b: Vec<P2> = q.clone();
+    let mut a: Vec<Vec<f64>> = Vec::with_capacity(size);
+    let mut b: Vec<P2> = Vec::with_capacity(size);
+    let row_at = |t: f64, target: P2, a: &mut Vec<Vec<f64>>, b: &mut Vec<P2>| {
+        let span = find_span(size, p, t, &knots);
+        let (values, _) = basis(span, t, p, &knots);
+        let mut row = vec![0.0; size];
+        for j in 0..=p {
+            row[span - p + j] = values[j];
+        }
+        a.push(row);
+        b.push(target);
+    };
+    for k in 0..=n {
+        row_at(u[k], q[k], &mut a, &mut b);
+    }
+    if let Some((t0, t1)) = ends {
+        // In order beside the rows they neighbour, so the system stays banded.
+        let mut start = vec![0.0; size];
+        start[0] = -1.0;
+        start[1] = 1.0;
+        a.insert(1, start);
+        b.insert(1, mul(t0, total * knots[p + 1] / p as f64));
+        let mut end = vec![0.0; size];
+        end[size - 2] = -1.0;
+        end[size - 1] = 1.0;
+        a.insert(size - 1, end);
+        b.insert(size - 1, mul(t1, total * (1.0 - knots[size - 1]) / p as f64));
+    }
+    // Banded (half-width p + 1), solved with partial pivoting inside the band.
+    let band = 2 * p + 3;
     for col in 0..size {
-        let pivot = (col..size).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
+        let reach = (col + band).min(size);
+        let pivot = (col..reach).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
         if a[pivot][col].abs() < 1e-14 {
             return None;
         }
         a.swap(col, pivot);
         b.swap(col, pivot);
-        for row in col + 1..size {
+        for row in col + 1..reach {
             let f = a[row][col] / a[col][col];
             if f != 0.0 {
-                for k in col..size { a[row][k] -= f * a[col][k]; }
+                for k in col..(col + 2 * band).min(size) { a[row][k] -= f * a[col][k]; }
                 b[row] = sub(b[row], mul(b[col], f));
             }
         }
@@ -140,7 +169,7 @@ pub fn interpolate(through: &[P2], degree: usize) -> Option<Geometry> {
     let mut points = vec![[0.0; 2]; size];
     for row in (0..size).rev() {
         let mut s = b[row];
-        for k in row + 1..size { s = sub(s, mul(points[k], a[row][k])); }
+        for k in row + 1..(row + 2 * band).min(size) { s = sub(s, mul(points[k], a[row][k])); }
         points[row] = mul(s, 1.0 / a[row][row]);
     }
     Some(Geometry::Spline { degree: p, knots, points, weights: Vec::new() })
@@ -153,6 +182,7 @@ pub fn lines_and_arcs(g: &Geometry, tol: f64) -> Result<Vec<Geometry>, KernelErr
         return Err(KernelError::InvalidInput("the curve fitting tolerance must be positive".into()));
     }
     let mut out = Vec::new();
+    let mut budget = MAX_SPANS;
     match g {
         Geometry::Line { .. } | Geometry::Arc { .. } | Geometry::Circle { .. } | Geometry::Polyline { .. } => {
             out.push(g.clone())
@@ -172,7 +202,7 @@ pub fn lines_and_arcs(g: &Geometry, tol: f64) -> Result<Vec<Geometry>, KernelErr
                 for k in 0..pieces {
                     let a = t0 + (t1 - t0) * k as f64 / pieces as f64;
                     let b = t0 + (t1 - t0) * (k + 1) as f64 / pieces as f64;
-                    fit_span(&f, a, b, tol, &mut out, 0)?;
+                    fit_span(&f, a, b, tol, &mut out, 0, &mut budget)?;
                 }
             }
         }
@@ -188,7 +218,7 @@ pub fn lines_and_arcs(g: &Geometry, tol: f64) -> Result<Vec<Geometry>, KernelErr
                     let (a, b) = (knots[span], knots[span + 1]);
                     if b > a {
                         let f = |t: f64| spline_at(*degree, knots, points, weights, span, t);
-                        fit_span(&f, a, b, tol, &mut out, 0)?;
+                        fit_span(&f, a, b, tol, &mut out, 0, &mut budget)?;
                     }
                 }
             }
@@ -199,10 +229,16 @@ pub fn lines_and_arcs(g: &Geometry, tol: f64) -> Result<Vec<Geometry>, KernelErr
 
 const SAMPLES: usize = 32;
 const MAX_SPLITS: usize = 48;
+/// Spans tried per curve before giving up (a damaged curve must not take forever).
+const MAX_SPANS: usize = 50_000;
 
-fn fit_span(f: &dyn Fn(f64) -> (P2, P2), a: f64, b: f64, tol: f64, out: &mut Vec<Geometry>, depth: usize)
-    -> Result<(), KernelError>
+fn fit_span(f: &dyn Fn(f64) -> (P2, P2), a: f64, b: f64, tol: f64, out: &mut Vec<Geometry>, depth: usize,
+    budget: &mut usize) -> Result<(), KernelError>
 {
+    if *budget == 0 {
+        return Err(KernelError::Unsupported("a curve needs too many lines and arcs to fit".into()));
+    }
+    *budget -= 1;
     let samples: Vec<P2> = (0..=SAMPLES).map(|i| f(a + (b - a) * i as f64 / SAMPLES as f64).0).collect();
     let (p0, p1) = (samples[0], samples[SAMPLES]);
     let chord = dist(p0, p1);
@@ -235,8 +271,8 @@ fn fit_span(f: &dyn Fn(f64) -> (P2, P2), a: f64, b: f64, tol: f64, out: &mut Vec
             "a curve could not be fitted with lines and arcs within {tol} (it turns too sharply)")));
     }
     let m = 0.5 * (a + b);
-    fit_span(f, a, m, tol, out, depth + 1)?;
-    fit_span(f, m, b, tol, out, depth + 1)
+    fit_span(f, a, m, tol, out, depth + 1, budget)?;
+    fit_span(f, m, b, tol, out, depth + 1, budget)
 }
 
 /// Unit tangent at the start (or end) of [a, b], from a nearby chord where the derivative vanishes (a cusp).
