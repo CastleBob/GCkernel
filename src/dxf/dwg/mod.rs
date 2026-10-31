@@ -11,6 +11,7 @@ mod objects;
 mod r15;
 mod r2004;
 mod r2007;
+mod rs;
 
 use std::collections::HashMap;
 
@@ -18,9 +19,17 @@ use bits::{bad, Ver, R};
 use super::Drawing;
 use crate::KernelError;
 
-/// True when the bytes start like a DWG file ("AC10" followed by two digits).
+/// True when the bytes start like a DWG file: "AC10" followed by two digits, or the oldest releases' "AC1.50",
+/// "AC2.10" and the like (which are refused by name).
 pub fn looks_like(bytes: &[u8]) -> bool {
-    bytes.len() >= 6 && &bytes[0..4] == b"AC10" && bytes[4].is_ascii_digit() && bytes[5].is_ascii_digit()
+    bytes.len() >= 6 && (&bytes[0..4] == b"AC10" && bytes[4].is_ascii_digit() && bytes[5].is_ascii_digit()
+        || oldest(bytes))
+}
+
+/// "AC" digit "." digit digit: the version mark of AutoCAD 1.x and 2.x drawings.
+fn oldest(bytes: &[u8]) -> bool {
+    bytes.len() >= 6 && &bytes[0..2] == b"AC" && bytes[2].is_ascii_digit() && bytes[3] == b'.'
+        && bytes[4].is_ascii_digit() && bytes[5].is_ascii_digit()
 }
 
 /// Reads a DWG file's bytes.
@@ -47,8 +56,9 @@ fn version(bytes: &[u8]) -> R<(String, Ver)> {
         "AC1024" => Ver::R2010,
         "AC1027" => Ver::R2013,
         "AC1032" => Ver::R2018,
-        v if v < "AC1012" => return Err(KernelError::Unsupported(format!(
-            "DWG {v} (R12 or earlier) files are not supported; save as DWG 2000 or later, or DXF"))),
+        v if v < "AC1012" || oldest(bytes) => return Err(KernelError::Unsupported(format!(
+            "DWG {v} (AutoCAD R12 or earlier) files are not supported: the published DWG specification this reader \
+             follows starts at R13; save the drawing as DWG R13 or later, or as DXF"))),
         v => return Err(KernelError::Unsupported(format!(
             "DWG {v} is newer than this reader knows (2018 format, AC1032); save as DWG 2018 or DXF"))),
     };
