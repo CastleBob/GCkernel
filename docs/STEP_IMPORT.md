@@ -29,9 +29,9 @@ partial-success result. Source IDs are file-local, not application reference nam
   exact. Multiple standalone solids are retained separately, in source-ID order.
 - LINE, CIRCLE and ELLIPSE edge supports, trimmed by EDGE_CURVE vertices and
   same_sense; oriented edges/bounds and face sense are applied independently.
-- Clamped non-rational B_SPLINE_CURVE_WITH_KNOTS of degree 1..3, including
+- Clamped polynomial or positive-weight rational B_SPLINE_CURVE_WITH_KNOTS of degree 1..3, including
   complex entity encoding, whose edge uses the complete curve domain. Exact
-  knot insertion and degree elevation produce cubic Bezier spans; no fitting.
+  homogeneous knot insertion and degree elevation produce cubic Bezier spans; no fitting.
   Both incident faces share each decomposed edge and intermediate vertex.
   same_sense and oriented-edge reversal reverse the complete span chain.
 - Plane/cylinder/cone/sphere/torus supports when their boundaries are admissible
@@ -50,7 +50,7 @@ total volume/area are required. These checks do not establish a general geometri
 self-intersection detector or healing system. Import success does not guarantee
 all later boolean domains support the body. Tessellation remains display only.
 
-Assemblies/occurrence transforms/mapped items, rational/higher-degree/unclamped
+Assemblies/occurrence transforms/mapped items, higher-degree/unclamped
 splines, interior spline trims, general spline surfaces, pcurve
 reconciliation, arbitrary swept/revolved supports, void shells, faceted/non-solid
 models, unsupported shape representations and multiple/named DATA sections are
@@ -61,7 +61,7 @@ names (colors, PMI and product-tree semantics) is not returned.
 Limits: 64 MiB input, 500,000 entities, 4,000,000 values, nesting 64, unit-chain
 depth 32, string storage length 32767 excluding quotes, positive source IDs no
 larger than 2^53-1. Errors reference entity IDs or filtered-stream byte offsets.
-Polynomial curves are limited to 8192 controls and bodies to 100000 decomposed
+Spline curves are limited to 8192 controls and bodies to 100000 decomposed
 edges. Bernstein surface bounds allow 8192 subdivision visits and depth 24;
 failure to establish the bound is a refusal, not sampled acceptance.
 
@@ -101,6 +101,41 @@ all supported internal multiplicities. Further tests cover shared topology,
 reverse sense, units, analytic mass bounds, malformed data, a hidden radial bulge,
 neutral roundtrip and tessellation. GCm's native comparison uses an independently
 authored fixture, with source preservation; no CAD library becomes a runtime dependency.
+
+## Rational boundary milestone (2026-10-31)
+
+RATIONAL_B_SPLINE_CURVE weights must be finite, positive, one per control point,
+with largest/smallest ratio at most 1e12 (explicit numerical-domain limit).
+Weights are scaled together before homogeneous knot insertion/degree elevation;
+this leaves the rational function unchanged, including its parameterization.
+The resulting cubic has neutral curve tag 6: `[6, p0.xyz, p1.xyz, p2.xyz, p3.xyz,
+w0, w1, w2, w3]`, 17 doubles total. This is distinct from surface tag 6.
+The op-16 envelope and default tolerance do not change. Standalone transforms
+and body roundtrips retain the emitted weights. Old workers cannot consume tag 6.
+
+Rational boundaries are admitted on planes and circular/elliptic cylinders.
+Positive weights give the planar control-hull bound. For cylinders the degree-six
+Bernstein numerator `Q.Q - radius_squared * W*W`, divided by a positive lower
+bound on `W*W`, bounds the whole radial residual. Roundoff/work-limit refusal is
+explicit; this is not formal interval arithmetic. Mass uses boundary quadrature
+and reports `exact = false`. Display subdivision bounds the positive-weight
+control hull's distance from the chord; depth 24 and 200000 visits are hard limits.
+Booleans and profile extrusion explicitly refuse rational boundaries. General
+rational surfaces, higher degrees, unclamped/periodic knots and interior STEP
+trimming remain outside this milestone; a closed clamped circle is supported.
+
+Independent fixture `tests/fixtures/rational_cylinder.step` represents exact
+radius-2, height-4 cylinder rings with rational quadratic quarter circles, then
+exact homogeneous elevation. Tests require volume `16*pi` and area `24*pi`
+within 1e-9, before/after a skew rotation and distant translation; shared topology,
+neutral roundtrip, analytic derivative, weight scaling, subdivision, malformed
+weights, surface mismatch, cut refusal and tessellation are also exercised.
+Weighted Cox-de Boor basis tests cover degrees 1..3 and each internal multiplicity.
+GCm stores the identical fixture for independent EyeShot intake comparison.
+
+Public mathematics/specification (no implementation source):
+https://pages.mtu.edu/~shene/COURSES/cs3621/NOTES/spline/NURBS/NURBS-knot-insert.html
+and https://www.steptools.com/stds/stp_aim/html/t_rational_b_spline_curve.html.
 
 ## Operation 16
 

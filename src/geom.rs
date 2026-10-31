@@ -59,6 +59,8 @@ pub enum Curve {
     CylinderPair { c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t0: f64, t1: f64 },
     /// A cubic Bezier curve (Claude 2026-10-29, revolved Bezier meridians), wire type 5: control points p0..p3, t in [0, 1].
     Bezier { p: [Vec3; 4] },
+    /// Positive-weight rational cubic, t in [0, 1]. Wire type 6: four points then four weights.
+    RationalBezier { p: [Vec3; 4], w: [f64; 4] },
 }
 
 /// The pieces of a CylinderPair at t: point less c (kept small, so callers can add c - o once for any origin o),
@@ -186,7 +188,7 @@ impl Curve {
         match self {
             Curve::Line { .. } => (0.0, 1.0),
             Curve::Arc { t0, t1, .. } | Curve::Conic { t0, t1, .. } | Curve::CylinderPair { t0, t1, .. } => (*t0, *t1),
-            Curve::Bezier { .. } => (0.0, 1.0),
+            Curve::Bezier { .. } | Curve::RationalBezier { .. } => (0.0, 1.0),
         }
     }
     /// Point and derivative at parameter t (see `domain`).
@@ -202,6 +204,7 @@ impl Curve {
                 let (offset, d, _) = pair_eval_sided(c, a, x, rho, p, b, r, branch, t, Self::pair_side(t, t0, t1));
                 (c.add(offset), d)
             }
+            Curve::RationalBezier { p, w } => crate::rational::eval(p, w, t),
             Curve::Bezier { p } => {
                 let s = 1.0 - t;
                 let w = [s * s * s, 3.0 * s * s * t, 3.0 * s * t * t, t * t * t];
@@ -219,6 +222,7 @@ impl Curve {
                 let (offset, d, _) = pair_eval_sided(c, a, x, rho, p, b, r, branch, t, Self::pair_side(t, t0, t1));
                 (c.sub(o).add(offset), d)
             }
+            Curve::RationalBezier { p, w } => crate::rational::eval(p.map(|q| q.sub(o)), w, t),
             _ => { let (q, d) = self.eval(t); (q.sub(o), d) }
         }
     }
@@ -230,7 +234,7 @@ impl Curve {
             Curve::Arc { c, n, x, r, t0, .. } => Self::point_at_angle(*c, *n, *x, *r, *t0),
             Curve::Conic { c, u, v, t0, .. } => Self::conic_point(*c, *u, *v, *t0),
             Curve::CylinderPair { t0, .. } => self.eval(*t0).0,
-            Curve::Bezier { p } => p[0],
+            Curve::Bezier { p } | Curve::RationalBezier { p, .. } => p[0],
         }
     }
     pub fn end(&self) -> Vec3 {
@@ -239,7 +243,7 @@ impl Curve {
             Curve::Arc { c, n, x, r, t1, .. } => Self::point_at_angle(*c, *n, *x, *r, *t1),
             Curve::Conic { c, u, v, t1, .. } => Self::conic_point(*c, *u, *v, *t1),
             Curve::CylinderPair { t1, .. } => self.eval(*t1).0,
-            Curve::Bezier { p } => p[3],
+            Curve::Bezier { p } | Curve::RationalBezier { p, .. } => p[3],
         }
     }
     pub fn translated(&self, d: Vec3) -> Curve {
@@ -251,6 +255,7 @@ impl Curve {
                 c: c.add(d), a: *a, x: *x, rho: *rho, p: p.add(d), b: *b, r: *r, branch: *branch, t0: *t0, t1: *t1,
             },
             Curve::Bezier { p } => Curve::Bezier { p: p.map(|q| q.add(d)) },
+            Curve::RationalBezier { p, w } => Curve::RationalBezier { p: p.map(|q| q.add(d)), w: *w },
         }
     }
     /// The same curve run the other way: an arc becomes counter-clockwise about -n from its old end.
@@ -268,6 +273,7 @@ impl Curve {
                 c: *c, a: a.scale(-1.0), x: *x, rho: *rho, p: *p, b: *b, r: *r, branch: -branch, t0: -t1, t1: -t0,
             },
             Curve::Bezier { p } => Curve::Bezier { p: [p[3], p[2], p[1], p[0]] },
+            Curve::RationalBezier { p, w } => Curve::RationalBezier { p: [p[3], p[2], p[1], p[0]], w: [w[3], w[2], w[1], w[0]] },
         }
     }
 }

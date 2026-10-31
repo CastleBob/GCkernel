@@ -33,6 +33,9 @@ fn select(
     tool: &crate::neutral::Body,
     tolerance: f64,
 ) -> Result<Domain, crate::KernelError> {
+    if body.edges.iter().chain(&tool.edges).any(|e| matches!(e.curve, crate::geom::Curve::RationalBezier { .. })) {
+        return Err(crate::KernelError::Unsupported("cuts on rational Bezier boundaries are not supported yet".into()));
+    }
     // No boolean domain handles conical faces yet (tapered Pole stock): refused by name before any selector reads them.
     if body.faces.iter().chain(&tool.faces).any(|f| matches!(f.surface, crate::geom::Surface::Cone { .. })) {
         return Err(crate::KernelError::Unsupported("cuts on bodies with conical faces are not supported yet".into()));

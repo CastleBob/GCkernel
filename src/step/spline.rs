@@ -1,5 +1,5 @@
-//! Exact polynomial B-spline representation conversion. Knot insertion leaves the
-//! curve unchanged; degree elevation then uses the existing cubic Bezier wire.
+//! Exact polynomial and positive-weight rational B-spline conversion. Homogeneous
+//! knot insertion/degree elevation preserves shape, yielding cubic Bezier spans.
 //! References: STEP EXPRESS b_spline_curve_with_knots; C.-K. Shene's public MTU
 //! notes on B-spline knot insertion/subdivision. No third-party source code.
 use super::{invalid, unsupported, Document, Result, Value};
@@ -8,11 +8,7 @@ use crate::geom::{Curve, Vec3};
 impl Document {
     pub(super) fn spline_spans(&self, id: u64, scale: f64) -> Result<Vec<Curve>> {
         let e = self.entity(id)?;
-        if e.has("RATIONAL_B_SPLINE_CURVE") {
-            return unsupported(format!(
-                "STEP rational spline #{id} requires rational kernel geometry"
-            ));
-        }
+        let rational = e.has("RATIONAL_B_SPLINE_CURVE");
         let (base, knots) = if e.has("B_SPLINE_CURVE") {
             e.args("REPRESENTATION_ITEM", 1)?[0].text()?;
             (
@@ -60,6 +56,30 @@ impl Document {
         if points.iter().any(|p| !p.is_finite()) {
             return invalid("nonfinite scaled spline control point");
         }
+        let weights = if rational {
+            e.args("RATIONAL_B_SPLINE_CURVE", 1)?[0]
+                .list()?
+                .iter()
+                .map(Value::number)
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            vec![1.0; points.len()]
+        };
+        if weights.len() != points.len() || weights.iter().any(|w| !w.is_finite() || *w <= 0.0) {
+            return invalid("rational spline needs one positive finite weight per control point");
+        }
+        let max = weights.iter().copied().fold(0.0, f64::max);
+        if weights.iter().any(|w| w / max < 1e-12) {
+            return unsupported("rational spline weight ratio exceeds 1e12");
+        }
+        let mut points: Vec<Homogeneous> = points
+            .drain(..)
+            .zip(weights)
+            .map(|(p, w)| Homogeneous {
+                q: p.scale(w / max),
+                w: w / max,
+            })
+            .collect();
         let multiplicities = knots[0].list()?;
         let values = knots[1].list()?;
         if values.len() < 2
@@ -141,12 +161,41 @@ impl Document {
                 ],
                 _ => [p[0], p[1], p[2], p[3]],
             };
-            if p.iter().any(|p| !p.is_finite()) {
+            if p.iter()
+                .any(|p| !p.q.is_finite() || !p.w.is_finite() || p.w <= 0.0)
+            {
                 return invalid("spline decomposition overflow");
             }
-            out.push(Curve::Bezier { p });
+            let weights = p.map(|h| h.w);
+            let p = p.map(|h| h.q.scale(1.0 / h.w));
+            if rational {
+                crate::rational::validate(p, weights)?;
+                out.push(Curve::RationalBezier { p, w: weights });
+            } else {
+                out.push(Curve::Bezier { p });
+            }
         }
         Ok(out)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Homogeneous {
+    q: Vec3,
+    w: f64,
+}
+impl Homogeneous {
+    fn scale(self, a: f64) -> Self {
+        Self {
+            q: self.q.scale(a),
+            w: self.w * a,
+        }
+    }
+    fn add(self, b: Self) -> Self {
+        Self {
+            q: self.q.add(b.q),
+            w: self.w + b.w,
+        }
     }
 }
 
@@ -256,6 +305,46 @@ mod tests {
         }
     }
     #[test]
+    fn rational_spans_match_independent_weighted_basis() {
+        for degree in 1..=3 {
+            for multiplicity in 1..=degree {
+                let (mut doc, points, knots) = document(degree, multiplicity, true);
+                let weights: Vec<f64> = (0..points.len())
+                    .map(|i| 0.25 + (i % 4) as f64 * 0.7)
+                    .collect();
+                doc.exchange
+                    .entities
+                    .get_mut(&100)
+                    .unwrap()
+                    .components
+                    .insert(
+                        "RATIONAL_B_SPLINE_CURVE".into(),
+                        vec![Value::List(
+                            weights.iter().map(|&w| Value::Number(w)).collect(),
+                        )],
+                    );
+                let curves = doc.spline_spans(100, 25.4).unwrap();
+                for (span, range) in [0., 0.3, 0.8, 1.].windows(2).enumerate() {
+                    for j in 0..100 {
+                        let t = j as f64 / 100.;
+                        let u = range[0] + (range[1] - range[0]) * t;
+                        let bw: Vec<_> = (0..points.len())
+                            .map(|i| weights[i] * basis(i, degree, u, &knots))
+                            .collect();
+                        let den: f64 = bw.iter().sum();
+                        let expected = points
+                            .iter()
+                            .zip(&bw)
+                            .fold(Vec3::new(0., 0., 0.), |q, (p, w)| {
+                                q.add(p.scale(w / den * 25.4))
+                            });
+                        assert!(curves[span].eval(t).0.distance(expected) < 1e-10);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn malformed_and_unimplemented_splines_are_refused() {
         for (index, value) in [
             (1, Value::Number(3.5)),
@@ -289,6 +378,6 @@ mod tests {
             .spline_spans(100, 1.0)
             .unwrap_err()
             .to_string()
-            .contains("rational"));
+            .contains("RATIONAL_B_SPLINE_CURVE"));
     }
 }

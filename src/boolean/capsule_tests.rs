@@ -15,7 +15,7 @@ fn boundary_volume(body: &Body) -> f64 {
                 for (i, forward) in face.loops.iter().flatten() {
                     let curve = &body.edges[*i].curve;
                     let integral = match *curve {
-                        Curve::CylinderPair { .. } | Curve::Bezier { .. } => {
+                        Curve::CylinderPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
                             panic!("this independent prism integral excludes cylinder pairs")
                         }
                         Curve::Conic { c, u, v, t0, t1 } => c

@@ -161,6 +161,15 @@ impl<'a> Reader<'a> {
                 }
                 Ok(Curve::Bezier { p })
             }
+            t if t == 6.0 => {
+                let p = [self.point()?, self.point()?, self.point()?, self.point()?];
+                let w = [self.next()?, self.next()?, self.next()?, self.next()?];
+                crate::rational::validate(p, w)?;
+                if p.iter().all(|q| q.distance(p[0]) <= self.tolerance) {
+                    return invalid("a rational Bezier curve has no length");
+                }
+                Ok(Curve::RationalBezier { p, w })
+            }
             t => invalid(format!("unknown curve type {t}")),
         }
     }
@@ -313,6 +322,7 @@ pub fn put_curve(out: &mut Vec<f64>, c: &Curve) {
             put(out, *p); put(out, *b); out.extend_from_slice(&[*r, *branch, *t0, *t1]);
         }
         Curve::Bezier { p } => { out.push(5.0); for q in p { put(out, *q); } }
+        Curve::RationalBezier { p, w } => { out.push(6.0); for q in p { put(out, *q); } out.extend(w); }
     }
 }
 

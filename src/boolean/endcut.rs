@@ -39,7 +39,7 @@ fn domain(c: &Curve) -> (f64, f64) {
 }
 fn conic(c: &Curve) -> Option<(Vec3, Vec3, Vec3, f64, f64)> {
     match *c {
-        Curve::Line { .. } | Curve::CylinderPair { .. } | Curve::Bezier { .. } => None,
+        Curve::Line { .. } | Curve::CylinderPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => None,
         Curve::Arc { c, n, x, r, t0, t1 } => Some((c, x.scale(r), n.cross(x).scale(r), t0, t1)),
         Curve::Conic { c, u, v, t0, t1 } => Some((c, u, v, t0, t1)),
     }
@@ -1088,6 +1088,10 @@ fn parameter(curve: &Curve, q: Vec3, tol: f64) -> Option<f64> {
 }
 fn slice(curve: &Curve, t0: f64, t1: f64) -> Curve {
     match *curve {
+        Curve::RationalBezier { p, w } => {
+            let (p, w) = crate::rational::piece(p, w, t0, t1);
+            Curve::RationalBezier { p, w }
+        },
         Curve::Bezier { p } => Curve::Bezier { p: crate::geom::bezier_piece(p, t0, t1) },
         Curve::Line { .. } => segment(eval(curve, t0), eval(curve, t1)),
         Curve::Arc { c, n, x, r, .. } => Curve::Arc { c, n, x, r, t0, t1 },
@@ -1330,7 +1334,7 @@ fn transform(body: &Body, map: impl Fn(Vec3) -> Vec3) -> Body {
                 *p = map(*p);
                 *b = map(*b);
             }
-            Curve::Bezier { p } => { for q in p.iter_mut() { *q = map(*q); } }
+            Curve::Bezier { p } | Curve::RationalBezier { p, .. } => { for q in p.iter_mut() { *q = map(*q); } }
         }
     }
     for f in &mut result.faces {
@@ -1751,7 +1755,7 @@ mod tests {
                     *rho *= scale;
                     *r *= scale;
                 }
-                Curve::Bezier { .. } => unreachable!("no Bezier edges in these test bodies"),
+                Curve::Bezier { .. } | Curve::RationalBezier { .. } => unreachable!("no Bezier edges in these test bodies"),
             }
         }
         for f in &mut out.faces {

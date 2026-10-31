@@ -188,6 +188,7 @@ impl Rigid {
                 c: self.position(c), a: self.vector(a), x: self.vector(x), rho, p: self.position(p), b: self.vector(b), r, branch, t0, t1,
             },
             Curve::Bezier { p } => Curve::Bezier { p: p.map(|q| self.position(q)) },
+            Curve::RationalBezier { p, w } => Curve::RationalBezier { p: p.map(|q| self.position(q)), w },
         }
     }
     pub fn surface(&self, s: &Surface) -> Surface {

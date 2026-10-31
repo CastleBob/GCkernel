@@ -377,7 +377,7 @@ mod tests {
                         for (index, forward) in lp {
                             let travel = if *forward { 1. } else { -1. };
                             match body.edges[*index].curve {
-                                Curve::Conic { .. } | Curve::CylinderPair { .. } | Curve::Bezier { .. } => {
+                                Curve::Conic { .. } | Curve::CylinderPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
                                     panic!("round-bore fixture unexpectedly contains a conic")
                                 }
                                 Curve::Line { a, b } => {

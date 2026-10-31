@@ -1884,7 +1884,7 @@ mod tests {
                     *rho *= scale;
                     *r *= scale;
                 }
-                Curve::Bezier { .. } => unreachable!("no Bezier edges in these test bodies"),
+                Curve::Bezier { .. } | Curve::RationalBezier { .. } => unreachable!("no Bezier edges in these test bodies"),
             }
         }
         for f in &mut out.faces {

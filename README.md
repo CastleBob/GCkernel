@@ -36,7 +36,9 @@ Ops: 1 check, 2 extrude, 3 cut, 4 measure ([volume, area, 1 closed form | 0 quad
 `[1, mode (0 T, 1 T inverse), T (m row-major 9, t 3), N, N x [kind, len, data]]` -> `[1, N, N x [kind, len, data]]`;
 kinds 0 point, 1 vector, 2 frame (o x y), 3 rigid (reply: T after it), 4 curve, 5 body, 6 frame-local point
 (frame, x, y; reply kind 0), 7 surface. One bad item fails the batch with its index.
-Curves: 0 line, 1 arc, 2 B-spline (refused), 3 conic, 4 cylinder pair.
+Curves: 0 line, 1 arc, 2 general B-spline (refused), 3 conic, 4 cylinder pair,
+5 polynomial cubic Bezier (four xyz points), 6 rational cubic Bezier (four xyz
+points then four positive weights); the Bezier parameter domain is [0, 1].
 Surfaces: 0 plane, 1 cylinder. See `src/protocol.rs`, `src/neutral.rs`, `src/geom.rs`.
 
 Display polylines omit internal same-plane/same-cylinder divisions and periodic seams. Their IDs remain the

@@ -636,7 +636,7 @@ mod tests {
                     *p = map(*p);
                     *b = map(*b);
                 }
-                Curve::Bezier { .. } => unreachable!("no Bezier edges in these test bodies"),
+                Curve::Bezier { .. } | Curve::RationalBezier { .. } => unreachable!("no Bezier edges in these test bodies"),
             }
         }
         for f in &mut body.faces {

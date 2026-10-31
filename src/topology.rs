@@ -68,7 +68,7 @@ pub fn check(body: &Body, tolerance: f64) -> Result<TopologyReport, KernelError>
     for (f, face) in body.faces.iter().enumerate() {
         for &(e, _) in face.loops.iter().flatten() {
             if let Some(miss) = off_surface(&body.edges[e].curve, &face.surface, tolerance) {
-                if let Curve::Bezier { .. } = body.edges[e].curve {
+                if let Curve::Bezier { .. } | Curve::RationalBezier { .. } = body.edges[e].curve {
                     let measured = (0..=32).map(|i| distance(body.edges[e].curve.eval(i as f64 / 32.0).0, &face.surface)).fold(0.0, f64::max);
                     return bad(format!("edge {e} Bezier span cannot be certified on face {f} within {tolerance} inches; sampled departure {measured} inches (samples are not an acceptance proof)"));
                 }
@@ -197,6 +197,25 @@ pub(crate) fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> O
         }
         // A Bezier curve lies within its control points' hull: on a plane, their distances bound it; on a general
         // surface of revolution with a Bezier meridian, it must be that meridian (or its reverse) in one half-plane.
+        Curve::RationalBezier { p: cp, w } => {
+            if crate::rational::validate(cp, w).is_err() { return Some(f64::INFINITY); }
+            let worst = match *surface {
+                Surface::Plane { p, n, .. } => cp.iter().map(|q| { let d = q.sub(p).dot(n).abs(); if d.is_finite() { d } else { f64::INFINITY } }).fold(0.0, f64::max),
+                Surface::Cylinder { p, a, r, .. } => {
+                    let q = cp.map(|q| { let d = q.sub(p); d.sub(a.scale(d.dot(a))) });
+                    if r > tolerance && rational_radius_bound(q, w, r*r, tolerance*(2.0*r-tolerance)) { 0.0 }
+                    else { f64::INFINITY }
+                },
+                Surface::EllipticCylinder { p, a, u, v } => {
+                    let q = cp.map(|q| { let (c, s) = unit_circle(p, a, u, v, q); Vec3::new(c, s, 0.0) });
+                    let delta = tolerance / (u.dot(u)+v.dot(v)).sqrt();
+                    if delta < 1.0 && rational_radius_bound(q, w, 1.0, delta*(2.0-delta)) { 0.0 }
+                    else { f64::INFINITY }
+                },
+                _ => f64::INFINITY,
+            };
+            return (!worst.is_finite() || worst > tolerance).then_some(worst);
+        }
         Curve::Bezier { p: cp } => {
             let worst = match *surface {
                 Surface::Plane { p, n, .. } => cp.iter().map(|q| q.sub(p).dot(n).abs()).fold(0.0, f64::max),
@@ -389,6 +408,43 @@ fn bezier_squared_radius_bound(q: [Vec3; 4], radius_squared: f64, allowed: f64) 
     true
 }
 
+/// For positive weights, |Q.Q - r^2 W^2| / min(W)^2 bounds the radial
+/// residual over a whole span. Products use degree-six Bernstein coefficients.
+/// Subdivision tightens the bound; samples may reject, never admit.
+fn rational_radius_bound(p: [Vec3; 4], w: [f64; 4], r2: f64, allowed: f64) -> bool {
+    let max = w.iter().copied().fold(0.0, f64::max);
+    let mut pending = vec![(p, w.map(|v| v/max), 0)];
+    let (c3, c6) = ([1., 3., 3., 1.], [1., 6., 15., 20., 15., 6., 1.]);
+    let mut visits = 0;
+    while let Some((p, w, depth)) = pending.pop() {
+        visits += 1;
+        if visits > 8192 { return false; }
+        let q: [Vec3; 4] = std::array::from_fn(|i| p[i].scale(w[i]));
+        let min_w = w.iter().copied().fold(f64::INFINITY, f64::min);
+        let mut worst = 0.0f64;
+        for k in 0usize..=6 {
+            let (mut sum, mut magnitude) = (0.0, 0.0);
+            for i in k.saturating_sub(3)..=k.min(3) {
+                let j = k-i;
+                let factor = c3[i]*c3[j]/c6[k];
+                let (a, b) = (q[i].dot(q[j]), r2*w[i]*w[j]);
+                sum += factor*(a-b);
+                magnitude += factor*((q[i].x*q[j].x).abs()+(q[i].y*q[j].y).abs()+(q[i].z*q[j].z).abs()+b.abs());
+            }
+            let bound = (sum.abs()+256.0*f64::EPSILON*magnitude)/(min_w*min_w);
+            if !bound.is_finite() { return false; }
+            worst = worst.max(bound);
+        }
+        if worst <= allowed { continue; }
+        if depth >= 24 { return false; }
+        let [left, right] = crate::rational::split(p, w, 0.5);
+        if [p[0], p[3], left.0[3]].iter().any(|q| (q.dot(*q)-r2).abs() > allowed) { return false; }
+        pending.push((right.0, right.1, depth+1));
+        pending.push((left.0, left.1, depth+1));
+    }
+    true
+}
+
 #[cfg(test)]
 mod spline_boundary_tests {
     use super::*;
@@ -415,6 +471,29 @@ mod spline_boundary_tests {
             p: p.map(|q| Vec3::new(2., 0., q.z)),
         };
         assert!(off_surface(&straight, &surface, 1e-6).is_none());
+    }
+    #[test]
+    fn rational_hull_and_denominator_bounds_reject_hidden_departures() {
+        let origin = Vec3::new(0.,0.,0.);
+        let axis = Vec3::new(0.,0.,1.);
+        let surface = Surface::Cylinder { p: origin, a: axis, x: Vec3::new(1.,0.,0.), r: 2. };
+        let p = [Vec3::new(2.,0.,0.), Vec3::new(2.1,0.,1.), Vec3::new(1.9,0.,2.), Vec3::new(2.,0.,3.)];
+        let curve = Curve::RationalBezier { p, w: [1.;4] };
+        for t in [0.,0.5,1.] { assert!(distance(curve.eval(t).0,&surface) < 1e-12); }
+        assert!(off_surface(&curve,&surface,1e-6).is_some());
+        let fixture = crate::step::read(include_bytes!("../tests/fixtures/rational_cylinder.step"),1e-6).unwrap();
+        let (p,w) = fixture.bodies[0].body.edges.iter().find_map(|e| match e.curve {
+            Curve::RationalBezier { p,w } => Some((p,w)), _ => None }).unwrap();
+        // Affinely stretch an exact circular rational quadrant into an exact ellipse.
+        let p = p.map(|p| Vec3::new(1.5*p.x,0.5*p.y,p.z));
+        let ellipse = Surface::EllipticCylinder { p: origin, a: axis, u: Vec3::new(3.,0.,0.), v: Vec3::new(0.,1.,0.) };
+        assert!(off_surface(&Curve::RationalBezier { p,w },&ellipse,1e-6).is_none());
+        let mut bad = p; bad[1].x += 1e-4;
+        assert!(off_surface(&Curve::RationalBezier { p: bad,w },&ellipse,1e-6).is_some());
+        let plane = Surface::Plane { p: origin, n: axis, x: Vec3::new(1.,0.,0.) };
+        assert!(off_surface(&Curve::RationalBezier { p,w },&plane,1e-6).is_none());
+        bad = p; bad[1].z += 1e-4;
+        assert!(off_surface(&Curve::RationalBezier { p: bad,w },&plane,1e-6).is_some());
     }
     #[test]
     fn elliptic_cylinder_admission_uses_actual_axes_and_rejects_radial_error() {

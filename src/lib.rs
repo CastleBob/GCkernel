@@ -16,6 +16,7 @@ pub mod neutral;
 pub mod protocol;
 pub mod provenance;
 pub mod rebuild;
+pub mod rational;
 pub mod revolve;
 pub mod step;
 pub mod tessellate;

@@ -135,6 +135,31 @@ fn polyline(body: &Body, edge: usize, chord: f64) -> Result<Vec<Vec3>, KernelErr
             let n = steps as usize;
             (0..=n).map(|k| t0 + (t1 - t0) * k as f64 / n as f64).collect()
         }
+        Curve::RationalBezier { p, w } => {
+            crate::rational::validate(p, w)?;
+            let mut params = vec![0.0];
+            let mut pending = vec![(p, w, 0.0, 1.0, 0)];
+            let mut visits = 0;
+            while let Some((p, w, a, b, depth)) = pending.pop() {
+                visits += 1;
+                if visits > 200_000 { return unsupported("rational edge exceeds display subdivision budget"); }
+                let d = p[3].sub(p[0]);
+                let l = d.dot(d);
+                // Positive rational weights keep the ENTIRE curve in its control hull.
+                let off = p.iter().map(|q| {
+                    let s = if l > 0.0 { (q.sub(p[0]).dot(d)/l).clamp(0.0, 1.0) } else { 0.0 };
+                    q.distance(p[0].add(d.scale(s)))
+                }).fold(0.0, f64::max);
+                if !off.is_finite() { return unsupported("nonfinite rational display bound"); }
+                if off <= chord/2.0 { params.push(b); continue; }
+                if depth >= 24 { return unsupported("rational edge display bound did not converge"); }
+                let [left, right] = crate::rational::split(p, w, 0.5);
+                let m = (a+b)/2.0;
+                pending.push((right.0, right.1, m, b, depth+1));
+                pending.push((left.0, left.1, a, m, depth+1));
+            }
+            params
+        }
         Curve::CylinderPair { .. } | Curve::Bezier { .. } => {
             // No closed-form bend: halve each span until its quarter points sit within chord / 2 of the chord.
             let mut params = vec![t0];

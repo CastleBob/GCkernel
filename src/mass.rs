@@ -88,7 +88,7 @@ fn segment(body: &Body, edge: usize, forward: bool, shift: Vec3) -> Curve {
 /// Curves that do not lie on their cylinder (beyond `tolerance`) are refused.
 pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelError> {
     let (mut volume, mut area) = (0.0, 0.0);
-    let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. }))
+    let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. } | Curve::RationalBezier { .. }))
         && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. } | Surface::Revolution { .. })
             || matches!(f.surface, Surface::Cylinder { .. })
                 && f.loops.iter().flatten().any(|&(e, _)| matches!(body.edges[e].curve, Curve::Bezier { .. })));
@@ -261,7 +261,7 @@ fn cylinder_terms(curve: &Curve, p: Vec3, o: Vec3, a: Vec3, x: Vec3, y: Vec3, r:
         Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
         Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
         Curve::CylinderPair { .. } => return curve_on_cylinder_terms(curve, p, o, a, x, y, r, px, py, tol, size),
-        Curve::Bezier { .. } => {
+        Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
             if crate::topology::off_surface(curve, &Surface::Cylinder { p, a, x, r }, tol).is_some() {
                 return Err("Bezier boundary is not proved within cylinder tolerance".into());
             }
@@ -339,7 +339,7 @@ fn cone_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, k: f64,
         Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
         Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
         Curve::CylinderPair { .. } => return Err("intersection curves on a cone are not supported yet".into()),
-        Curve::Bezier { .. } => return Err("a Bezier curve on a cone is not supported".into()),
+        Curve::Bezier { .. } | Curve::RationalBezier { .. } => return Err("a Bezier curve on a cone is not supported".into()),
     };
     let sc = c.sub(p).dot(a);
     let radius = r + k * sc;
