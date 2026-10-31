@@ -141,7 +141,7 @@ fn every_curve_kind_and_a_real_body_move_exactly() {
             assert!(close(mq, m.point(Point3::from_vec3(q)).to_vec3(), point_eps * scale), "{c:?} at {t}");
             assert!(close(md, m.vector(d), tangent_eps * (1.0 + d.length())), "{c:?} tangent at {t}");
         }
-        kinds[match c { Curve::Line { .. } => 0, Curve::Arc { .. } => 1, Curve::Conic { .. } => 3, Curve::CylinderPair { .. } => 4, Curve::Bezier { .. } => 5, Curve::RationalBezier { .. } => panic!("rational curves have dedicated tests") }] += 1;
+        kinds[match c { Curve::Line { .. } => 0, Curve::Arc { .. } => 1, Curve::Conic { .. } => 3, Curve::CylinderPair { .. } | Curve::RadialPair { .. } => 4, Curve::Bezier { .. } => 5, Curve::RationalBezier { .. } => panic!("rational curves have dedicated tests") }] += 1;
         if let (Curve::CylinderPair { c, a, x, rho, p, b, r, t0, t1, .. },
             Curve::CylinderPair { c: c0, a: a0, x: x0, p: p0, b: b0, .. }) = (moved, c.clone()) {
             // The discriminant (whether the crossing is real along its trim) is invariant under the motion.

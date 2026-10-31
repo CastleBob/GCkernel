@@ -75,7 +75,7 @@ fn volume(body: &Body) -> f64 {
     let mut sum = 0.;
     for face in &body.faces {
         match face.surface {
-            Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+            Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
             Surface::Plane { p, n, .. } => {
                 let outward = n.scale(sign(face.sense));
                 let area: f64 = face
@@ -273,7 +273,7 @@ fn permute(body: &Body, shift: usize) -> Body {
                 *u = map(*u);
                 *v = map(*v);
             }
-            Curve::CylinderPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => panic!("pair edges are outside these passage fixtures"),
+            Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => panic!("pair edges are outside these passage fixtures"),
             Curve::Line { a, b } => {
                 *a = map(*a);
                 *b = map(*b);
@@ -287,7 +287,7 @@ fn permute(body: &Body, shift: usize) -> Body {
     }
     for f in &mut result.faces {
         match &mut f.surface {
-            Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+            Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
             Surface::Plane { p, n, x } => {
                 *p = map(*p);
                 *n = map(*n);

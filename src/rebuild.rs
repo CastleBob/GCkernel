@@ -36,7 +36,7 @@ pub fn rebuild_prism(body: &Body, tolerance: f64) -> Result<Body, KernelError> {
         let sides_ok = body.faces.iter().enumerate().filter(|(i, _)| *i != top && *i != bottom).all(|(_, f)| match f.surface {
             Surface::Plane { n, .. } => n.dot(d).abs() < PARALLEL,
             Surface::Cylinder { a, .. } | Surface::EllipticCylinder { a, .. } => a.cross(d).length() < PARALLEL,
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => false,
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => false,
         });
         if !sides_ok { continue; }
         let caps = [top, bottom].map(|i| match body.faces[i].surface { Surface::Plane { p, .. } => p, _ => unreachable!() });
@@ -145,7 +145,7 @@ fn swept(s: &Surface, d: Vec3) -> bool {
     match *s {
         Surface::Plane { n, .. } => n.dot(d).abs() < PARALLEL,
         Surface::Cylinder { a, .. } | Surface::EllipticCylinder { a, .. } => a.cross(d).length() < PARALLEL,
-        Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => false,
+        Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => false,
     }
 }
 
@@ -243,6 +243,7 @@ fn kind(s: &Surface) -> &'static str {
         Surface::Torus { .. } => "torus",
         Surface::Revolution { .. } => "surface of revolution",
         Surface::Spline { .. } => "spline surface",
+        Surface::Conoid { .. } => "radial conoid",
     }
 }
 

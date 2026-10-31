@@ -446,5 +446,28 @@ value from the parts' dimensions (closed form, or a quadrature of the analytic s
   the cutter's axis round a circle across the pipe is a degree-two trigonometric polynomial (eight samples, chord
   bound). Anything else (a pipe already holed or cut, a short cutter, an end not wholly inside) is refused by name.
 
-Not done: native normalized ends (GCmaker's Normalize End builds a sampled envelope; its analytic face, radial
-lines through the outer wall's cope curve, is not a surface the kernel has) and NC1 rolled-root cutters.
+Not done in that round: native normalized ends (closed below) and NC1 rolled-root cutters.
+
+## Normalized pipe ends (Claude, 2026-10-31)
+
+Bob's "short pipe test" (7 x 0.5 pipe, Normalize End over a 13 diameter Preserve Length cope). GCmaker's rule
+(PipeCopeNormalizer, EndConditionSideCompositeBuilder): a radial torch cuts one boundary per angle, so at each angle
+the end keeps the deeper of the two walls' crossings with the mating cylinder and carries it radially across the
+wall. The exact face is a right conoid with radial rulings, `Surface::Conoid` (wire surface 9):
+S(t, s) = c + s rho(t) + h(t) a, h the deeper wall's CylinderPair height; its rims are `Curve::RadialPair` (wire
+curve 7: a CylinderPair's height carried to radius s). Construction (`normalize.rs`, worker op 19) proves the deeper
+wall: both walls' discriminants positive all the way round (else "does not cross both pipe walls all the way round")
+and h_in - h_out of one sign within the tolerance at every angle, by samples less max|D''| step^2 / 8 with |h''|
+bounded from the pair's trigonometric discriminant (`geom::pair_bend_bound`); a square cope's two crossings meet at
+the pipe's sides, which is the same within the tolerance. A wall that changes round the pipe (tilted or off-centre
+copes) is refused by name ("the deeper wall changes round the pipe"). The tool is GCmaker's waste band (radii sa..sb
+about the pipe, far cap beyond the end, conoid top). `normal_end.rs` cuts it from a plain pipe on the same axis line
+when the band reaches past both walls, the far cap lies beyond one end, and the conoid's height is proved strictly
+between the ends (else "the envelope reaches a pipe end"); the far cap, walls and far rings are kept exactly, each
+wall trimmed to its rim. Bodies with a normalized end take only the radial bore domain, whose clearance bounds a rim
+in 128 pieces (circle-piece extrema plus the proved height range), the pieces at the hole's own angles giving that
+end's place along the axis; anything else is refused by name. Mass: X.N = -s (C.a + h) + h' C.v with Green's theorem
+in (t, s); area from the closed-form antiderivative of sqrt(s^2 + h'^2) in s (quadrature in t). Tests
+(tests/normal_end.rs): Bob's end against (Ro^2 - Ri^2) / 2 times the integral of y0 + sqrt(Rc^2 - Ri^2 sin^2 t)
+(1e-9), its face area, the tool's own volume, his top hole after it (one-wall integral, 1e-10), the far end, a turned
+cope, the display mesh within area x chord, op 19 and the neutral round trip, and the named refusals.

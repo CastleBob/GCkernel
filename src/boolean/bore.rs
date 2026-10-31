@@ -369,7 +369,7 @@ mod tests {
         for face in &body.faces {
             let sign = if face.sense { 1. } else { -1. };
             match face.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p, n, .. } => {
                     let outward = n.scale(sign);
                     let mut area = 0.;
@@ -377,7 +377,7 @@ mod tests {
                         for (index, forward) in lp {
                             let travel = if *forward { 1. } else { -1. };
                             match body.edges[*index].curve {
-                                Curve::Conic { .. } | Curve::CylinderPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
+                                Curve::Conic { .. } | Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
                                     panic!("round-bore fixture unexpectedly contains a conic")
                                 }
                                 Curve::Line { a, b } => {

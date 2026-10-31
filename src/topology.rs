@@ -114,6 +114,15 @@ fn distance(q: Vec3, surface: &Surface) -> f64 {
             let h = w.dot(a);
             ((w.sub(a.scale(h)).length() - big).hypot(h) - r).abs()
         }
+        // Along the axis from the surface point at the same angle and radius: an upper bound of the distance (equal
+        // in the axis direction), so a check against it is never looser than the true distance.
+        Surface::Conoid { c, a, x, rho, p, b, r, branch } => {
+            let w = q.sub(c);
+            let y = a.cross(x);
+            let t = w.dot(y).atan2(w.dot(x));
+            let h = crate::geom::pair_height(c, a, x, rho, p, b, r, branch, t).0;
+            (w.dot(a) - h).abs()
+        }
         // In the half-plane through the axis: the distance to the meridian over its whole domain.
         Surface::Revolution { p, a, m, .. } => {
             let w = q.sub(p);
@@ -122,6 +131,19 @@ fn distance(q: Vec3, surface: &Surface) -> f64 {
             m.distance((w.sub(a.scale(h)).length(), h), domain.0, domain.1)
         }
     }
+}
+
+/// Whether the pair (c, a, rho; p, b, r, branch) defines the conoid `surface`: the same parameter axis line (either way:
+/// reversing a flips the branch, the height times a staying), the same radii and the same root cylinder axis line. The
+/// parameter origin (x) and the anchors' places along their axes do not change the points.
+#[allow(clippy::too_many_arguments)]
+fn same_conoid(c: Vec3, a: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, surface: &Surface, tolerance: f64) -> bool {
+    let Surface::Conoid { c: sc, a: sa, rho: srho, p: sp, b: sb, r: sr, branch: sbranch, .. } = *surface else { return false };
+    let perp = |w: Vec3, d: Vec3| w.sub(d.scale(w.dot(d)));
+    let turn = a.dot(sa).signum();
+    a.cross(sa).length() <= 1e-9 && perp(c.sub(sc), sa).length() <= tolerance && (rho - srho).abs() <= tolerance
+        && b.cross(sb).length() <= 1e-9 && perp(p.sub(sp), sb).length() <= tolerance && (r - sr).abs() <= tolerance
+        && branch * turn == sbranch
 }
 
 /// A curve's (radius, height) form in the half-plane through the axis containing it, if it lies in one: the unit radial
@@ -185,21 +207,47 @@ pub(crate) fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> O
                 }
                 // No straight line lies on a sphere or (in our admitted faces) a torus or general meridian surface.
                 Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => f64::INFINITY,
+                // A ruling of a conoid: square to the axis, both ends at one angle about it (the same half-plane) and on
+                // the surface; the surface is straight along it, so the ends bound the rest.
+                Surface::Conoid { c, a: axis, .. } => {
+                    let perp = |w: Vec3| w.sub(axis.scale(w.dot(axis)));
+                    let (mut e0, mut e1) = (perp(a.sub(c)), perp(b.sub(c)));
+                    if e1.length() > e0.length() { std::mem::swap(&mut e0, &mut e1); }
+                    let l0 = e0.length();
+                    let along = b.sub(a).dot(axis).abs();
+                    if l0 <= tolerance || e1.dot(e0) < -tolerance * l0 { f64::INFINITY } else {
+                        let off = e1.cross(e0.scale(1.0 / l0)).length();
+                        distance(a, surface).max(distance(b, surface)) + off + along
+                    }
+                }
             };
             return (worst > tolerance).then_some(worst);
         }
         Curve::Arc { c, n, x, r, .. } => ellipse(c, x.scale(r), n.cross(x).scale(r)),
         Curve::Conic { c, u, v, .. } => ellipse(c, u, v),
-        Curve::CylinderPair { c, a, rho, p, b, r, .. } => {
+        Curve::CylinderPair { c, a, rho, p, b, r, branch, .. } => {
             let same = |q: Vec3, axis: Vec3, radius: f64| match *surface {
                 Surface::Cylinder { p: fp, a: fa, r: fr, .. } => {
                     let w = q.sub(fp);
                     fa.cross(axis).length() <= 1e-9 && w.sub(fa.scale(w.dot(fa))).length() <= tolerance && (fr - radius).abs() <= tolerance
                 }
                 Surface::Plane { .. } | Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. }
-                | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => false,
+                | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => false,
             };
+            // On a conoid: the conoid of this very pair (its rim at s = rho).
+            if same_conoid(c, a, rho, p, b, r, branch, surface, tolerance) { return None; }
             return if same(c, a, rho) || same(p, b, r) { None } else { Some(f64::INFINITY) };
+        }
+        // On the cylinder of radius s about the pair's own axis, and on the conoid of the same pair; nothing else.
+        Curve::RadialPair { c, a, rho, p, b, r, branch, s, .. } => {
+            let on_cylinder = match *surface {
+                Surface::Cylinder { p: fp, a: fa, r: fr, .. } => {
+                    let w = c.sub(fp);
+                    fa.cross(a).length() <= 1e-9 && w.sub(fa.scale(w.dot(fa))).length() <= tolerance && (fr - s).abs() <= tolerance
+                }
+                _ => false,
+            };
+            return if on_cylinder || same_conoid(c, a, rho, p, b, r, branch, surface, tolerance) { None } else { Some(f64::INFINITY) };
         }
         // A Bezier curve lies within its control points' hull: on a plane, their distances bound it; on a general
         // surface of revolution with a Bezier meridian, it must be that meridian (or its reverse) in one half-plane.
@@ -254,6 +302,8 @@ pub(crate) fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> O
     };
     let worst = match *surface {
         Surface::Spline { .. } => f64::INFINITY,
+        // No circle or ellipse lies on a conoid whose height varies (the admitted faces are bounded by rulings and rims).
+        Surface::Conoid { .. } => f64::INFINITY,
         Surface::Plane { p, n, .. } => c.sub(p).dot(n).abs() + (u.dot(n).powi(2) + v.dot(n).powi(2)).sqrt(),
         Surface::Cylinder { p, a, r, .. } => {
             // |perp(c - p + u cos t + v sin t)|^2 - r^2 = k0 + k1 cos t + k2 sin t + k3 cos 2t + k4 sin 2t.

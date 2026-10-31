@@ -27,7 +27,11 @@
 //!        loops on the one cap facing d; refused by name when the body is not a straight-through plate; rebuild.rs),
 //!     14 read DXF (a path -> the drawing's layers and curves as seen from above, exact or as lines and arcs;
 //!        dxf::wire), 15 write DXF (layers and curves -> an R12 DXF at the path; dxf::wire),
-//!     16 read STEP (UTF-8 path -> all supported standalone solid bodies; step::wire).
+//!     16 read STEP (UTF-8 path -> all supported standalone solid bodies; step::wire),
+//!     19 normalized pipe end waste (pipe axis point o, unit d from the cut end into the material, unit seam x square
+//!        to d, inner and outer wall radii, mating cylinder axis point p, unit axis b, radius, then the band's inner
+//!        and outer radii and its far level along d: 21 values -> the waste band whose top is the radial conoid of
+//!        the deeper wall's crossing (GCmaker's Normalize End), followed by its volume; normalize.rs).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
@@ -55,6 +59,7 @@ pub const OP_DXF_WRITE: u32 = 15;
 pub const OP_STEP_READ: u32 = 16;
 pub const OP_STEP_WRITE: u32 = 17;
 pub const OP_STL_READ: u32 = 18;
+pub const OP_NORMALIZED_END: u32 = 19;
 
 pub struct Request {
     pub op: u32,
@@ -195,6 +200,19 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             Ok(tessellate::write_mesh(&tessellate::tessellate(&body, chord)?))
         }
         OP_TRANSFORM => transform(&request.data, tol),
+        OP_NORMALIZED_END => {
+            let (o, d, x) = (reader.point()?, reader.point()?, reader.point()?);
+            let (ri, ro) = (reader.next()?, reader.next()?);
+            let (p, b, rc) = (reader.point()?, reader.point()?, reader.next()?);
+            let (sa, sb, far) = (reader.next()?, reader.next()?, reader.next()?);
+            reader.finish()?;
+            let envelope = crate::normalize::Envelope { o, d, x, ri, ro, p, b, rc };
+            let (body, volume) = crate::normalize::waste_tool(&envelope, sa, sb, far, tol)?;
+            topology::check(&body, tol).map_err(|e| KernelError::Internal(format!("normalized end built an invalid solid: {e}")))?;
+            let mut out = write_body(&body);
+            out.push(volume);
+            Ok(out)
+        }
         OP_REVOLVE => {
             let (p, a, x) = (reader.point()?, reader.point()?, reader.point()?);
             let n = reader.count()?;

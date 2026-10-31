@@ -57,6 +57,12 @@ pub enum Curve {
     /// perpendicular to b) chosen by `branch` (+1 or -1). The discriminant is positive over [t0, t1]. Which cylinder
     /// is the parameter one is the writer's choice of chart (the one smooth over the trim), not which is the tool.
     CylinderPair { c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t0: f64, t1: f64 },
+    /// A CylinderPair's heights carried along the radius (Claude 2026-10-31, Bob's Normalize End): the point
+    /// c + s (cos t x + sin t y) + h(t) a, with h(t) the CylinderPair's root at t (found on the parameter cylinder of
+    /// radius `rho`, exactly as type 4). It lies on the radial conoid (`Surface::Conoid`) of the same pair, and on the
+    /// cylinder of radius `s` about (c, a); at s = rho it is the CylinderPair itself. Wire type 7: type 4's twenty
+    /// values, then s.
+    RadialPair { c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t0: f64, t1: f64, s: f64 },
     /// A cubic Bezier curve (Claude 2026-10-29, revolved Bezier meridians), wire type 5: control points p0..p3, t in [0, 1].
     Bezier { p: [Vec3; 4] },
     /// Positive-weight rational cubic, t in [0, 1]. Wire type 6: four points then four weights.
@@ -163,6 +169,58 @@ pub fn pair_trim_touches(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, 
     })
 }
 
+/// A RadialPair's (or a conoid's) point less c at radius s and angle t, and its derivative in t: the pair's
+/// height h(t) (the part of the pair's point along a) carried to radius s.
+#[allow(clippy::too_many_arguments)]
+pub fn radial_eval(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, s: f64, t: f64, side: f64)
+    -> (Vec3, Vec3) {
+    let (q, dq, _) = pair_eval_sided(c, a, x, rho, p, b, r, branch, t, side);
+    let y = a.cross(x);
+    let (h, dh) = (q.dot(a), dq.dot(a));
+    let u = x.scale(t.cos()).add(y.scale(t.sin()));
+    let v = x.scale(-t.sin()).add(y.scale(t.cos()));
+    (u.scale(s).add(a.scale(h)), v.scale(s).add(a.scale(dh)))
+}
+
+/// The pair's height h(t) and its slope h'(t) (along a, from c).
+#[allow(clippy::too_many_arguments)]
+pub fn pair_height(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t: f64) -> (f64, f64) {
+    let (q, dq, _) = pair_eval(c, a, x, rho, p, b, r, branch, t);
+    (q.dot(a), dq.dot(a))
+}
+
+/// A proved bound of |h''(t)| for a pair whose discriminant is at least `floor` > 0 over the interval considered:
+/// h = (-beta + branch sqrt S) / alpha (alpha = |a'|^2 constant), with |beta''| <= rho |a'| (beta is a constant plus
+/// perp(Q - c).a', Q - c turning at radius rho), |S'| <= |s1| + |s2| + 2 (|s3| + |s4|), |S''| <= |s1| + |s2| + 4 (|s3| +
+/// |s4|), and (sqrt S)'' = S'' / (2 sqrt S) - S'^2 / (4 S^(3/2)).
+pub fn pair_bend_bound(a: Vec3, rho: f64, b: Vec3, k: &[f64; 5], floor: f64) -> f64 {
+    let ap = a.sub(b.scale(a.dot(b)));
+    let alpha = ap.dot(ap);
+    let d1 = k[1].abs() + k[2].abs() + 2.0 * (k[3].abs() + k[4].abs());
+    let d2 = k[1].abs() + k[2].abs() + 4.0 * (k[3].abs() + k[4].abs());
+    let root = floor.sqrt();
+    (rho * alpha.sqrt() + d2 / (2.0 * root) + d1 * d1 / (4.0 * floor * root)) / alpha
+}
+
+/// A proved range of the pair's height h(t) over [t0, t1] (None when the discriminant is not proved positive there):
+/// on each of n steps h lies within its chord's ends widened by max |h''| step^2 / 8.
+#[allow(clippy::too_many_arguments)]
+pub fn pair_height_range(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t0: f64, t1: f64, n: usize)
+    -> Option<(f64, f64)> {
+    let k = pair_disc_coefficients(c, a, x, rho, p, b, r);
+    let floor = pair_disc_lower_bound(&k, t0, t1, n.max(64));
+    if !(floor > 0.0) { return None; }
+    let step = (t1 - t0) / n as f64;
+    let pad = pair_bend_bound(a, rho, b, &k, floor) * step * step / 8.0;
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for i in 0..=n {
+        let h = pair_height(c, a, x, rho, p, b, r, branch, t0 + step * i as f64).0;
+        lo = lo.min(h);
+        hi = hi.max(h);
+    }
+    (lo.is_finite() && hi.is_finite() && pad.is_finite()).then_some((lo - pad, hi + pad))
+}
+
 /// The control points of a cubic Bezier curve's piece over [a, b] (de Casteljau).
 pub fn bezier_piece(p: [Vec3; 4], a: f64, b: f64) -> [Vec3; 4] {
     let split = |p: [Vec3; 4], t: f64| -> ([Vec3; 4], [Vec3; 4]) {
@@ -187,7 +245,8 @@ impl Curve {
     pub fn domain(&self) -> (f64, f64) {
         match self {
             Curve::Line { .. } => (0.0, 1.0),
-            Curve::Arc { t0, t1, .. } | Curve::Conic { t0, t1, .. } | Curve::CylinderPair { t0, t1, .. } => (*t0, *t1),
+            Curve::Arc { t0, t1, .. } | Curve::Conic { t0, t1, .. } | Curve::CylinderPair { t0, t1, .. }
+            | Curve::RadialPair { t0, t1, .. } => (*t0, *t1),
             Curve::Bezier { .. } | Curve::RationalBezier { .. } => (0.0, 1.0),
         }
     }
@@ -202,6 +261,10 @@ impl Curve {
             Curve::Conic { c, u, v, .. } => (Self::conic_point(c, u, v, t), u.scale(-t.sin()).add(v.scale(t.cos()))),
             Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => {
                 let (offset, d, _) = pair_eval_sided(c, a, x, rho, p, b, r, branch, t, Self::pair_side(t, t0, t1));
+                (c.add(offset), d)
+            }
+            Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => {
+                let (offset, d) = radial_eval(c, a, x, rho, p, b, r, branch, s, t, Self::pair_side(t, t0, t1));
                 (c.add(offset), d)
             }
             Curve::RationalBezier { p, w } => crate::rational::eval(p, w, t),
@@ -222,6 +285,10 @@ impl Curve {
                 let (offset, d, _) = pair_eval_sided(c, a, x, rho, p, b, r, branch, t, Self::pair_side(t, t0, t1));
                 (c.sub(o).add(offset), d)
             }
+            Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => {
+                let (offset, d) = radial_eval(c, a, x, rho, p, b, r, branch, s, t, Self::pair_side(t, t0, t1));
+                (c.sub(o).add(offset), d)
+            }
             Curve::RationalBezier { p, w } => crate::rational::eval(p.map(|q| q.sub(o)), w, t),
             _ => { let (q, d) = self.eval(t); (q.sub(o), d) }
         }
@@ -233,7 +300,7 @@ impl Curve {
             Curve::Line { a, .. } => *a,
             Curve::Arc { c, n, x, r, t0, .. } => Self::point_at_angle(*c, *n, *x, *r, *t0),
             Curve::Conic { c, u, v, t0, .. } => Self::conic_point(*c, *u, *v, *t0),
-            Curve::CylinderPair { t0, .. } => self.eval(*t0).0,
+            Curve::CylinderPair { t0, .. } | Curve::RadialPair { t0, .. } => self.eval(*t0).0,
             Curve::Bezier { p } | Curve::RationalBezier { p, .. } => p[0],
         }
     }
@@ -242,7 +309,7 @@ impl Curve {
             Curve::Line { b, .. } => *b,
             Curve::Arc { c, n, x, r, t1, .. } => Self::point_at_angle(*c, *n, *x, *r, *t1),
             Curve::Conic { c, u, v, t1, .. } => Self::conic_point(*c, *u, *v, *t1),
-            Curve::CylinderPair { t1, .. } => self.eval(*t1).0,
+            Curve::CylinderPair { t1, .. } | Curve::RadialPair { t1, .. } => self.eval(*t1).0,
             Curve::Bezier { p } | Curve::RationalBezier { p, .. } => p[3],
         }
     }
@@ -253,6 +320,9 @@ impl Curve {
             Curve::Conic { c, u, v, t0, t1 } => Curve::Conic { c: c.add(d), u: *u, v: *v, t0: *t0, t1: *t1 },
             Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => Curve::CylinderPair {
                 c: c.add(d), a: *a, x: *x, rho: *rho, p: p.add(d), b: *b, r: *r, branch: *branch, t0: *t0, t1: *t1,
+            },
+            Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => Curve::RadialPair {
+                c: c.add(d), a: *a, x: *x, rho: *rho, p: p.add(d), b: *b, r: *r, branch: *branch, t0: *t0, t1: *t1, s: *s,
             },
             Curve::Bezier { p } => Curve::Bezier { p: p.map(|q| q.add(d)) },
             Curve::RationalBezier { p, w } => Curve::RationalBezier { p: p.map(|q| q.add(d)), w: *w },
@@ -271,6 +341,10 @@ impl Curve {
             // t -> -t flips y = a x x, so a flips; h a must stay, so h and with it the branch flip (Astra).
             Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => Curve::CylinderPair {
                 c: *c, a: a.scale(-1.0), x: *x, rho: *rho, p: *p, b: *b, r: *r, branch: -branch, t0: -t1, t1: -t0,
+            },
+            // As the pair: the height and the radius at each angle stay; only the direction of travel turns.
+            Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => Curve::RadialPair {
+                c: *c, a: a.scale(-1.0), x: *x, rho: *rho, p: *p, b: *b, r: *r, branch: -branch, t0: -t1, t1: -t0, s: *s,
             },
             Curve::Bezier { p } => Curve::Bezier { p: [p[3], p[2], p[1], p[0]] },
             Curve::RationalBezier { p, w } => Curve::RationalBezier { p: [p[3], p[2], p[1], p[0]], w: [w[3], w[2], w[1], w[0]] },
@@ -310,6 +384,12 @@ pub enum Surface {
     /// p + z(u) a + r(u) rho(t) for the meridian (r, z)(u) in the frame of unit axis `a` and unit `x` perpendicular.
     /// Its natural normal r (z' rho - r' a) points right of the meridian's travel.
     Revolution { p: Vec3, a: Vec3, x: Vec3, m: crate::meridian::Meridian },
+    /// A right conoid whose rulings are radial lines across the axis (Claude 2026-10-31, Bob's Normalize End: the radial
+    /// torch's end face): S(t, s) = c + s (cos t x + sin t y) + h(t) a, y = a x x, h(t) the height of the CylinderPair
+    /// (c, a, x, rho; p, b, r, branch) at t (`Curve::CylinderPair`). Unit axis `a`, unit `x` perpendicular to it. Its
+    /// natural normal S_t x S_s = h'(t) (cos t y - sin t x) - s a. Faces stay where s > 0 and the pair's discriminant is
+    /// positive (checked over the whole turn when read). Wire type 9: c, a, x, rho, p, b, r, branch.
+    Conoid { c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64 },
 }
 
 impl Surface {

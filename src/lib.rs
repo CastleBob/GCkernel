@@ -13,6 +13,7 @@ pub mod geom;
 pub mod mass;
 pub mod meridian;
 pub mod neutral;
+pub mod normalize;
 pub mod protocol;
 pub mod provenance;
 pub mod rebuild;
