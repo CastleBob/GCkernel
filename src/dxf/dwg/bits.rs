@@ -320,7 +320,7 @@ pub(super) fn method_index(rgb: u32) -> i32 {
         0xC0 => 256,
         0xC1 => 0,
         0xC3 => (rgb & 0xff) as i32,
-        0xC2 => primary(rgb & 0xff_ffff).unwrap_or(256),
+        0xC2 => nearest_index(rgb & 0xff_ffff),
         _ => 7,
     }
 }
@@ -406,17 +406,105 @@ impl<'a> Bits<'a> {
     }
 }
 
-/// The colour index of a true colour that is exactly one of the seven standard colours (1 red, 2 yellow, 3 green,
-/// 4 cyan, 5 blue, 6 magenta, 7 white or black); other true colours have no exact index.
-fn primary(rgb: u32) -> Option<i32> {
-    Some(match rgb {
-        0xFF0000 => 1,
-        0xFFFF00 => 2,
-        0x00FF00 => 3,
-        0x00FFFF => 4,
-        0x0000FF => 5,
-        0xFF00FF => 6,
-        0xFFFFFF | 0x000000 => 7,
-        _ => return None,
-    })
+/// The RGB value of AutoCAD Colour Index `index` (1-255), from the palette's documented structure: 1-7 the named
+/// colours (red, yellow, green, cyan, blue, magenta, white), 8 and 9 greys (128 and 192); 10-249 24 hues 15 degrees
+/// apart (index / 10 - 1 gives the hue, red first), each in five brightnesses (100, 80, 60, 50, 30 %) at full and
+/// half saturation (index % 10: even full, odd half; 0-1 brightest); 250-255 greys from 20 % to 100 % in steps of
+/// 16 %. Channel values are the exact HSV values truncated to whole numbers (so 50 % is 127, 30 % is 76).
+pub(crate) fn aci_rgb(index: u8) -> [u8; 3] {
+    match index {
+        0 => [0, 0, 0],
+        1 => [255, 0, 0],
+        2 => [255, 255, 0],
+        3 => [0, 255, 0],
+        4 => [0, 255, 255],
+        5 => [0, 0, 255],
+        6 => [255, 0, 255],
+        7 => [255, 255, 255],
+        8 => [128, 128, 128],
+        9 => [192, 192, 192],
+        250..=255 => {
+            let v = (255 * (20 + 16 * (index as u32 - 250)) / 100) as u8;
+            [v, v, v]
+        }
+        _ => {
+            let hue = (index as u32 - 10) / 10; // 0..23, 15 degrees each
+            let shade = index as u32 % 10;
+            let brightness = [10, 8, 6, 5, 3][(shade / 2) as usize]; // tenths
+            let half = shade % 2 == 1;
+            // In 1/80ths of a unit so every value is a whole number before truncation.
+            let max = 255 * brightness * 8;
+            let min = if half { max / 2 } else { 0 };
+            let step = (max - min) * (hue % 4) / 4;
+            let (rise, fall) = (min + step, max - step);
+            let [r, g, b] = match hue / 4 {
+                0 => [max, rise, min],
+                1 => [fall, max, min],
+                2 => [min, max, rise],
+                3 => [min, fall, max],
+                4 => [rise, min, max],
+                _ => [max, min, fall],
+            };
+            [(r / 80) as u8, (g / 80) as u8, (b / 80) as u8]
+        }
+    }
+}
+
+/// The AutoCAD Colour Index (1-255) nearest a true colour 0xRRGGBB by Euclidean distance in RGB; ties go to the
+/// lower index (so the seven named colours keep their indexes 1-7, and black is 18).
+pub(crate) fn nearest_index(rgb: u32) -> i32 {
+    let want = [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8];
+    let mut best = (u32::MAX, 7);
+    for index in 1..=255u8 {
+        let c = aci_rgb(index);
+        let d: u32 = (0..3).map(|k| {
+            let e = i32::from(c[k]) - i32::from(want[k]);
+            (e * e) as u32
+        }).sum();
+        if d < best.0 {
+            best = (d, index as i32);
+        }
+    }
+    best.1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{aci_rgb, method_index, nearest_index};
+
+    #[test]
+    fn the_colour_index_palette() {
+        let known: [(u8, [u8; 3]); 29] = [
+            (1, [255, 0, 0]), (2, [255, 255, 0]), (3, [0, 255, 0]), (4, [0, 255, 255]), (5, [0, 0, 255]),
+            (6, [255, 0, 255]), (7, [255, 255, 255]), (8, [128, 128, 128]), (9, [192, 192, 192]),
+            (10, [255, 0, 0]), (11, [255, 127, 127]), (12, [204, 0, 0]), (13, [204, 102, 102]), (14, [153, 0, 0]),
+            (15, [153, 76, 76]), (16, [127, 0, 0]), (17, [127, 63, 63]), (18, [76, 0, 0]), (19, [76, 38, 38]),
+            (20, [255, 63, 0]), (21, [255, 159, 127]), (30, [255, 127, 0]), (40, [255, 191, 0]), (50, [255, 255, 0]),
+            (96, [0, 127, 0]), (130, [0, 255, 255]), (170, [0, 0, 255]), (250, [51, 51, 51]), (251, [91, 91, 91]),
+        ];
+        for (index, rgb) in known {
+            assert_eq!(aci_rgb(index), rgb, "ACI {index}");
+        }
+        let greys: Vec<[u8; 3]> = (250..=255).map(aci_rgb).collect();
+        assert_eq!(greys, vec![[51; 3], [91; 3], [132; 3], [173; 3], [214; 3], [255; 3]]);
+    }
+
+    #[test]
+    fn true_colours_take_the_nearest_index() {
+        for index in 1..=255u8 {
+            let [r, g, b] = aci_rgb(index);
+            let rgb = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+            // Exact palette colours give their own index, or a lower one with the same colour (10 is 1, 255 is 7).
+            let found = nearest_index(rgb);
+            assert!(found <= index as i32 && aci_rgb(found as u8) == [r, g, b], "{index} -> {found}");
+        }
+        assert_eq!(nearest_index(0x000000), 18);
+        assert_eq!(nearest_index(0x008000), 96);
+        assert_eq!(nearest_index(0xFE0101), 1);
+        assert_eq!(nearest_index(0x808080), 8);
+        assert_eq!(method_index(0xC2_000000), 18);
+        assert_eq!(method_index(0xC2_FFFFFF), 7);
+        assert_eq!(method_index(0xC3_000005), 5);
+        assert_eq!(method_index(0xC0_000000), 256);
+    }
 }
