@@ -618,7 +618,7 @@ impl Walk<'_, '_> {
             }
             let rel = command.is_ascii_lowercase();
             let at = |p: P2, cur: P2| if rel { [cur[0] + p[0], cur[1] + p[1]] } else { p };
-            let mut pair = |n: &mut Numbers| -> Result<P2, KernelError> { Ok([n.number().ok_or_else(fail)?, n.number().ok_or_else(fail)?]) };
+            let pair = |n: &mut Numbers| -> Result<P2, KernelError> { Ok([n.number().ok_or_else(fail)?, n.number().ok_or_else(fail)?]) };
             let (mut cubic, mut quad) = (None, None);
             match command.to_ascii_uppercase() {
                 b'M' => {

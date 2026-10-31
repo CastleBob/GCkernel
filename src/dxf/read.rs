@@ -9,17 +9,19 @@ use crate::KernelError;
 
 type P3 = [f64; 3];
 
-/// One entity record: its type and pairs; a POLYLINE's VERTEX records (or an INSERT's ATTRIBs) as children.
-struct Entity {
-    kind: String,
-    pairs: Vec<Pair>,
-    children: Vec<Entity>,
+/// One entity record: its type and pairs; a POLYLINE's VERTEX records (or an INSERT's ATTRIBs) as children. The
+/// DWG reader builds the same records (DXF group codes) so both formats share everything below.
+pub(crate) struct Entity {
+    pub(crate) kind: String,
+    pub(crate) pairs: Vec<Pair>,
+    pub(crate) children: Vec<Entity>,
 }
 
-struct Block {
-    base: P3,
-    entities: Vec<Entity>,
-    xref: bool,
+/// A block definition; `blocks` maps are keyed by the upper-cased block name.
+pub(crate) struct Block {
+    pub(crate) base: P3,
+    pub(crate) entities: Vec<Entity>,
+    pub(crate) xref: bool,
 }
 
 /// x -> m x + t.
@@ -150,11 +152,19 @@ fn read_parts(bytes: &[u8], header_only: bool) -> Result<Drawing, KernelError> {
     if sections == 0 {
         return Err(KernelError::InvalidInput("this is not a DXF file (it has no SECTION)".into()));
     }
+    assemble(drawing, &blocks, &model)
+}
+
+/// Model-space entities (and the blocks they insert) as the drawing seen from above. `drawing` carries the header and
+/// layer table already read; entities flagged 67 = 1 are paper space.
+pub(crate) fn assemble(mut drawing: Drawing, blocks: &HashMap<String, Block>, model: &[Entity])
+    -> Result<Drawing, KernelError>
+{
     if drawing.layers.is_empty() {
         drawing.layer_index("0");
     }
 
-    let mut x = Explode { blocks: &blocks, stack: Vec::new(), notes: Notes::default() };
+    let mut x = Explode { blocks, stack: Vec::new(), notes: Notes::default() };
     let mut paper = Vec::new();
     for (group, entity) in model.iter().enumerate() {
         if flag(entity, 67) == 1 {
