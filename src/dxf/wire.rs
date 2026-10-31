@@ -1,7 +1,7 @@
 //! Ops 14 READ DXF and 15 WRITE DXF on the numeric wire. Text (a path, a layer name, a message) travels as its UTF-8
 //! byte count followed by one value per byte.
 //!
-//! Op 14 request: [1, mode (0 exact, 1 lines and arcs), fit tolerance (drawing units), path].
+//! Op 14 request: [1, mode (0 exact, 1 lines and arcs, 2 header and layers only), fit tolerance (drawing units), path].
 //! Reply: [1, $INSUNITS or -1, $MEASUREMENT or -1, $ACADVER text, layer count, per layer (colour, flags 1 frozen
 //!        2 off 4 locked, name), curve count, per curve (kind, layer, colour, group, geometry), skipped count, per
 //!        entry (type name, count), warning count, per warning (text)].
@@ -11,7 +11,7 @@
 //! vx vy t0 t1), 4 spline (degree, knot count, knots, point count, x y per point, weight count, weights),
 //! 5 polyline (closed, count, x y bulge per vertex; written only).
 
-use super::{fit, read, write_r12, Curve, Drawing, Geometry, Layer};
+use super::{fit, read, read_header, write_r12, Curve, Drawing, Geometry, Layer};
 use crate::KernelError;
 
 struct Cursor<'a> {
@@ -73,7 +73,7 @@ pub fn read_op(data: &[f64]) -> Result<Vec<f64>, KernelError> {
     let path = c.text()?;
     c.finish()?;
     let bytes = std::fs::read(&path).map_err(|e| KernelError::InvalidInput(format!("could not read '{path}': {e}")))?;
-    let mut drawing = read(&bytes)?;
+    let mut drawing = if mode == 2.0 { read_header(&bytes)? } else { read(&bytes)? };
     if mode == 1.0 {
         let mut fitted = Vec::with_capacity(drawing.curves.len());
         for curve in &drawing.curves {
@@ -82,7 +82,7 @@ pub fn read_op(data: &[f64]) -> Result<Vec<f64>, KernelError> {
             }
         }
         drawing.curves = fitted;
-    } else if mode != 0.0 {
+    } else if mode != 0.0 && mode != 2.0 {
         return Err(KernelError::InvalidInput(format!("DXF read mode {mode}")));
     }
 

@@ -542,3 +542,97 @@ fn corpus_reads_and_fits() {
     }
     assert!(!files.is_empty());
 }
+
+#[test]
+fn fit_point_splines_leave_and_arrive_along_their_tangents() {
+    let d = read(&entities(&[
+        (0, "SPLINE"), (70, "8"), (71, "3"), (74, "3"),
+        (12, "0"), (22, "1"), (32, "0"), (13, "1"), (23, "0"), (33, "0"),
+        (11, "0"), (21, "0"), (31, "0"), (11, "2"), (21, "2"), (31, "0"), (11, "4"), (21, "1"), (31, "0"),
+    ])).unwrap();
+    let g = geometry(&d);
+    let Geometry::Spline { degree, knots, points, weights } = g[0] else { panic!("{:?}", g[0]) };
+    let (p0, d0) = fit::spline_at(*degree, knots, points, weights, *degree, knots[*degree]);
+    let last = points.len() - 1;
+    let (p1, d1) = fit::spline_at(*degree, knots, points, weights, last, knots[last + 1]);
+    assert!(near_p(p0, [0.0, 0.0]) && near_p(p1, [4.0, 1.0]));
+    assert!(d0[0].abs() < 1e-9 && d0[1] > 0.0, "leaves straight up: {d0:?}");
+    assert!(d1[1].abs() < 1e-9 && d1[0] > 0.0, "arrives heading +X: {d1:?}");
+    let along = sample(g[0], 4000);
+    assert!(along.iter().map(|p| fit::dist(*p, [2.0, 2.0])).fold(f64::MAX, f64::min) < 2e-3);
+}
+
+#[test]
+fn header_only_read_skips_the_drawing() {
+    let file = dxf(&[
+        (0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"), (70, "4"), (0, "ENDSEC"),
+        (0, "SECTION"), (2, "ENTITIES"), (0, "LINE"), (10, "0"), (20, "0"), (11, "1"), (21, "0"), (0, "ENDSEC"), (0, "EOF"),
+    ]);
+    let d = gc_kernel::dxf::read_header(&file).unwrap();
+    assert_eq!((d.insunits, d.curves.len()), (Some(4), 0));
+}
+
+/// Damaged files give an error or a drawing, never a panic: every byte of a real-looking file flipped, cut short or
+/// repeated, ASCII and binary.
+#[test]
+fn damaged_files_never_panic() {
+    let pairs = [
+        (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "B"), (10, "0"), (20, "0"), (30, "0"),
+        (0, "ARC"), (10, "1"), (20, "0"), (30, "0"), (40, "1"), (50, "0"), (51, "90"), (0, "ENDBLK"), (0, "ENDSEC"),
+        (0, "SECTION"), (2, "ENTITIES"),
+        (0, "LWPOLYLINE"), (90, "3"), (70, "1"), (10, "0"), (20, "0"), (42, "0.5"), (10, "2"), (20, "0"), (10, "2"), (20, "2"),
+        (0, "SPLINE"), (71, "3"), (72, "8"), (73, "4"), (40, "0"), (40, "0"), (40, "0"), (40, "0"), (40, "1"), (40, "1"), (40, "1"), (40, "1"),
+        (10, "0"), (20, "0"), (30, "0"), (10, "1"), (20, "2"), (30, "0"), (10, "3"), (20, "-2"), (30, "0"), (10, "4"), (20, "0"), (30, "0"),
+        (0, "ELLIPSE"), (10, "0"), (20, "0"), (30, "0"), (11, "4"), (21, "0"), (31, "0"), (40, "0.5"),
+        (0, "INSERT"), (2, "B"), (10, "0"), (20, "0"), (30, "0"), (41, "2"), (70, "2"), (71, "2"), (44, "3"), (45, "3"),
+        (0, "ENDSEC"), (0, "EOF"),
+    ];
+    let mut seed = 0x2545F4914F6CDD1Du64;
+    let mut next = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+    for base in [dxf(&pairs), binary(&pairs, true), binary(&pairs, false)] {
+        for cut in (0..base.len()).step_by(3) {
+            try_read(&base[..cut]);
+        }
+        for _ in 0..3000 {
+            let mut f = base.clone();
+            for _ in 0..1 + next() % 4 {
+                let at = (next() as usize) % f.len();
+                match next() % 4 {
+                    0 => f[at] = next() as u8,
+                    1 => f[at] = b"0123456789-.eE \n"[(next() % 16) as usize],
+                    2 => { f.remove(at); }
+                    _ => { let b = f[at]; f.insert(at, b); }
+                }
+            }
+            try_read(&f);
+        }
+    }
+}
+
+fn try_read(bytes: &[u8]) {
+    let owned = bytes.to_vec();
+    let outcome = std::panic::catch_unwind(move || {
+        if let Ok(d) = read(&owned) {
+            for c in &d.curves {
+                let _ = fit::lines_and_arcs(&c.geometry, 1e-3);
+            }
+            let _ = write_r12(&d, 1e-3);
+        }
+    });
+    assert!(outcome.is_ok(), "panicked on {:?}", String::from_utf8_lossy(bytes));
+}
+
+#[test]
+fn a_hundred_thousand_entities_read_in_well_under_a_second() {
+    let mut s = String::from("0\nSECTION\n2\nENTITIES\n");
+    for i in 0..100_000 {
+        let x = i as f64 * 0.01;
+        s.push_str(&format!("0\nLINE\n8\nCUT\n10\n{x}\n20\n0\n30\n0\n11\n{x}\n21\n1\n31\n0\n"));
+    }
+    s.push_str("0\nENDSEC\n0\nEOF\n");
+    let start = std::time::Instant::now();
+    let d = read(s.as_bytes()).unwrap();
+    let took = start.elapsed();
+    assert_eq!(d.curves.len(), 100_000);
+    assert!(took.as_secs_f64() < 1.0, "took {took:?}");
+}

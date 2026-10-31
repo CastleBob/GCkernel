@@ -13,7 +13,7 @@ mod read;
 pub mod wire;
 mod write;
 
-pub use read::read;
+pub use read::{read, read_header};
 pub use write::write_r12;
 
 /// A point or vector in the drawing's XY plane.
