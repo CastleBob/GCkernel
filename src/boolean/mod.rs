@@ -22,6 +22,11 @@ enum Domain {
     Capsule,
 }
 
+/// The exact drill the bore domain takes: one cylinder wall between two caps, one seam.
+fn drill(tool: &crate::neutral::Body) -> bool {
+    tool.vertices.len() == 2 && tool.edges.len() == 3 && tool.faces.len() == 3
+}
+
 /// The one domain a cut runs in, chosen from the operands before anything is built.
 fn select(
     body: &crate::neutral::Body,
@@ -61,7 +66,7 @@ fn select(
             Ok(Domain::BoxCut)
         }
         0 => Ok(Domain::Rectilinear),
-        1 if tool.vertices.len() == 2 && tool.edges.len() == 3 && tool.faces.len() == 3 => Ok(Domain::Bore),
+        1 if drill(tool) => Ok(Domain::Bore),
         1 => Ok(Domain::Cross),
         2 => Ok(Domain::Capsule),
         _ => Err(crate::KernelError::Unsupported(

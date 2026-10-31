@@ -767,7 +767,7 @@ fn prism_along(tool: &Body, k: usize) -> bool {
 /// Domain selection, before anything is built (rule proposed to Codex 2026-10-29): both operands are right prisms
 /// along one axis with the tool spanning the body, and either the tool's section is not strictly inside the body's
 /// (it meets or crosses the outline or a hole) or the body is no longer a plain box. Clear interior cuts in a plain
-/// box keep their existing domains.
+/// box keep their existing domains, unless no passage domain takes the tool's arcs.
 pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
     for k in (0..3).filter(|&k| prism_along(tool, k) && prism_along(body, k)) {
         let (Ok(Some(Prism { loops: a, lo, hi, .. })), Ok(Some(Prism { loops: b, lo: tlo, hi: thi, .. }))) = (prism(body, k, tol), prism(tool, k, tol)) else {
@@ -783,7 +783,11 @@ pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
         // fit them (Bob's p9999: a hole after its corner cut).
         let plain_box = body.faces.len() == 6
             && body.faces.iter().all(|f| matches!(f.surface, Surface::Plane { n, .. } if [n.x, n.y, n.z].iter().filter(|c| **c != 0.).count() == 1));
-        return meets || elliptic || !plain_box || !matches!(winding(&a, b[0][0].start()), Ok(1));
+        // The passage domains take tools with no arcs, the exact drill and the two-arc slot; any other arc count
+        // (a rounded rectangle, a D) has no passage domain and runs here (E3c, Codex 2026-10-30).
+        let arcs = tool.faces.iter().filter(|f| matches!(f.surface, Surface::Cylinder { .. })).count();
+        let passage = match arcs { 0 | 2 => true, 1 => super::drill(tool), _ => false };
+        return meets || elliptic || !plain_box || !passage || !matches!(winding(&a, b[0][0].start()), Ok(1));
     }
     false
 }

@@ -583,3 +583,74 @@ fn bobs_p9999_corner_cut_history() {
     // Two plate sides kept whole, the two the legs cross trimmed, the hypotenuse from the triangle.
     assert_eq!((count(&prov, FROM_TOOL_FACE), prov.faces.iter().filter(|r| r.role == FROM_BODY_FACE && r.refs[1] == 0).count()), (1, 2));
 }
+
+// ---- E3c: first interior sketch cuts whose arcs no passage domain takes run in the section domain ----
+
+fn arc(cx: f64, cy: f64, r: f64, from: f64, sweep: f64) -> Curve {
+    Curve::Arc { c: p(cx, cy), n: Z, x: Vec3::new(from.cos(), from.sin(), 0.0), r, t0: 0.0, t1: sweep }
+}
+
+/// Rounded rectangle (x0..x1, y0..y1), corner radius r, counter-clockwise: four arcs.
+fn rounded(x0: f64, y0: f64, x1: f64, y1: f64, r: f64) -> Vec<Curve> {
+    vec![
+        line((x0 + r, y0), (x1 - r, y0)), arc(x1 - r, y0 + r, r, -PI / 2.0, PI / 2.0),
+        line((x1, y0 + r), (x1, y1 - r)), arc(x1 - r, y1 - r, r, 0.0, PI / 2.0),
+        line((x1 - r, y1), (x0 + r, y1)), arc(x0 + r, y1 - r, r, PI / 2.0, PI / 2.0),
+        line((x0, y1 - r), (x0, y0 + r)), arc(x0 + r, y0 + r, r, PI, PI / 2.0),
+    ]
+}
+
+/// A D: a flat bottom and a half circle on top, counter-clockwise: one arc.
+fn d_shape(cx: f64, cy: f64, r: f64) -> Vec<Curve> { vec![line((cx - r, cy), (cx + r, cy)), arc(cx, cy, r, 0.0, PI)] }
+
+fn through(loop_: Vec<Curve>) -> Body { extrude(&Profile { loops: vec![loop_], n: Z, low: -1.0, high: 1.5 }, TOL).unwrap() }
+
+fn volume(body: &Body) -> f64 { gc_kernel::mass::measure(body, TOL).unwrap().volume }
+
+/// Both refused outright before E3c; now cut exactly, recorded, and read back by op 13 as one hole of the tool's curves.
+#[test]
+fn first_interior_sketch_cuts_run_in_the_section_domain() {
+    let r = 0.5;
+    for (tool, area, curves) in [
+        (through(rounded(1.5, 1.0, 4.5, 3.0, r)), 6.0 - (4.0 - PI) * r * r, 8),
+        (through(d_shape(3.0, 2.0, 0.75)), PI * 0.75 * 0.75 / 2.0, 2),
+    ] {
+        let body = plate();
+        let (result, prov, outcomes) = named(&body, &tool);
+        let want = 0.5 * (24.0 - area);
+        assert!((volume(&result) - want).abs() <= 1e-12 * want, "{} vs {want}", volume(&result));
+        // The caps are modified, the four sides kept; every tool side becomes the hole's wall.
+        let nf = body.faces.len();
+        for (i, out) in outcomes[..nf].iter().enumerate() {
+            assert_eq!(out.code, if is_z_face(&body, i) { MODIFIED } else { UNCHANGED }, "plate face {i}");
+        }
+        assert_eq!(count(&prov, FROM_TOOL_FACE), curves);
+        let profile = gc_kernel::rebuild::prism_profile(&result, Z, TOL).unwrap();
+        assert_eq!(profile.loops.iter().map(|l| l.len()).collect::<Vec<_>>(), [4, curves]);
+    }
+}
+
+/// Either order of a drill and a rounded cut-out gives the same exact plate, every step recorded.
+#[test]
+fn rounded_cutout_and_drill_in_either_order() {
+    let (rounded_tool, hole) = (through(rounded(1.5, 1.0, 4.0, 3.0, 0.5)), drill(5.0, 2.0, 0.4));
+    let a = named(&named(&plate(), &rounded_tool).0, &hole).0;
+    let b = named(&named(&plate(), &hole).0, &rounded_tool).0;
+    let want = 0.5 * (24.0 - (5.0 - (4.0 - PI) * 0.25) - PI * 0.16);
+    for v in [volume(&a), volume(&b)] { assert!((v - want).abs() <= 1e-12 * want, "{v} vs {want}"); }
+}
+
+/// Every interior first cut a passage domain already took keeps that domain (op 12 still names it).
+#[test]
+fn passage_domains_keep_their_first_cuts() {
+    let slot = through(vec![line((2.0, 1.5), (4.0, 1.5)), arc(4.0, 2.0, 0.5, -PI / 2.0, PI), line((4.0, 2.5), (2.0, 2.5)), arc(2.0, 2.0, 0.5, PI / 2.0, PI)]);
+    let turned = through(vec![line((3.0, 1.0), (4.0, 2.0)), line((4.0, 2.0), (3.0, 3.0)), line((3.0, 3.0), (2.0, 2.0)), line((2.0, 2.0), (3.0, 1.0))]);
+    for (tool, domain) in [(block(1.0, 1.0, 2.0, 2.0), "Rectilinear"), (slot, "Capsule"), (turned, "BoxCut")] {
+        match gc_kernel::boolean::cut_named(&plate(), &tool, TOL) {
+            Err(gc_kernel::KernelError::Unsupported(m)) => assert!(m.contains(domain), "{m}"),
+            other => panic!("{domain}: expected its refusal, got {:?}", other.map(|_| ())),
+        }
+        assert!(gc_kernel::boolean::cut(&plate(), &tool, TOL).is_ok(), "{domain} still cuts");
+    }
+    named(&plate(), &drill(2.0, 1.5, 0.5));
+}
