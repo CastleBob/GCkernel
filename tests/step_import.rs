@@ -555,7 +555,8 @@ fn checked_in_real_step_corpus_has_explicit_results() {
             }
         } else {
             assert!(
-                matches!(result, Err(KernelError::Unsupported(_))),
+                matches!(&result, Err(KernelError::Unsupported(_)))
+                    || matches!(&result, Err(KernelError::InvalidInput(s)) if s.contains("Bezier span cannot be certified")),
                 "{}: {result:?}",
                 path.display()
             );
@@ -563,4 +564,153 @@ fn checked_in_real_step_corpus_has_explicit_results() {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
     assert_eq!(total, 19);
+}
+
+fn spline_box(mm: bool, reverse: bool) -> String {
+    let mut data = box_data(mm);
+    let scale = if mm { 25.4 } else { 1.0 };
+    let mut coords = [0.0, 0.2, 0.6, 1.0, 1.5, 2.0];
+    if reverse {
+        coords.reverse();
+    }
+    for (i, x) in coords.iter().enumerate() {
+        data += &format!("#{}=CARTESIAN_POINT('',({},0.,0.));", 600 + i, x * scale);
+    }
+    data=data.replace("#102=LINE('',#1,#101);","#102=B_SPLINE_CURVE_WITH_KNOTS('',3,(#600,#601,#602,#603,#604,#605),.UNSPECIFIED.,.F.,.F.,(4,2,4),(0.,0.4,1.),.UNSPECIFIED.);");
+    if reverse {
+        data = data.replace(
+            "#103=EDGE_CURVE('',#11,#12,#102,.T.);",
+            "#103=EDGE_CURVE('',#11,#12,#102,.F.);",
+        );
+    }
+    file(&data)
+}
+
+#[test]
+fn spline_spans_share_topology_and_preserve_mass_units_and_orientation() {
+    for mm in [false, true] {
+        for reverse in [false, true] {
+            let b = read(&spline_box(mm, reverse)).bodies.remove(0);
+            assert_eq!(
+                (
+                    b.body.vertices.len(),
+                    b.body.edges.len(),
+                    b.body.faces.len()
+                ),
+                (9, 13, 6)
+            );
+            let report = topology::check(&b.body, TOL).unwrap();
+            assert_eq!(report.genus(), 0.0);
+            assert!((b.volume - 24.0).abs() < 1e-10);
+            assert!((mass::measure(&b.body, TOL).unwrap().area - 52.0).abs() < 1e-10);
+            assert_eq!(
+                b.body
+                    .edges
+                    .iter()
+                    .filter(|e| matches!(e.curve, gc_kernel::geom::Curve::Bezier { .. }))
+                    .count(),
+                2
+            );
+            let wire = neutral::write_body(&b.body);
+            let mut decoder = neutral::Reader::with_tolerance(&wire, TOL);
+            topology::check(&decoder.body().unwrap(), TOL).unwrap();
+            decoder.finish().unwrap();
+            assert!(!tessellate::tessellate(&b.body, 0.01)
+                .unwrap()
+                .triangles
+                .is_empty());
+        }
+    }
+}
+
+#[test]
+fn partial_or_malformed_spline_edges_fail_without_partial_body() {
+    refused(
+        &spline_box(false, false).replace("(0,0.,0.)", "(0.5,0.,0.)"),
+        "interior trimming",
+    );
+    refused(
+        &spline_box(false, false).replace("(4,2,4)", "(4,1,4)"),
+        "knot sum",
+    );
+}
+
+// A source-defined polynomial ring within the EXISTING tolerance of its analytic
+// cylinder. No conversion to circles: the source control points must survive.
+fn spline_cylinder_data(spans: usize) -> String {
+    let mut data = cylinder_data();
+    for (curve, height, frame) in [(11, 0.0, 9), (12, 4.0, 10)] {
+        let mut refs = Vec::new();
+        let mut points = Vec::new();
+        let step = std::f64::consts::TAU / spans as f64;
+        let handle = 4.0 / 3.0 * (step / 4.0).tan();
+        for i in 0..spans {
+            let a = i as f64 * step;
+            let b = (i + 1) as f64 * step;
+            let start = (2.0 * a.cos(), 2.0 * a.sin());
+            let end = (2.0 * b.cos(), 2.0 * b.sin());
+            if i == 0 {
+                points.push(start);
+            }
+            points.push((
+                start.0 - 2.0 * handle * a.sin(),
+                start.1 + 2.0 * handle * a.cos(),
+            ));
+            points.push((
+                end.0 + 2.0 * handle * b.sin(),
+                end.1 - 2.0 * handle * b.cos(),
+            ));
+            points.push(if i + 1 == spans { (2.0, 0.0) } else { end });
+        }
+        for (i, (x, y)) in points.iter().enumerate() {
+            let id = 1000 + curve * 100 + i;
+            refs.push(format!("#{id}"));
+            data += &format!("#{id}=CARTESIAN_POINT('',({x},{y},{height}));");
+        }
+        let mult = (0..=spans)
+            .map(|i| if i == 0 || i == spans { "4" } else { "3" })
+            .collect::<Vec<_>>()
+            .join(",");
+        let knots = (0..=spans)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        data=data.replace(&format!("#{curve}=CIRCLE('',#{frame},2.);"),&format!("#{curve}=B_SPLINE_CURVE_WITH_KNOTS('',3,({}),.UNSPECIFIED.,.T.,.F.,({mult}),({knots}),.PIECEWISE_BEZIER_KNOTS.);",refs.join(",")));
+    }
+    data
+}
+
+#[test]
+fn polynomial_spline_cylinder_keeps_source_curves_and_proves_whole_span_agreement() {
+    let source = file(&spline_cylinder_data(16));
+    let imported = read(&source);
+    let body = &imported.bodies[0].body;
+    assert_eq!(body.edges.len(), 33); // two rings of 16 spans and the shared seam
+    assert_eq!(
+        body.edges
+            .iter()
+            .filter(|e| matches!(e.curve, gc_kernel::geom::Curve::Bezier { .. }))
+            .count(),
+        32
+    );
+    topology::check(body, TOL).unwrap();
+    let measured = mass::measure(body, TOL).unwrap();
+    assert!(!measured.exact); // curved face integral uses quadrature, never claim closed form
+    assert!(
+        (measured.volume - 16.0 * std::f64::consts::PI).abs() < 2e-6,
+        "{measured:?}"
+    );
+    assert!(
+        (measured.area - 24.0 * std::f64::consts::PI).abs() < 2e-6,
+        "{measured:?}"
+    );
+    assert!(!tessellate::tessellate(body, 0.01)
+        .unwrap()
+        .triangles
+        .is_empty());
+    // Exact cubic quadrant has a larger radial bulge, even though endpoints lie
+    // on the cylinder. Do not accept it through endpoint-only or loose checks.
+    refused(&file(&spline_cylinder_data(4)), "cannot be certified");
+    // Only the tolerance explicitly requested by the caller may change admission.
+    assert!(step::read(source.as_bytes(), 1e-10).is_err());
 }

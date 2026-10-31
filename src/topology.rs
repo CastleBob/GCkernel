@@ -68,6 +68,10 @@ pub fn check(body: &Body, tolerance: f64) -> Result<TopologyReport, KernelError>
     for (f, face) in body.faces.iter().enumerate() {
         for &(e, _) in face.loops.iter().flatten() {
             if let Some(miss) = off_surface(&body.edges[e].curve, &face.surface, tolerance) {
+                if let Curve::Bezier { .. } = body.edges[e].curve {
+                    let measured = (0..=32).map(|i| distance(body.edges[e].curve.eval(i as f64 / 32.0).0, &face.surface)).fold(0.0, f64::max);
+                    return bad(format!("edge {e} Bezier span cannot be certified on face {f} within {tolerance} inches; sampled departure {measured} inches (samples are not an acceptance proof)"));
+                }
                 return bad(format!("edge {e} leaves face {f}'s surface by {miss}"));
             }
         }
@@ -141,7 +145,7 @@ fn unit_circle(p: Vec3, a: Vec3, u: Vec3, v: Vec3, q: Vec3) -> (f64, f64) {
 /// - arc/ellipse on a cylinder: the squared-radius residual is a trigonometric polynomial of degree two; the sum of
 ///   its coefficient magnitudes bounds it, against tolerance (2 r - tolerance), inward and outward;
 /// - a CylinderPair lies on its two cylinders by construction: it may bound a face only on one of them.
-fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> {
+pub(crate) fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> {
     let ellipse = |c: Vec3, u: Vec3, v: Vec3| (c, u, v);
     let (c, u, v) = match *curve {
         Curve::Line { a, b } => {
@@ -196,6 +200,18 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
         Curve::Bezier { p: cp } => {
             let worst = match *surface {
                 Surface::Plane { p, n, .. } => cp.iter().map(|q| q.sub(p).dot(n).abs()).fold(0.0, f64::max),
+                Surface::Cylinder { p, a, r, .. } => {
+                    let q = cp.map(|q| { let w = q.sub(p); w.sub(a.scale(w.dot(a))) });
+                    if r > tolerance && bezier_squared_radius_bound(q, r * r, tolerance * (2.0 * r - tolerance)) { 0.0 }
+                    else { f64::INFINITY }
+                },
+                Surface::EllipticCylinder { p, a, u, v } => {
+                    let q = cp.map(|q| { let (c, s) = unit_circle(p, a, u, v, q); Vec3::new(c, s, 0.0) });
+                    let sigma = (u.dot(u) + v.dot(v)).sqrt();
+                    let delta = tolerance / sigma;
+                    if delta < 1.0 && bezier_squared_radius_bound(q, 1.0, delta * (2.0 - delta)) { 0.0 }
+                    else { f64::INFINITY }
+                },
                 Surface::Revolution { p, a, m: Meridian::Bezier(b), .. } => match meridian_plane(&cp, p, a) {
                     None => f64::INFINITY,
                     Some((rho, off)) => {
@@ -319,4 +335,104 @@ fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> Option<f64> 
         }
     };
     (worst > tolerance).then_some(worst)
+}
+
+/// Bound |q(t).q(t) - radius_squared| on the ENTIRE cubic span. Products of
+/// Bernstein polynomials give a degree-six Bernstein polynomial whose range is
+/// inside its coefficients' hull. Subdivision tightens that bound without
+/// changing the stored curve. This is admission, never fitting or projection.
+/// A failed bound (including work/roundoff limits) refuses the curve.
+fn bezier_squared_radius_bound(q: [Vec3; 4], radius_squared: f64, allowed: f64) -> bool {
+    let c3 = [1.0, 3.0, 3.0, 1.0];
+    let c6 = [1.0, 6.0, 15.0, 20.0, 15.0, 6.0, 1.0];
+    let mut pending = vec![(q, 0)];
+    let mut visited = 0;
+    while let Some((q, depth)) = pending.pop() {
+        visited += 1;
+        if visited > 8192 {
+            return false;
+        }
+        let mut worst = 0.0f64;
+        for k in 0..=6usize {
+            let mut sum = 0.0;
+            let mut magnitude = radius_squared.abs();
+            for i in k.saturating_sub(3)..=k.min(3) {
+                let j = k - i;
+                let term = c3[i] * c3[j] / c6[k] * q[i].dot(q[j]);
+                sum += term;
+                magnitude += term.abs();
+            }
+            let bound = (sum - radius_squared).abs() + 128.0 * f64::EPSILON * magnitude;
+            if !bound.is_finite() {
+                return false;
+            }
+            worst = worst.max(bound);
+        }
+        if worst <= allowed {
+            continue;
+        }
+        if depth >= 24 {
+            return false;
+        }
+        // Actual endpoints/midpoint are rejection witnesses, never acceptance samples.
+        let left = crate::geom::bezier_piece(q, 0.0, 0.5);
+        let right = crate::geom::bezier_piece(q, 0.5, 1.0);
+        if [q[0], q[3], left[3]]
+            .iter()
+            .any(|p| (p.dot(*p) - radius_squared).abs() > allowed)
+        {
+            return false;
+        }
+        pending.push((right, depth + 1));
+        pending.push((left, depth + 1));
+    }
+    true
+}
+
+#[cfg(test)]
+mod spline_boundary_tests {
+    use super::*;
+    #[test]
+    fn whole_span_check_rejects_bulge_hidden_by_endpoints_and_midpoint() {
+        let p = [
+            Vec3::new(2., 0., 0.),
+            Vec3::new(2.1, 0., 1.),
+            Vec3::new(1.9, 0., 2.),
+            Vec3::new(2., 0., 3.),
+        ];
+        let curve = Curve::Bezier { p };
+        let surface = Surface::Cylinder {
+            p: Vec3::new(0., 0., 0.),
+            a: Vec3::new(0., 0., 1.),
+            x: Vec3::new(1., 0., 0.),
+            r: 2.,
+        };
+        for t in [0., 0.5, 1.] {
+            assert!(distance(curve.eval(t).0, &surface) < 1e-12);
+        }
+        assert!(off_surface(&curve, &surface, 1e-6).is_some());
+        let straight = Curve::Bezier {
+            p: p.map(|q| Vec3::new(2., 0., q.z)),
+        };
+        assert!(off_surface(&straight, &surface, 1e-6).is_none());
+    }
+    #[test]
+    fn elliptic_cylinder_admission_uses_actual_axes_and_rejects_radial_error() {
+        let p = [
+            Vec3::new(3., 0., 0.),
+            Vec3::new(3., 0., 1.),
+            Vec3::new(3., 0., 2.),
+            Vec3::new(3., 0., 3.),
+        ];
+        let surface = Surface::EllipticCylinder {
+            p: Vec3::new(0., 0., 0.),
+            a: Vec3::new(0., 0., 1.),
+            u: Vec3::new(3., 0., 0.),
+            v: Vec3::new(0., 1., 0.),
+        };
+        assert!(off_surface(&Curve::Bezier { p }, &surface, 1e-6).is_none());
+        let mut bad = p;
+        bad[1].x += 0.0001;
+        assert!(off_surface(&Curve::Bezier { p: bad }, &surface, 1e-6).is_some());
+    }
 }

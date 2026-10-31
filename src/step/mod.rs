@@ -1,5 +1,6 @@
 //! STEP import owns syntax-to-body conversion, never repair, modeling or document
 //! publication. All solids must succeed before any result is returned. See README.
+mod spline;
 mod syntax;
 pub mod wire;
 use crate::geom::{Curve, Surface, Vec3};
@@ -585,7 +586,7 @@ impl Document {
         }
         let mut body = Body::default();
         let mut vertices = BTreeMap::new();
-        let mut edges = BTreeMap::new();
+        let mut edges: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
         let mut seen_faces = BTreeSet::new();
         for v in face_ids {
             let face_id = v.reference()?;
@@ -629,9 +630,7 @@ impl Document {
                     }
                     let edge_id = a[3].reference()?;
                     let orientation = a[4].flag()?;
-                    let edge_index = if let Some(&index) = edges.get(&edge_id) {
-                        index
-                    } else {
+                    if !edges.contains_key(&edge_id) {
                         let a = self.args(edge_id, "EDGE_CURVE", 5)?;
                         let mut end = [0; 2];
                         for i in 0..2 {
@@ -647,24 +646,62 @@ impl Document {
                                 index
                             };
                         }
-                        let curve = self.edge_curve(
-                            a[3].reference()?,
-                            body.vertices[end[0]],
-                            body.vertices[end[1]],
-                            end[0] == end[1],
-                            a[4].flag()?,
-                            scale,
-                        )?;
-                        let index = body.edges.len();
-                        body.edges.push(Edge {
-                            curve,
-                            start: end[0],
-                            end: end[1],
-                        });
-                        edges.insert(edge_id, index);
-                        index
-                    };
-                    lp.push((edge_index, orientation));
+                        let support_id = a[3].reference()?;
+                        let curves = if self.entity(support_id)?.has("B_SPLINE_CURVE_WITH_KNOTS") {
+                            let mut spans = self
+                                .spline_spans(support_id, scale)
+                                .map_err(|e| context(e, support_id))?;
+                            if !a[4].flag()? {
+                                spans.reverse();
+                                spans = spans.into_iter().map(|c| c.reversed()).collect();
+                            }
+                            if spans[0].start().distance(body.vertices[end[0]]) > self.tolerance
+                                || spans.last().unwrap().end().distance(body.vertices[end[1]])
+                                    > self.tolerance
+                            {
+                                return unsupported(format!("STEP spline #{support_id} edge endpoints require interior trimming"));
+                            }
+                            spans
+                        } else {
+                            vec![self.edge_curve(
+                                a[3].reference()?,
+                                body.vertices[end[0]],
+                                body.vertices[end[1]],
+                                end[0] == end[1],
+                                a[4].flag()?,
+                                scale,
+                            )?]
+                        };
+                        if body.edges.len() + curves.len() > 100_000 {
+                            return invalid("STEP body exceeds 100000 decomposed edges");
+                        }
+                        let mut indices = Vec::with_capacity(curves.len());
+                        let count = curves.len();
+                        let mut start = end[0];
+                        for (i, curve) in curves.into_iter().enumerate() {
+                            let finish = if i + 1 == count {
+                                end[1]
+                            } else {
+                                let index = body.vertices.len();
+                                body.vertices.push(curve.end());
+                                index
+                            };
+                            indices.push(body.edges.len());
+                            body.edges.push(Edge {
+                                curve,
+                                start,
+                                end: finish,
+                            });
+                            start = finish;
+                        }
+                        edges.insert(edge_id, indices);
+                    }
+                    let indices = &edges[&edge_id];
+                    if orientation {
+                        lp.extend(indices.iter().map(|&i| (i, true)));
+                    } else {
+                        lp.extend(indices.iter().rev().map(|&i| (i, false)));
+                    }
                 }
                 if !forward {
                     lp.reverse();

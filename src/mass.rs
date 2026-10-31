@@ -89,7 +89,9 @@ fn segment(body: &Body, edge: usize, forward: bool, shift: Vec3) -> Curve {
 pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelError> {
     let (mut volume, mut area) = (0.0, 0.0);
     let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. }))
-        && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. } | Surface::Revolution { .. }));
+        && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. } | Surface::Revolution { .. })
+            || matches!(f.surface, Surface::Cylinder { .. })
+                && f.loops.iter().flatten().any(|&(e, _)| matches!(body.edges[e].curve, Curve::Bezier { .. })));
     let n = body.vertices.len().max(1) as f64;
     let o = body.vertices.iter().fold(Vec3::new(0.0, 0.0, 0.0), |s, v| s.add(*v)).scale(1.0 / n);
     // The body's size, for the quadrature's absolute tolerance.
@@ -259,7 +261,15 @@ fn cylinder_terms(curve: &Curve, p: Vec3, o: Vec3, a: Vec3, x: Vec3, y: Vec3, r:
         Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
         Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
         Curve::CylinderPair { .. } => return curve_on_cylinder_terms(curve, p, o, a, x, y, r, px, py, tol, size),
-        Curve::Bezier { .. } => return Err("a Bezier curve on a cylinder is not supported".into()),
+        Curve::Bezier { .. } => {
+            if crate::topology::off_surface(curve, &Surface::Cylinder { p, a, x, r }, tol).is_some() {
+                return Err("Bezier boundary is not proved within cylinder tolerance".into());
+            }
+            // Integrate the exact cylindrical chart using the curve's angular
+            // coordinate. The source Bezier stays unchanged, within the proved
+            // existing geometric tolerance. This result uses quadrature.
+            return elliptic_terms(curve, p, a, x.scale(r), y.scale(r), size);
+        },
     };
     let perp = |w: Vec3| w.sub(a.scale(w.dot(a)));
     let (dc, up, vp) = (c.sub(p), perp(u), perp(v));
