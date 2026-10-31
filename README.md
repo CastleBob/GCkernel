@@ -10,6 +10,11 @@ the modeler and cuts, Astra on the GC Kernel viewport). Plan and coordination: G
 
 ## Build and test
 
+Independent STEP import (2026-10-31): `step::read_file` and worker op 16 read
+supported standalone analytic solids directly into our Body, in inches. See
+[scope, wire contract and verification](docs/STEP_IMPORT.md). General splines,
+assemblies and IGES remain unfinished; this does not switch application intake.
+
 ```
 cargo test --release
 cargo build --release      # target/release/gckernel-worker.exe
