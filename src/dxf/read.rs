@@ -155,17 +155,30 @@ fn read_parts(bytes: &[u8], header_only: bool) -> Result<Drawing, KernelError> {
     }
 
     let mut x = Explode { blocks: &blocks, stack: Vec::new(), notes: Notes::default() };
+    let mut paper = Vec::new();
     for (group, entity) in model.iter().enumerate() {
         if flag(entity, 67) == 1 {
             // A layout's VIEWPORT is how paper space shows model space, not drawing content.
             if entity.kind != "VIEWPORT" {
-                x.notes.paper += 1;
+                paper.push((group, entity));
             }
             continue;
         }
         x.entity(&mut drawing, entity, &Affine::IDENTITY, None, 256, group)?;
         too_many(&drawing)?;
     }
+    if drawing.curves.is_empty() && !paper.is_empty() {
+        // A sheet-style export: the drawing is on the layout and model space is empty.
+        for (group, entity) in &paper {
+            x.entity(&mut drawing, entity, &Affine::IDENTITY, None, 256, *group)?;
+            too_many(&drawing)?;
+        }
+        if !drawing.curves.is_empty() {
+            drawing.warn("model space is empty; the curves on the paper-space layout were read".into());
+            paper.clear();
+        }
+    }
+    x.notes.paper = paper.len();
     x.notes.finish(&mut drawing);
     Ok(drawing)
 }

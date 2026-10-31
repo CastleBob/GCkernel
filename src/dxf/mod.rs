@@ -10,6 +10,7 @@
 mod codes;
 pub mod fit;
 mod read;
+pub mod svg;
 pub mod wire;
 mod write;
 

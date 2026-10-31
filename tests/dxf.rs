@@ -636,3 +636,13 @@ fn a_hundred_thousand_entities_read_in_well_under_a_second() {
     assert_eq!(d.curves.len(), 100_000);
     assert!(took.as_secs_f64() < 1.0, "took {took:?}");
 }
+
+#[test]
+fn an_empty_model_space_reads_the_layout() {
+    let d = read(&entities(&[
+        (0, "VIEWPORT"), (67, "1"), (10, "0"), (20, "0"),
+        (0, "CIRCLE"), (67, "1"), (10, "1"), (20, "1"), (30, "0"), (40, "2"),
+    ])).unwrap();
+    assert_eq!(*geometry(&d)[0], Geometry::Circle { c: [1.0, 1.0], r: 2.0 });
+    assert!(d.warnings.iter().any(|w| w.contains("model space is empty")), "{:?}", d.warnings);
+}
