@@ -24,7 +24,9 @@
 //!     12 named cut (op 3's request -> op 3's reply, then the provenance envelope with its outcome section; refused by
 //!        name in a domain that records no history; boolean::cut_named),
 //!     13 prism profile (a unit direction d then a body -> the op 2 profile whose sweep along -d is exactly the body, its
-//!        loops on the one cap facing d; refused by name when the body is not a straight-through plate; rebuild.rs).
+//!        loops on the one cap facing d; refused by name when the body is not a straight-through plate; rebuild.rs),
+//!     14 read DXF (a path -> the drawing's layers and curves as seen from above, exact or as lines and arcs;
+//!        dxf::wire), 15 write DXF (layers and curves -> an R12 DXF at the path; dxf::wire).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
@@ -47,6 +49,8 @@ pub const OP_EXTRUDE_NAMED: u32 = 10;
 pub const OP_REVOLVE_NAMED: u32 = 11;
 pub const OP_CUT_NAMED: u32 = 12;
 pub const OP_PRISM_PROFILE: u32 = 13;
+pub const OP_DXF_READ: u32 = 14;
+pub const OP_DXF_WRITE: u32 = 15;
 
 pub struct Request {
     pub op: u32,
@@ -93,6 +97,11 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
     }
     let tol = request.tolerance;
     if !tol.is_finite() || tol <= 0.0 { return Err(KernelError::InvalidInput("the tolerance must be positive".into())); }
+    match request.op {
+        OP_DXF_READ => return crate::dxf::wire::read_op(&request.data),
+        OP_DXF_WRITE => return crate::dxf::wire::write_op(&request.data),
+        _ => {}
+    }
     let mut reader = Reader::with_tolerance(&request.data, tol);
     match request.op {
         OP_CHECK => {

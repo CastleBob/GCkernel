@@ -6,6 +6,7 @@
 //! failure here cannot affect an open GCmaker.
 
 pub mod boolean;
+pub mod dxf;
 pub mod extrude;
 pub mod frame;
 pub mod geom;
