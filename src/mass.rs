@@ -89,7 +89,7 @@ fn segment(body: &Body, edge: usize, forward: bool, shift: Vec3) -> Curve {
 pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelError> {
     let (mut volume, mut area) = (0.0, 0.0);
     let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. } | Curve::RationalBezier { .. }))
-        && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. } | Surface::Revolution { .. })
+        && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. } | Surface::Revolution { .. } | Surface::Spline { .. })
             || matches!(f.surface, Surface::Cylinder { .. })
                 && f.loops.iter().flatten().any(|&(e, _)| matches!(body.edges[e].curve, Curve::Bezier { .. })));
     let n = body.vertices.len().max(1) as f64;
@@ -101,6 +101,12 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
     for (f, face) in body.faces.iter().enumerate() {
         let sense = if face.sense { 1.0 } else { -1.0 };
         match &face.surface {
+            Surface::Spline { data } => {
+                data.check_face(body, face, tolerance)?;
+                let (v, a) = data.measure(shift, sense, size)?;
+                volume += v;
+                area += a;
+            }
             Surface::Plane { p, n, .. } => {
                 let outward = n.scale(sense);
                 let a: f64 = face.loops.iter()

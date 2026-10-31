@@ -287,7 +287,7 @@ fn validate(body: &Body, tol: f64) -> Result<()> {
             Surface::Plane { p, n, x } => (p, n, x),
             Surface::Cylinder { p, a, x, .. } => (p, a, x),
             Surface::EllipticCylinder { .. } => return Err(unsupported("end cuts across elliptic-cylinder faces are not supported")),
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => return Err(unsupported("end cuts across revolved (conical, spherical or toroidal) faces are not supported")),
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("end cuts across revolved (conical, spherical or toroidal) faces are not supported")),
         };
         if !anchor.is_finite()
             || !n.is_finite()
@@ -366,7 +366,7 @@ fn validate(body: &Body, tol: f64) -> Result<()> {
                 Surface::EllipticCylinder { .. } => {
                     return Err(unsupported("end cuts across elliptic-cylinder faces are not supported"));
                 }
-                Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => return Err(unsupported("end cuts across revolved (conical, spherical or toroidal) faces are not supported")),
+                Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("end cuts across revolved (conical, spherical or toroidal) faces are not supported")),
             }
         }
     }
@@ -1339,6 +1339,7 @@ fn transform(body: &Body, map: impl Fn(Vec3) -> Vec3) -> Body {
     }
     for f in &mut result.faces {
         match &mut f.surface {
+            Surface::Spline { data } => **data = data.mapped(&map),
             Surface::Plane { p, n, x } => {
                 *p = map(*p);
                 *n = map(*n);
@@ -1473,7 +1474,7 @@ mod tests {
         let origin = body.vertices[0];
         for face in &body.faces {
             match face.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p: anchor, n, .. } => {
                     let outward = n.scale(sign(face.sense));
                     let mut area = 0.;
@@ -1760,7 +1761,7 @@ mod tests {
         }
         for f in &mut out.faces {
             match &mut f.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p, .. } => *p = p.scale(scale).add(offset),
                 Surface::Cylinder { p, r, .. } => {
                     *p = p.scale(scale).add(offset);

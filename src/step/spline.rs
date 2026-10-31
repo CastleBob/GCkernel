@@ -6,11 +6,51 @@ use super::{invalid, unsupported, Document, Result, Value};
 use crate::geom::{Curve, Vec3};
 
 impl Document {
+    #[cfg(test)]
     pub(super) fn spline_spans(&self, id: u64, scale: f64) -> Result<Vec<Curve>> {
         if self.entity(id)?.has("TRIMMED_CURVE") {
             return self.trimmed_spline(id, scale);
         }
         Ok(self.spline_data(id, scale)?.curves)
+    }
+
+    pub(super) fn spline_edge(
+        &self,
+        id: u64,
+        start: Vec3,
+        end: Vec3,
+        forward: bool,
+        scale: f64,
+    ) -> Result<Vec<Curve>> {
+        let mut curves = if self.entity(id)?.has("TRIMMED_CURVE") {
+            self.trimmed_spline(id, scale)?
+        } else {
+            let basis = self.spline_data(id, scale)?;
+            let (a, b) = if forward { (start, end) } else { (end, start) };
+            if a.distance(basis.curves[0].start()) <= self.tolerance
+                && b.distance(basis.curves.last().unwrap().end()) <= self.tolerance
+            {
+                basis.curves
+            } else {
+                let first = basis.parameter(a, self.tolerance)?;
+                let last = basis.parameter(b, self.tolerance)?;
+                basis.trim(first, last, true, self.tolerance)?
+            }
+        };
+        if !forward {
+            curves.reverse();
+            curves = curves.into_iter().map(|c| c.reversed()).collect();
+        }
+        if curves.is_empty()
+            || curves[0].start().distance(start) > self.tolerance
+            || curves.last().unwrap().end().distance(end) > self.tolerance
+        {
+            return invalid(format!(
+                "STEP spline #{id} endpoints disagree with EDGE_CURVE vertices within {} inches",
+                self.tolerance
+            ));
+        }
+        Ok(curves)
     }
 
     fn spline_data(&self, id: u64, scale: f64) -> Result<SplineData> {
@@ -201,12 +241,7 @@ impl Document {
         let basis = self.spline_data(a[1].reference()?, scale)?;
         let preference = a[5].enumeration()?;
         match preference {
-            "PARAMETER" | "UNSPECIFIED" => (),
-            "CARTESIAN" => {
-                return unsupported(
-                    "Cartesian-preferred STEP spline trimming requires point inversion",
-                )
-            }
+            "PARAMETER" | "UNSPECIFIED" | "CARTESIAN" => (),
             _ => return invalid("invalid STEP trimming preference"),
         }
         let trim = |value: &Value| -> Result<(f64, Option<Vec3>)> {
@@ -232,55 +267,33 @@ impl Document {
                     _ => return invalid("invalid STEP trim selector"),
                 }
             }
-            let Some(u) = parameter else {
-                return unsupported("Cartesian-only STEP spline trimming requires point inversion");
+            if point.is_some() && parameter.is_some() && preference == "UNSPECIFIED" {
+                return unsupported("dual STEP trim selectors require an explicit preference");
+            }
+            let u = match (preference, parameter, point) {
+                ("CARTESIAN", _, Some(q)) | (_, None, Some(q)) => {
+                    basis.parameter(q, self.tolerance)?
+                }
+                ("CARTESIAN", _, None) => {
+                    return invalid("Cartesian-preferred trim has no Cartesian selector")
+                }
+                (_, Some(u), _) => u,
+                _ => return invalid("missing STEP trim selector"),
             };
-            if point.is_some() && preference == "UNSPECIFIED" {
-                return unsupported(
-                    "dual STEP trim selectors require explicit parameter preference",
-                );
+            if let Some(other) = parameter {
+                if other != u {
+                    let p = basis.at(other)?;
+                    if p.distance(basis.at(u)?) > self.tolerance {
+                        return invalid("STEP parameter/Cartesian trim mismatch");
+                    }
+                }
             }
             Ok((u, point))
         };
         let (first, p1) = trim(&a[2])?;
         let (last, p2) = trim(&a[3])?;
         let forward = a[4].flag()?;
-        let (lo, hi) = (basis.parameters[0], *basis.parameters.last().unwrap());
-        if first < lo || first > hi || last < lo || last > hi {
-            return invalid("STEP trim parameter is outside the source knot domain");
-        }
-        if first == last {
-            return unsupported("equal STEP trim parameters do not specify an unambiguous span");
-        }
-        // Work in the basis's increasing direction, then reverse the COMPLETE chain.
-        let (start, end) = if forward {
-            (first, last)
-        } else {
-            (last, first)
-        };
-        let mut curves = if start < end {
-            basis.interval(start, end)?
-        } else {
-            if !basis.closed {
-                return invalid("open STEP spline trim order disagrees with sense_agreement");
-            }
-            let gap = basis.curves[0]
-                .start()
-                .distance(basis.curves.last().unwrap().end());
-            if !gap.is_finite() || gap > self.tolerance {
-                return invalid("closed STEP spline trim has a nonclosing seam");
-            }
-            let mut curves = basis.interval(start, hi)?;
-            curves.extend(basis.interval(lo, end)?);
-            if curves.is_empty() {
-                return unsupported("STEP seam endpoints specify a zero-length trim");
-            }
-            curves
-        };
-        if !forward {
-            curves.reverse();
-            curves = curves.into_iter().map(|c| c.reversed()).collect();
-        }
+        let curves = basis.trim(first, last, forward, self.tolerance)?;
         for (point, actual) in [(p1, curves[0].start()), (p2, curves.last().unwrap().end())] {
             if let Some(point) = point {
                 let gap = actual.distance(point);
@@ -302,6 +315,88 @@ struct SplineData {
     closed: bool,
 }
 impl SplineData {
+    fn at(&self, u: f64) -> Result<Vec3> {
+        if u < self.parameters[0] || u > *self.parameters.last().unwrap() {
+            return invalid("STEP trim parameter is outside the source knot domain");
+        }
+        let i = self
+            .parameters
+            .partition_point(|&k| k <= u)
+            .saturating_sub(1)
+            .min(self.curves.len() - 1);
+        Ok(self.curves[i]
+            .eval((u - self.parameters[i]) / (self.parameters[i + 1] - self.parameters[i]))
+            .0)
+    }
+    fn parameter(&self, q: Vec3, tol: f64) -> Result<f64> {
+        let mut values = vec![];
+        for (c, k) in self.curves.iter().zip(self.parameters.windows(2)) {
+            for t in crate::spline_curve::parameters(c, q, tol)? {
+                values.push(if t == 0. {
+                    k[0]
+                } else if t == 1. {
+                    k[1]
+                } else {
+                    k[0] + t * (k[1] - k[0])
+                });
+            }
+        }
+        values.sort_by(f64::total_cmp);
+        values.dedup();
+        if self.closed
+            && values.len() > 1
+            && values[0] == self.parameters[0]
+            && *values.last().unwrap() == *self.parameters.last().unwrap()
+        {
+            values.pop();
+        }
+        if values.len() != 1 {
+            return unsupported(format!(
+                "STEP spline point inversion found {} distinct parameters; requires one",
+                values.len()
+            ));
+        }
+        Ok(values[0])
+    }
+    fn trim(&self, first: f64, last: f64, forward: bool, tol: f64) -> Result<Vec<Curve>> {
+        let (lo, hi) = (self.parameters[0], *self.parameters.last().unwrap());
+        if first < lo || first > hi || last < lo || last > hi {
+            return invalid("STEP trim parameter is outside the source knot domain");
+        }
+        if first == last {
+            return unsupported("equal STEP trim parameters do not specify an unambiguous span");
+        }
+        let (start, end) = if forward {
+            (first, last)
+        } else {
+            (last, first)
+        };
+        let mut curves = if start < end {
+            self.interval(start, end)?
+        } else {
+            if !self.closed {
+                return invalid("open STEP spline trim order disagrees with sense_agreement");
+            }
+            if self.curves[0]
+                .start()
+                .distance(self.curves.last().unwrap().end())
+                > tol
+            {
+                return invalid("closed STEP spline trim has a nonclosing seam");
+            }
+            let mut c = self.interval(start, hi)?;
+            c.extend(self.interval(lo, end)?);
+            c
+        };
+        if curves.is_empty() {
+            return unsupported("STEP seam endpoints specify a zero-length trim");
+        }
+        if !forward {
+            curves.reverse();
+            curves = curves.into_iter().map(|c| c.reversed()).collect();
+        }
+        Ok(curves)
+    }
     fn interval(&self, start: f64, end: f64) -> Result<Vec<Curve>> {
         let mut out = Vec::new();
         for (curve, knots) in self.curves.iter().zip(self.parameters.windows(2)) {

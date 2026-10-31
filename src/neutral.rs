@@ -248,6 +248,25 @@ impl<'a> Reader<'a> {
                 };
                 Ok(Surface::Revolution { p, a, x, m })
             }
+            t if t == 8.0 => {
+                let (nu, nv) = (self.count()?, self.count()?);
+                if nu == 0 || nv == 0 || nu > 4096 || nv > 4096 || nu * nv > 4096 {
+                    return invalid("invalid spline patch counts");
+                }
+                let u = (0..=nu).map(|_| self.next()).collect::<Result<Vec<_>, _>>()?;
+                let v = (0..=nv).map(|_| self.next()).collect::<Result<Vec<_>, _>>()?;
+                let mut patches = Vec::with_capacity(nu * nv);
+                for _ in 0..nu * nv {
+                    let mut p = [Vec3::new(0., 0., 0.); 16];
+                    let mut w = [0.; 16];
+                    for q in &mut p { *q = self.point()?; }
+                    for x in &mut w { *x = self.next()?; }
+                    patches.push(crate::spline_surface::Patch { p, w });
+                }
+                let data = crate::spline_surface::SplineSurface { u, v, patches };
+                data.validate()?;
+                Ok(Surface::Spline { data: Box::new(data) })
+            }
             t => invalid(format!("unknown surface type {t}")),
         }
     }
@@ -328,6 +347,15 @@ pub fn put_curve(out: &mut Vec<f64>, c: &Curve) {
 
 pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
     match s {
+        Surface::Spline { data } => {
+            out.extend([8., (data.u.len() - 1) as f64, (data.v.len() - 1) as f64]);
+            out.extend(&data.u);
+            out.extend(&data.v);
+            for p in &data.patches {
+                for q in p.p { out.extend([q.x, q.y, q.z]); }
+                out.extend(p.w);
+            }
+        }
         Surface::Plane { p, n, x } => { out.push(0.0); put(out, *p); put(out, *n); put(out, *x); }
         Surface::Cylinder { p, a, x, r } => { out.push(1.0); put(out, *p); put(out, *a); put(out, *x); out.push(*r); }
         Surface::EllipticCylinder { p, a, u, v } => { out.push(3.0); put(out, *p); put(out, *a); put(out, *u); put(out, *v); }

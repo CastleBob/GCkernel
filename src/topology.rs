@@ -66,6 +66,10 @@ pub fn check(body: &Body, tolerance: f64) -> Result<TopologyReport, KernelError>
         }
     }
     for (f, face) in body.faces.iter().enumerate() {
+        if let Surface::Spline { ref data } = face.surface {
+            data.check_face(body, face, tolerance)?;
+            continue;
+        }
         for &(e, _) in face.loops.iter().flatten() {
             if let Some(miss) = off_surface(&body.edges[e].curve, &face.surface, tolerance) {
                 if let Curve::Bezier { .. } | Curve::RationalBezier { .. } = body.edges[e].curve {
@@ -82,6 +86,7 @@ pub fn check(body: &Body, tolerance: f64) -> Result<TopologyReport, KernelError>
 /// Distance from a point to a surface.
 fn distance(q: Vec3, surface: &Surface) -> f64 {
     match *surface {
+        Surface::Spline { .. } => f64::INFINITY,
         Surface::Plane { p, n, .. } => q.sub(p).dot(n).abs(),
         Surface::Cylinder { p, a, r, .. } => {
             let w = q.sub(p);
@@ -150,6 +155,7 @@ pub(crate) fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> O
     let (c, u, v) = match *curve {
         Curve::Line { a, b } => {
             let worst = match *surface {
+                Surface::Spline { .. } => f64::INFINITY,
                 Surface::Plane { .. } => distance(a, surface).max(distance(b, surface)),
                 Surface::Cylinder { p, a: axis, .. } => {
                     let perp = |w: Vec3| w.sub(axis.scale(w.dot(axis)));
@@ -191,7 +197,7 @@ pub(crate) fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> O
                     fa.cross(axis).length() <= 1e-9 && w.sub(fa.scale(w.dot(fa))).length() <= tolerance && (fr - radius).abs() <= tolerance
                 }
                 Surface::Plane { .. } | Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. }
-                | Surface::Torus { .. } | Surface::Revolution { .. } => false,
+                | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => false,
             };
             return if same(c, a, rho) || same(p, b, r) { None } else { Some(f64::INFINITY) };
         }
@@ -200,6 +206,7 @@ pub(crate) fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> O
         Curve::RationalBezier { p: cp, w } => {
             if crate::rational::validate(cp, w).is_err() { return Some(f64::INFINITY); }
             let worst = match *surface {
+                Surface::Spline { .. } => f64::INFINITY,
                 Surface::Plane { p, n, .. } => cp.iter().map(|q| { let d = q.sub(p).dot(n).abs(); if d.is_finite() { d } else { f64::INFINITY } }).fold(0.0, f64::max),
                 Surface::Cylinder { p, a, r, .. } => {
                     let q = cp.map(|q| { let d = q.sub(p); d.sub(a.scale(d.dot(a))) });
@@ -218,6 +225,7 @@ pub(crate) fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> O
         }
         Curve::Bezier { p: cp } => {
             let worst = match *surface {
+                Surface::Spline { .. } => f64::INFINITY,
                 Surface::Plane { p, n, .. } => cp.iter().map(|q| q.sub(p).dot(n).abs()).fold(0.0, f64::max),
                 Surface::Cylinder { p, a, r, .. } => {
                     let q = cp.map(|q| { let w = q.sub(p); w.sub(a.scale(w.dot(a))) });
@@ -245,6 +253,7 @@ pub(crate) fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> O
         }
     };
     let worst = match *surface {
+        Surface::Spline { .. } => f64::INFINITY,
         Surface::Plane { p, n, .. } => c.sub(p).dot(n).abs() + (u.dot(n).powi(2) + v.dot(n).powi(2)).sqrt(),
         Surface::Cylinder { p, a, r, .. } => {
             // |perp(c - p + u cos t + v sin t)|^2 - r^2 = k0 + k1 cos t + k2 sin t + k3 cos 2t + k4 sin 2t.

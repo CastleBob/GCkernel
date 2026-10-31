@@ -1,4 +1,4 @@
-//! Points, vectors and the curve and surface kinds the GC Kernel handles (no freeform, Bob 2026-10-27).
+//! Points, vectors and the curve and surface kinds the GC Kernel handles (spline intake authorized by Bob 2026-10-31).
 
 use crate::KernelError;
 
@@ -282,6 +282,8 @@ impl Curve {
 /// the face's outward normal agrees with it.
 #[derive(Clone, Debug)]
 pub enum Surface {
+    /// Tensor cubic patches, natural normal Su x Sv. Neutral surface tag 8.
+    Spline { data: Box<crate::spline_surface::SplineSurface> },
     /// Unit normal `n`, unit in-plane reference direction `x`.
     Plane { p: Vec3, n: Vec3, x: Vec3 },
     /// Right-handed about unit `a` (normal points away from the axis); `x` unit, perpendicular to `a`.

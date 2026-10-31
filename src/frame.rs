@@ -193,6 +193,7 @@ impl Rigid {
     }
     pub fn surface(&self, s: &Surface) -> Surface {
         match *s {
+            Surface::Spline { ref data } => Surface::Spline { data: Box::new(data.mapped(|q| self.position(q))) },
             Surface::Plane { p, n, x } => Surface::Plane { p: self.position(p), n: self.vector(n), x: self.vector(x) },
             Surface::Cylinder { p, a, x, r } => Surface::Cylinder { p: self.position(p), a: self.vector(a), x: self.vector(x), r },
             Surface::EllipticCylinder { p, a, u, v } => Surface::EllipticCylinder {

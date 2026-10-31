@@ -288,7 +288,7 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
             Surface::Plane { p, n, x } => (p, n, x),
             Surface::Cylinder { p, a, x, .. } => (p, a, x),
             Surface::EllipticCylinder { .. } => return Err(unsupported("passages through bodies with elliptic-cylinder faces are not supported")),
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => return Err(unsupported("passages through bodies with revolved (conical, spherical or toroidal) faces are not supported")),
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("passages through bodies with revolved (conical, spherical or toroidal) faces are not supported")),
         };
         if !p.is_finite() || !unit(n) || !unit(x) || n.dot(x).abs() > 1e-10 {
             return Err(bad("invalid passage surface frame"));
@@ -332,7 +332,7 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
                 }
             }
             Surface::EllipticCylinder { .. } => return Err(unsupported("passages through bodies with elliptic-cylinder faces are not supported")),
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => return Err(unsupported("passages through bodies with revolved (conical, spherical or toroidal) faces are not supported")),
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("passages through bodies with revolved (conical, spherical or toroidal) faces are not supported")),
             Surface::Cylinder { p, a, r, .. } => {
                 if !r.is_finite() || r <= tol || face.loops.len() != 1 || face.loops[0].len() < 4 {
                     return Err(unsupported(

@@ -182,6 +182,64 @@ ISO 10303-42:2003 section 4.4.40 gives the directed inherited parameter definiti
 Mathematics: MTU B-spline subdivision notes cited above. No kernel source or new
 dependency. Geometry/wire/bridge owners are unchanged; only STEP conversion expands.
 
+## Vertex trims and tensor-product surfaces (2026-10-31)
+
+Bob explicitly requested both increments. Bare spline EDGE_CURVE endpoints and
+Cartesian TRIMMED_CURVE selectors now use bounded cubic point inversion. The
+largest control-net coordinate defines a cubic homogeneous plane equation;
+derivative roots partition it into monotone intervals, all roots are checked in
+3D, and a missing or ambiguous answer fails. This is conservative inversion,
+not nearest-point recovery: an ill-conditioned coordinate or an off-curve point
+can be refused even when a nearby parameter exists. Closed seam endpoint aliases
+are identified; the declared full-domain case retains its existing semantics.
+Explicit selector preference is honored; redundant selectors must agree. Exact
+subdivision, independent trim/edge/face senses and the original knot domain remain
+unchanged. Nested trims, unclamped/periodic knots and guessed recovery stay out.
+
+B_SPLINE_SURFACE_WITH_KNOTS now supports clamped degree 1..3 in each direction,
+polynomial or positive-weight rational, through independent homogeneous knot
+insertion/elevation in U and V. The exact result is a tensor cubic patch grid,
+not a mesh or analytic-surface fit. Maximum source grid 16384 controls, maximum
+4096 patches, weight ratio at most 1e12. Declared closed/self-intersecting surfaces
+are refused. Internal patch boundaries must agree within 1e-9 inches. Geometry
+uses normalized parameter knots; STEP length units apply only to control points.
+
+Each admitted face must cover its complete natural rectangular domain with one
+loop. Lines and cubic spline edges may span multiple natural knot intervals;
+endpoint interval correspondence and whole-span Bernstein difference/control-hull
+bounds certify the boundary. Nonlinear reparameterizations whose equivalence is
+not established by these bounds are refused. Arbitrary UV cutouts/holes, pcurve
+reconciliation and periodic surfaces are not implemented. Interval bounds on the
+rational derivative numerators certify a nonzero Jacobian through subdivision
+(depth 12, 16384 visits per patch). This proves local regularity, not global
+self-intersection freedom. Floating-point arithmetic uses outward-rounded bounds
+and explicit roundoff allowances; no formal exact-arithmetic claim is made.
+
+Neutral surface tag 8 is `[8, nu, nv, U(nu+1), V(nv+1), patches...]`; each patch
+has 16 xyz controls in U-major order, then 16 positive weights. Rigid transforms
+map controls and preserve weights/knots. The bridge walks this bounded record
+inside bodies, with no C# spline evaluator or standalone typed surface API.
+Mass integrates the entire admitted parameter domain by bounded quadrature and
+reports `exact=false`. Inner integration failures and evaluation limits propagate.
+Display retains canonical shared body-edge points, refines only internal edges
+on both adjacent triangles, and bounds surface-minus-triangle error by degree-(4,4)
+Bernstein coefficients over each triangle's parameter bounding rectangle. A
+50000-triangle budget or an unproved bound is an error. Booleans and profile
+reconstruction explicitly retain their existing domains and refuse spline faces.
+
+Regression cases include independent tensor Cox-de Boor evaluation/derivatives
+for all nine degree pairs, weighted restriction, ambiguous inversion, singular
+charts, full solid polynomial/rational/curved-boundary/multispan fixtures,
+reversed charts, transforms, shared mesh boundaries and neutral transport.
+GCm's native EyeShot comparison uses the same independently authored fixtures.
+The original 19-file corpus remains 11 admitted/8 refused at 1e-6 inches.
+This does not establish arbitrary CAD parity or switch production STEP intake.
+
+Public specification/mathematics, not implementation source:
+- https://www.steptools.com/stds/stp_aim/html/t_b_spline_surface_with_knots.html
+- https://www.steptools.com/stds/stp_aim/html/t_rational_b_spline_surface.html
+- https://pages.mtu.edu/~shene/COURSES/cs3621/NOTES/surface/bspline-construct.html
+
 ## Operation 16
 
 GCKQ v1 is unchanged. Request numeric payload: `[1, n, UTF-8 path bytes...]`,

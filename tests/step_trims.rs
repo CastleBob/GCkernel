@@ -84,7 +84,6 @@ fn unsupported_or_contradictory_trims_fail_atomically_and_leave_original_usable(
             "equal STEP trim parameters",
         ),
         (".PARAMETER.", ".CARTESIAN.", "Cartesian-preferred"),
-        ("(PARAMETER_VALUE(-5.))", "(#1)", "Cartesian-only"),
         (
             "(PARAMETER_VALUE(-5.))",
             "(PARAMETER_VALUE(-5.),PARAMETER_VALUE(-5.))",

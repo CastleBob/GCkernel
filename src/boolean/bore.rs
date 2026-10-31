@@ -369,7 +369,7 @@ mod tests {
         for face in &body.faces {
             let sign = if face.sense { 1. } else { -1. };
             match face.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p, n, .. } => {
                     let outward = n.scale(sign);
                     let mut area = 0.;

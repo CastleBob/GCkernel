@@ -1,6 +1,7 @@
 //! STEP import owns syntax-to-body conversion, never repair, modeling or document
 //! publication. All solids must succeed before any result is returned. See README.
 mod spline;
+mod surface;
 mod syntax;
 pub mod wire;
 use crate::geom::{Curve, Surface, Vec3};
@@ -425,6 +426,9 @@ impl Document {
     }
     fn surface(&self, id: u64, scale: f64, angle: f64) -> Result<(Surface, bool)> {
         let e = self.entity(id)?;
+        if e.has("B_SPLINE_SURFACE_WITH_KNOTS") {
+            return Ok((self.spline_surface(id, scale)?, true));
+        }
         for kind in [
             "PLANE",
             "CYLINDRICAL_SURFACE",
@@ -651,23 +655,14 @@ impl Document {
                         let curves = if support.has("B_SPLINE_CURVE_WITH_KNOTS")
                             || support.has("TRIMMED_CURVE")
                         {
-                            let mut spans = self
-                                .spline_spans(support_id, scale)
-                                .map_err(|e| context(e, support_id))?;
-                            if !a[4].flag()? {
-                                spans.reverse();
-                                spans = spans.into_iter().map(|c| c.reversed()).collect();
-                            }
-                            if spans[0].start().distance(body.vertices[end[0]]) > self.tolerance
-                                || spans.last().unwrap().end().distance(body.vertices[end[1]])
-                                    > self.tolerance
-                            {
-                                if support.has("TRIMMED_CURVE") {
-                                    return invalid(format!("STEP trimmed spline #{support_id} endpoints disagree with EDGE_CURVE vertices within {} inches", self.tolerance));
-                                }
-                                return unsupported(format!("STEP spline #{support_id} edge endpoints require interior trimming"));
-                            }
-                            spans
+                            self.spline_edge(
+                                support_id,
+                                body.vertices[end[0]],
+                                body.vertices[end[1]],
+                                a[4].flag()?,
+                                scale,
+                            )
+                            .map_err(|e| context(e, support_id))?
                         } else {
                             vec![self.edge_curve(
                                 a[3].reference()?,

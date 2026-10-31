@@ -33,6 +33,9 @@ fn select(
     tool: &crate::neutral::Body,
     tolerance: f64,
 ) -> Result<Domain, crate::KernelError> {
+    if body.faces.iter().chain(&tool.faces).any(|f| matches!(f.surface, crate::geom::Surface::Spline { .. })) {
+        return Err(crate::KernelError::Unsupported("cuts on general spline surfaces are not supported yet".into()));
+    }
     if body.edges.iter().chain(&tool.edges).any(|e| matches!(e.curve, crate::geom::Curve::RationalBezier { .. })) {
         return Err(crate::KernelError::Unsupported("cuts on rational Bezier boundaries are not supported yet".into()));
     }

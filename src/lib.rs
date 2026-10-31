@@ -17,6 +17,8 @@ pub mod protocol;
 pub mod provenance;
 pub mod rebuild;
 pub mod rational;
+pub mod spline_surface;
+pub mod spline_curve;
 pub mod revolve;
 pub mod step;
 pub mod tessellate;

@@ -39,7 +39,7 @@ kinds 0 point, 1 vector, 2 frame (o x y), 3 rigid (reply: T after it), 4 curve, 
 Curves: 0 line, 1 arc, 2 general B-spline (refused), 3 conic, 4 cylinder pair,
 5 polynomial cubic Bezier (four xyz points), 6 rational cubic Bezier (four xyz
 points then four positive weights); the Bezier parameter domain is [0, 1].
-Surfaces: 0 plane, 1 cylinder. See `src/protocol.rs`, `src/neutral.rs`, `src/geom.rs`.
+Surfaces: 0 plane, 1 cylinder; subsequent analytic/revolved tags and tensor spline tag 8 are defined in the neutral reader. STEP spline admission and limits: `docs/STEP_IMPORT.md`. See `src/protocol.rs`, `src/neutral.rs`, `src/geom.rs`.
 
 Display polylines omit internal same-plane/same-cylinder divisions and periodic seams. Their IDs remain the
 original body edge IDs (possibly sparse); exact topology and mesh boundary samples are retained. Distinct

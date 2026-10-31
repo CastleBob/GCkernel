@@ -649,7 +649,7 @@ fn prism(body: &Body, k: usize, tol: f64) -> Result<Option<Prism>> {
                     return Ok(None);
                 }
             }
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => return Ok(None),
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Ok(None),
         }
     }
     let lo = caps.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
@@ -760,7 +760,7 @@ fn prism_along(tool: &Body, k: usize) -> bool {
             }
         }
         Surface::Cylinder { a, .. } | Surface::EllipticCylinder { a, .. } => coord(a, k).abs() >= 1. - 1e-12,
-        Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => false,
+        Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => false,
     }) && caps >= 2
 }
 

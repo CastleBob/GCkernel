@@ -624,10 +624,10 @@ fn spline_spans_share_topology_and_preserve_mass_units_and_orientation() {
 }
 
 #[test]
-fn partial_or_malformed_spline_edges_fail_without_partial_body() {
+fn off_curve_or_malformed_spline_edges_fail_without_partial_body() {
     refused(
         &spline_box(false, false).replace("(0,0.,0.)", "(0.5,0.,0.)"),
-        "interior trimming",
+        "point inversion found 0 distinct parameters",
     );
     refused(
         &spline_box(false, false).replace("(4,2,4)", "(4,1,4)"),

@@ -379,6 +379,12 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
         for l in &loops3 { index.push((at..at + l.len()).collect::<Vec<usize>>()); at += l.len(); }
         let side = if face.sense { 1.0 } else { -1.0 };
         let (tris, normals) = match face.surface {
+            Surface::Spline { ref data } => {
+                data.check_face(body, face, 1e-6)?;
+                let (points, tris, normals) = data.mesh(points3, side, chord)?;
+                points3 = points;
+                (tris, normals)
+            }
             Surface::Plane { p, n, x } => {
                 let w = n.scale(side);
                 let v = w.cross(x);
