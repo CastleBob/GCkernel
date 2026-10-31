@@ -318,6 +318,10 @@ impl SplineSurface {
         Ok(values[0])
     }
     pub fn check_face(&self, body: &Body, face: &Face, tol: f64) -> Result<()> {
+        if let Some(chart) = crate::spline_trim::chart(self) {
+            crate::spline_trim::domain(self, &chart, body, face, tol)?;
+            return Ok(());
+        }
         if face.loops.len() != 1 {
             return refuse("spline surface requires one natural rectangular boundary; UV holes are unsupported");
         }
@@ -463,6 +467,22 @@ impl SplineSurface {
         }
         Ok((volume, area))
     }
+    pub fn measure_face(
+        &self,
+        body: &Body,
+        face: &Face,
+        tol: f64,
+        shift: Vec3,
+        sign: f64,
+        size: f64,
+    ) -> Result<(f64, f64)> {
+        if let Some(chart) = crate::spline_trim::chart(self) {
+            let loops = crate::spline_trim::domain(self, &chart, body, face, tol)?;
+            crate::spline_trim::measure(self, &loops, shift, sign, size)
+        } else {
+            self.measure(shift, sign, size)
+        }
+    }
     /// Bound S - L, where L is the triangle's affine interpolant, over its
     /// entire UV bounding rectangle. Q - W L has tensor Bernstein degree (4,4).
     /// Its positive denominator is at least the least restricted weight.
@@ -538,23 +558,48 @@ impl SplineSurface {
     pub fn mesh(
         &self,
         mut points: Vec<Vec3>,
+        loops: &[Vec<usize>],
         sign: f64,
         chord: f64,
     ) -> Result<(Vec<Vec3>, Vec<[usize; 3]>, Vec<Vec3>)> {
         let n = points.len();
-        if n < 4 {
-            return refuse("spline face needs a rectangular display boundary");
-        }
-        let mut uv = points
+        let (mut uv, mut tris) = if let Some(chart) = crate::spline_trim::chart(self) {
+            let mut uv: Vec<_> = points.iter().map(|&p| chart.point(p)).collect();
+            if loops.len() == 1
+                && uv
+                    .iter()
+                    .all(|p| p.iter().any(|x| x.abs() < 1e-12 || (x - 1.).abs() < 1e-12))
+            {
+                uv.push([0.5, 0.5]);
+                points.push(self.eval(0.5, 0.5).0);
+                (uv, (0..n).map(|i| [i, (i + 1) % n, n]).collect())
+            } else {
+                let chart_points: Vec<_> = uv.iter().map(|p| [p[0], p[1] * sign]).collect();
+                let tris = crate::tessellate::triangulate(&chart_points, loops, false)?;
+                (uv, tris)
+            }
+        } else {
+            if n < 4 {
+                return refuse("spline face needs a rectangular display boundary");
+            }
+            let mut uv = points
+                .iter()
+                .map(|&p| self.boundary_uv(p, 1e-6))
+                .collect::<Result<Vec<_>>>()?;
+            uv.push([0.5, 0.5]);
+            points.push(self.eval(0.5, 0.5).0);
+            (uv, (0..n).map(|i| [i, (i + 1) % n, n]).collect())
+        };
+        let boundary_edges: std::collections::HashSet<_> = loops
             .iter()
-            .map(|&p| self.boundary_uv(p, 1e-6))
-            .collect::<Result<Vec<_>>>()?;
-        let middle = n;
-        uv.push([0.5, 0.5]);
-        points.push(self.eval(0.5, 0.5).0);
-        let mut tris: Vec<_> = (0..n).map(|i| [i, (i + 1) % n, middle]).collect();
-        let boundary =
-            |a: usize, b: usize| a < n && b < n && ((a + 1) % n == b || (b + 1) % n == a);
+            .flat_map(|lp| {
+                (0..lp.len()).map(move |i| {
+                    let (a, b) = (lp[i], lp[(i + 1) % lp.len()]);
+                    (a.min(b), a.max(b))
+                })
+            })
+            .collect();
+        let boundary = |a: usize, b: usize| boundary_edges.contains(&(a.min(b), a.max(b)));
         let mut at = 0;
         while at < tris.len() {
             let tri = tris[at];

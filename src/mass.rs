@@ -103,7 +103,7 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
         match &face.surface {
             Surface::Spline { data } => {
                 data.check_face(body, face, tolerance)?;
-                let (v, a) = data.measure(shift, sense, size)?;
+                let (v, a) = data.measure_face(body, face, tolerance, shift, sense, size)?;
                 volume += v;
                 area += a;
             }

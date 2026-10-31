@@ -264,3 +264,24 @@ mesh-volume comparison through GCm tests (mesh volume allowance 0.05% with an
 absolute floor). Several old EyeShot fixtures declare metres for inch-looking
 coordinates; declared units are respected by both intake paths, never guessed.
 This does not switch GCmaker's existing UI importer or establish release readiness.
+
+## Polygonal trims on spline graph charts (2026-10-31)
+
+An independently written affine inverse-chart certificate now admits polygonal UV
+outer loops and holes on qualifying tensor spline surfaces. Homogeneous degree-(4,4)
+identities prove the chart over every patch. Each line/cubic physical edge must
+project monotonically onto a straight UV segment. Knot crossings split the exact
+curve; degree-21 Bernstein composition residuals bound the entire edge against
+its surface at the unchanged request tolerance. Inconclusive charts use their
+separately defined natural-domain admission; failed trim checks never retry or heal.
+Touching/intersecting/nested/outside holes and inconsistent winding are refused.
+There is a 2048-edge trim budget. Curved UV trims and general pcurves remain open.
+
+Mass uses Green's theorem over the admitted polygon, with bounded nested
+quadrature, explicit knot splitting and propagated failure. Display triangulates
+outer/inner loops and applies the existing whole-triangle certificate while
+retaining shared body-edge points. Natural rectangular display retains its
+conforming fan construction. No new neutral tag or C# geometry is required.
+Independent analytic solids exercise a quadratic roof with/without a hole,
+multiple knot spans, rigid frames, exact volume/area formulas, shared mesh
+boundaries, transport and rejection of mismatched/reversed/duplicated loops.

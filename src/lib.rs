@@ -18,6 +18,7 @@ pub mod provenance;
 pub mod rebuild;
 pub mod rational;
 pub mod spline_surface;
+mod spline_trim;
 pub mod spline_curve;
 pub mod revolve;
 pub mod step;

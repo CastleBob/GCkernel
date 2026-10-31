@@ -335,7 +335,7 @@ fn is_ear(p: &[[f64; 2]], poly: &[usize], ib: usize, eps: f64, runs: Runs) -> bo
 }
 
 /// Triangles over the loops (outer counter-clockwise, holes clockwise in p's frame).
-fn triangulate(p: &[[f64; 2]], loops: &[Vec<usize>], short: bool) -> Result<Vec<[usize; 3]>, KernelError> {
+pub(crate) fn triangulate(p: &[[f64; 2]], loops: &[Vec<usize>], short: bool) -> Result<Vec<[usize; 3]>, KernelError> {
     triangulate_runs(p, loops, short, if short { Runs::Axis } else { Runs::Any })
 }
 
@@ -381,7 +381,7 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
         let (tris, normals) = match face.surface {
             Surface::Spline { ref data } => {
                 data.check_face(body, face, 1e-6)?;
-                let (points, tris, normals) = data.mesh(points3, side, chord)?;
+                let (points, tris, normals) = data.mesh(points3, &index, side, chord)?;
                 points3 = points;
                 (tris, normals)
             }
