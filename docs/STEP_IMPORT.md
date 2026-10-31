@@ -308,3 +308,25 @@ callers explicitly own any destination write. Product/document intake is unchang
 Verification includes analytic mass/topology, Unicode, multiple bodies, malformed
 packets, strict round trips and independent EyeShot comparisons of four trimmed
 roof variants and four exported spline fixtures (29 native cases total).
+
+## Curved UV graph trims (2026-10-31 continuation)
+
+Single-patch affine inverse charts now also admit cubic and conic curved UV loops.
+Exact conic rational quadratics are elevated homogeneously, with intervals no wider
+than pi/2. Whole-edge degree-21 support bounds remain authoritative. Positive-weight
+control hulls, monotone subspans and bounded pair separation certify simple loops;
+only declared adjacent endpoints may touch. Hole containment uses a polygonal
+homotopy only when its whole-curve error bounds exclude the query point. That
+polygon is a proof aid, never replacement geometry. Exact UV curves drive Green
+integration. Display separately validates canonical boundary polygons before
+triangulation, retaining the whole-triangle error certificate/shared edges.
+
+Budgets: 32768 support visits/depth 24; 4096 topology subspans; 100000 separation
+visits/depth 24; two million candidate pairs; 8192 display boundary points; two
+million mass evaluations. Ambiguous contact, containment or exhausted bounds
+refuse. Polygonal multispan support remains; curved multispan UV loops, general
+pcurves, periodic supports and non-graph arbitrary trims remain unsupported.
+Independent cases include a nonplanar parabolic-boundary roof and a circular hole
+on a planar spline face, analytic volume/independent area integrals, rigid frames,
+shared meshes, source-preserving STEP export and crossing/tangent refusal.
+Public mathematical reference: https://pages.mtu.edu/~shene/COURSES/cs3621/NOTES/spline/NURBS/RB-circles.html .

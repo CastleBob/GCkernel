@@ -574,6 +574,11 @@ impl SplineSurface {
                 points.push(self.eval(0.5, 0.5).0);
                 (uv, (0..n).map(|i| [i, (i + 1) % n, n]).collect())
             } else {
+                let polygons = loops
+                    .iter()
+                    .map(|lp| lp.iter().map(|&i| uv[i]).collect())
+                    .collect::<Vec<_>>();
+                crate::spline_trim::polygon_checks(&polygons, sign)?;
                 let chart_points: Vec<_> = uv.iter().map(|p| [p[0], p[1] * sign]).collect();
                 let tris = crate::tessellate::triangulate(&chart_points, loops, false)?;
                 (uv, tris)
