@@ -44,7 +44,7 @@ struct Pipe {
 fn perp(v: Vec3, b: Vec3) -> Vec3 { v.sub(b.scale(v.dot(b))) }
 
 /// A full round cutter: one cylinder face, two plane caps normal to its axis, two full-circle cap edges on the axis.
-fn cutter(tool: &Body, tol: f64) -> Option<(Vec3, Vec3, f64)> {
+pub(super) fn cutter(tool: &Body, tol: f64) -> Option<(Vec3, Vec3, f64)> {
     if tool.faces.len() != 3 || tool.edges.len() != 3 || tool.vertices.len() != 2 {
         return None;
     }
@@ -123,7 +123,170 @@ fn admit(body: &Body, tool: &Body, tol: f64) -> Option<(Cutter, Pipe)> {
 
 /// Selected only when every radial-bore condition holds, clearances included: anything else keeps the other domains.
 pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
-    admit(body, tool, tol).is_some_and(|(k, pipe)| clear(body, tool, &k, &pipe, tol).is_ok())
+    admit(body, tool, tol).is_some_and(|(k, pipe)| {
+        let body = reseamed(body, &k, &pipe, tol);
+        clear(&body, tool, &k, &pipe, tol).is_ok()
+    })
+}
+
+/// The angular interval a perpendicular round hole occupies on a wall of radius r about the pipe axis (frame e1,
+/// e2 = b x e1): the hole's centre direction is branch * a (the smaller root h lies toward -a), and every point of
+/// the loop is within |offset| + rho of that generator sideways, so within asin((|offset| + rho) / r) of its angle.
+/// None when that does not bound it (the hole not perpendicular, or as wide as the wall).
+#[allow(clippy::too_many_arguments)]
+fn hole_interval(c: Vec3, a: Vec3, rho: f64, branch: f64, pipe: &Pipe, r: f64, e1: Vec3, e2: Vec3) -> Option<(f64, f64)> {
+    if a.dot(pipe.b).abs() > 1e-9 {
+        return None;
+    }
+    let offset = c.sub(pipe.p).dot(pipe.b.cross(a)).abs();
+    let reach = (offset + rho) / r;
+    if !(reach < 1.) {
+        return None;
+    }
+    let dir = a.scale(branch);
+    let centre = dir.dot(e2).atan2(dir.dot(e1));
+    let half = reach.asin();
+    Some((centre - half, centre + half))
+}
+
+/// Bob's Pipe 1.25 12 Cross Holes: a side hole at 3:00 lands on the wall's seam, the generator where the
+/// periodic face's parameter starts (the profile circles start at +X). The seam is not geometry: the same face
+/// with the same rings and the seam on another generator is the same solid. So when the new hole's loops reach a
+/// plain wall's seam (one full ring at each end, a straight seam used both ways, nothing else at its two vertices),
+/// the seam moves to the middle of the widest angular gap between that wall's holes, old and new; the rings are
+/// the same circles started at the new generator, and the wall surface's parameter starts there too. The surfaces' geometry, radii
+/// and every other edge are unchanged. Decided from the geometry before the cut; when no clear generator exists the
+/// wall keeps its seam and the cut is refused by name as before.
+fn reseamed(body: &Body, k: &Cutter, pipe: &Pipe, tol: f64) -> Body {
+    let mut out = body.clone();
+    let b = pipe.b;
+    let end = k.s.add(k.d.scale(k.len));
+    let both = perp(end.sub(pipe.p), b).length() > pipe.ri;
+    for (face, r) in [(pipe.outer, pipe.ro), (pipe.inner, pipe.ri)] {
+        let Surface::Cylinder { x: e1, .. } = body.faces[face].surface else { continue };
+        let Ok(e1) = perp(e1, b).unit() else { continue };
+        let e2 = b.cross(e1);
+        // The new hole's intervals on this wall: entry side (branch -1) and, through both walls, the exit side.
+        let mut busy = vec![];
+        for branch in if both { vec![-1., 1.] } else { vec![-1.] } {
+            match hole_interval(k.s, k.d, k.rho, branch, pipe, r, e1, e2) {
+                Some(i) => busy.push(i),
+                None => return out,
+            }
+        }
+        // Its plain outer loop: two full rings and one seam used both ways.
+        let f = &body.faces[face];
+        let Some(outer) = f.loops.iter().position(|l| l.len() == 4) else { continue };
+        let lp = &f.loops[outer];
+        let lines: Vec<usize> =
+            lp.iter().filter(|(e, _)| matches!(body.edges[*e].curve, Curve::Line { .. })).map(|(e, _)| *e).collect();
+        let rings: Vec<usize> =
+            lp.iter().filter(|(e, _)| matches!(body.edges[*e].curve, Curve::Arc { .. })).map(|(e, _)| *e).collect();
+        if lines.len() != 2 || lines[0] != lines[1] || rings.len() != 2 || rings[0] == rings[1] {
+            continue;
+        }
+        let seam = lines[0];
+        let ring_ok = |e: usize| match body.edges[e].curve {
+            Curve::Arc { c, n, r: ar, t0, t1, .. } => {
+                (t1 - t0 - TAU).abs() <= 1e-9
+                    && n.cross(b).length() <= 1e-9
+                    && (ar - r).abs() <= tol
+                    && perp(c.sub(pipe.p), b).length() <= tol
+                    && body.edges[e].start == body.edges[e].end
+            }
+            _ => false,
+        };
+        if !rings.iter().all(|e| ring_ok(*e)) {
+            continue;
+        }
+        let ends = [body.edges[seam].start, body.edges[seam].end];
+        let ring_vertices = [body.edges[rings[0]].start, body.edges[rings[1]].start];
+        if !(ends.contains(&ring_vertices[0]) && ends.contains(&ring_vertices[1]) && ends[0] != ends[1]) {
+            continue;
+        }
+        // Nothing else may end at the seam's vertices.
+        if body.edges.iter().enumerate().any(|(i, e)| {
+            i != seam && !rings.contains(&i) && (ends.contains(&e.start) || ends.contains(&e.end))
+        }) {
+            continue;
+        }
+        // Does the new hole reach the seam? (Its angle within the hole's interval widened by tol / r.)
+        let Curve::Line { a: sa, .. } = body.edges[seam].curve else { continue };
+        let q = perp(sa.sub(pipe.p), b);
+        let seam_angle = q.dot(e2).atan2(q.dot(e1));
+        let margin = tol / r;
+        let inside = |(lo, hi): (f64, f64), t: f64| {
+            let d = (t - (lo + hi) * 0.5 + std::f64::consts::PI).rem_euclid(TAU) - std::f64::consts::PI;
+            d.abs() <= (hi - lo) * 0.5 + margin
+        };
+        if !busy.iter().any(|i| inside(*i, seam_angle)) {
+            continue;
+        }
+        // The wall's other holes.
+        let mut known = true;
+        for (i, l) in f.loops.iter().enumerate() {
+            if i == outer {
+                continue;
+            }
+            match (l.as_slice(), &body.edges[l[0].0].curve) {
+                ([_], Curve::CylinderPair { c, a, rho, branch, t0, t1, .. }) if (t1 - t0 - TAU).abs() <= 1e-9 => {
+                    match hole_interval(*c, *a, *rho, *branch, pipe, r, e1, e2) {
+                        Some(i) => busy.push(i),
+                        None => known = false,
+                    }
+                }
+                _ => known = false,
+            }
+        }
+        if !known {
+            continue;
+        }
+        // The widest gap between the busy intervals, round the circle.
+        let mut spans: Vec<(f64, f64)> = busy
+            .iter()
+            .map(|(lo, hi)| {
+                let l = lo.rem_euclid(TAU);
+                (l, l + (hi - lo))
+            })
+            .collect();
+        spans.sort_by(|x, y| x.0.total_cmp(&y.0));
+        // Each interval once more a turn later, so a span crossing angle 2 pi covers the start of the next turn.
+        let first = spans[0].0;
+        let turned: Vec<(f64, f64)> = spans.iter().map(|(l, h)| (l + TAU, h + TAU)).collect();
+        spans.extend(turned);
+        let mut best: Option<(f64, f64)> = None;
+        let mut reach = spans[0].1;
+        for &(next, top) in &spans[1..] {
+            if next > first + TAU {
+                break;
+            }
+            if next > reach && best.is_none_or(|(w, _)| next - reach > w) {
+                best = Some((next - reach, (next + reach) * 0.5));
+            }
+            reach = reach.max(top);
+        }
+        let Some((width, angle)) = best else { continue };
+        if r * (width * 0.5).sin() <= 4. * tol {
+            continue;
+        }
+        let e = e1.scale(angle.cos()).add(e2.scale(angle.sin()));
+        for ring in &rings {
+            let v = out.edges[*ring].start;
+            if let Curve::Arc { c, n, x, t0, .. } = &mut out.edges[*ring].curve {
+                let start = c.add(e.scale(r));
+                *x = e.scale(t0.cos()).sub(n.cross(e).scale(t0.sin()));
+                out.vertices[v] = start;
+            }
+        }
+        let (va, vb) = (out.edges[seam].start, out.edges[seam].end);
+        out.edges[seam].curve = Curve::Line { a: out.vertices[va], b: out.vertices[vb] };
+        // The wall's own parameter starts on the seam too (readers that place a periodic face's seam at its
+        // parameter origin, as GCmaker's display import does, then see the same face).
+        if let Surface::Cylinder { x, .. } = &mut out.faces[face].surface {
+            *x = e;
+        }
+    }
+    out
 }
 
 /// A rigorous box of a curve: arcs and conics by their extrema, a pair edge whose cylinders are perpendicular by the
@@ -235,10 +398,39 @@ fn clear(body: &Body, tool: &Body, k: &Cutter, pipe: &Pipe, tol: f64) -> Result<
     Ok((walls, loops))
 }
 
+/// Every planar face's loops enclose positive area about its outward normal (a face turned inside out, or a loop run
+/// the wrong way, is malformed input, not a cut to make). The topology check alone does not see this.
+pub(super) fn planar_faces_outward(body: &Body) -> Result<()> {
+    for (i, f) in body.faces.iter().enumerate() {
+        if let Surface::Plane { n, .. } = f.surface {
+            let outward = n.scale(if f.sense { 1. } else { -1. });
+            let area: f64 = f
+                .loops
+                .iter()
+                .map(|lp| {
+                    let curves: Vec<Curve> = lp
+                        .iter()
+                        .map(|(e, fwd)| if *fwd { body.edges[*e].curve.clone() } else { body.edges[*e].curve.reversed() })
+                        .collect();
+                    crate::extrude::signed_area(&curves, outward)
+                })
+                .sum();
+            if !(area > 0.) {
+                return Err(KernelError::InvalidInput(format!("planar face {i} is inside out")));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     crate::topology::check(body, tol)?;
     crate::topology::check(tool, tol)?;
+    planar_faces_outward(body)?;
+    planar_faces_outward(tool)?;
     let (k, pipe) = admit(body, tool, tol).ok_or_else(|| unsupported("not a radial bore through a pipe wall"))?;
+    let body = &reseamed(body, &k, &pipe, tol);
+    crate::topology::check(body, tol)?;
     let (walls, loops) = clear(body, tool, &k, &pipe, tol)?;
     let b = pipe.b;
     // Build: per wall pair (entry and exit of one wall), two loop edges, one seam, one cutter-cylinder face.
@@ -360,14 +552,35 @@ mod tests {
     }
 
     #[test]
+    fn a_hole_on_the_seam_moves_the_seam_to_the_widest_clear_gap() {
+        // The profile circles start at +X (90 degrees from +Z): a hole there, one wall and through both walls, and
+        // with holes already on both sides of the seam; each removes its exact wall integrals, the seam moved.
+        let (ro, ri, a) = (1.75, 1.5, 0.25);
+        let body = pipe(ro, ri);
+        let start = measure(&body, TOL).unwrap().volume;
+        let one = crate::boolean::cut(&body, &bore(a, 5., 90., 2.5, 0.5), TOL).unwrap();
+        assert!((start - measure(&one, TOL).unwrap().volume - one_wall(a, ro, ri)).abs() < 1e-8);
+        let both = crate::boolean::cut(&body, &bore(a, 5., 90., 2.5, -2.5), TOL).unwrap();
+        assert!((start - measure(&both, TOL).unwrap().volume - 2. * one_wall(a, ro, ri)).abs() < 1e-8);
+        let mut holed = body.clone();
+        for deg in [60., 120., 0.] {
+            holed = crate::boolean::cut(&holed, &bore(a, 5., deg, 2.5, 0.5), TOL).unwrap();
+        }
+        let next = crate::boolean::cut(&holed, &bore(a, 5., 90., 2.5, 0.5), TOL).unwrap();
+        crate::topology::check(&next, TOL).unwrap();
+        assert!((start - measure(&next, TOL).unwrap().volume - 4. * one_wall(a, ro, ri)).abs() < 1e-8);
+        // Overlapping an existing hole is still refused, seam or not.
+        assert!(matches!(crate::boolean::cut(&one, &bore(a, 5.2, 90., 2.5, 0.5), TOL), Err(KernelError::Unsupported(_))));
+    }
+
+    #[test]
     fn holes_meeting_ends_seams_or_each_other_and_wall_pockets_are_refused() {
         let (ro, ri, a) = (1.75, 1.5, 0.25);
         let body = pipe(ro, ri);
         // Ending inside the wall is a pocket, not this domain.
         assert!(!selects(&body, &bore(a, 5., 10., 2.5, 1.6), TOL));
-        // Across the pipe's end, and on the seam (the profile circles start at +X: 90 degrees from +Z).
+        // Across the pipe's end.
         assert!(matches!(crate::boolean::cut(&body, &bore(a, 0.1, 10., 2.5, 0.5), TOL), Err(KernelError::Unsupported(_))));
-        assert!(matches!(crate::boolean::cut(&body, &bore(a, 5., 90., 2.5, 0.5), TOL), Err(KernelError::Unsupported(_))));
         // A second hole overlapping the first.
         let once = crate::boolean::cut(&body, &bore(a, 5., 10., 2.5, 0.5), TOL).unwrap();
         assert!(matches!(crate::boolean::cut(&once, &bore(a, 5.2, 10., 2.5, 0.5), TOL), Err(KernelError::Unsupported(_))));

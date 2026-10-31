@@ -5,6 +5,7 @@
 mod bore;
 mod box_cut;
 mod capsule;
+mod cope;
 mod endcut;
 mod passage;
 mod radial;
@@ -20,6 +21,7 @@ enum Domain {
     Bore,
     Cross,
     Capsule,
+    Cope,
 }
 
 /// The exact drill the bore domain takes: one cylinder wall between two caps, one seam.
@@ -53,6 +55,10 @@ fn select(
     // Round cutters crossing a pipe wall radially, at any clock angle (selected before execution).
     if radial::selects(body, tool, tolerance) {
         return Ok(Domain::Radial);
+    }
+    // A round cutter oblique to a pipe's axis (a cope at an angle): neither the bore nor the transverse chart.
+    if cope::selects(body, tool, tolerance) {
+        return Ok(Domain::Cope);
     }
     let cylinders = tool
         .faces
@@ -94,6 +100,7 @@ pub fn cut(
         Domain::Bore => bore::cut(body, tool, tolerance),
         Domain::Cross => endcut::cross_cut(body, tool, tolerance),
         Domain::Capsule => capsule::cut(body, tool, tolerance),
+        Domain::Cope => cope::cut(body, tool, tolerance),
     }
 }
 

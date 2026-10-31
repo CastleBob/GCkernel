@@ -290,7 +290,26 @@ fn boundary_hits(body: &Body, mid: f64, tol: f64) -> Result<Vec<Hit>> {
     if hits.len() > 1024 {
         return Err(unsupported("too many transverse section segments"));
     }
-    Ok(hits)
+    Ok(join_seams(hits, tol))
+}
+/// An earlier transverse cut leaves coplanar partition seams: one plane or cylinder split into faces that meet
+/// along an edge (Bob's L3 Angle 8 Coped Both Ends: the heel face split at the first cope's end, y 1.75). Their
+/// section segments lie on the IDENTICAL graph, face the same way and share the seam's crossing point, so
+/// together they are one boundary segment: they are joined, exactly. A segment pair that differs in graph or
+/// orientation, or abuts only within a gap, is left alone (and refused later as before).
+fn join_seams(mut hits: Vec<Hit>, tol: f64) -> Vec<Hit> {
+    hits.sort_by(|a, b| a.lo.total_cmp(&b.lo));
+    let mut joined: Vec<Hit> = Vec::with_capacity(hits.len());
+    for h in hits {
+        match joined
+            .iter_mut()
+            .find(|p| p.role == h.role && p.graph == h.graph && (h.lo - p.hi).abs() <= tol)
+        {
+            Some(p) => p.hi = p.hi.max(h.hi),
+            None => joined.push(h),
+        }
+    }
+    joined
 }
 fn sections_with_budget(
     body: &Body,
@@ -491,7 +510,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     cut_in_frame(body, tool, tol, frame(body, tool)?)
 }
 pub(super) fn cut_along(body: &Body, tool: &Body, axis: usize, tol: f64) -> Result<Body> {
-    cut_in_frame(body, tool, tol, frame_for_axis(body, axis)?)
+    cut_in_frame(body, tool, tol, frame_for_axis_with(body, Some(tool), axis)?)
 }
 fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
     if !tol.is_finite() || tol <= 0. {
@@ -518,6 +537,12 @@ fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
     };
     let body = transform(&shift(body, origin.scale(-1.)), |p| f.local(p));
     let tool = transform(&shift(tool, origin.scale(-1.)), |p| f.local(p));
+    let result = super::split::cut(&body, &tool, tol, cut_local)?;
+    Ok(shift(&transform(&result, |p| f.world(p)), origin))
+}
+/// The transverse cut in the local chart (x stations, y the beam axis, z the sweep).
+fn cut_local(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    let (body, tool) = (body.clone(), tool.clone());
     validate(&body, tol)?;
     validate(&tool, tol)?;
     let mut xs = events(&body);
@@ -529,14 +554,27 @@ fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
     let mut extrema = Vec::new();
     for operand in [&body, &tool] {
         for edge in &operand.edges {
-            if let Some((_, u, v, t0, t1)) = section_projection(&edge.curve) {
+            if let Some((c, u, v, t0, t1)) = section_projection(&edge.curve) {
                 if u.x.hypot(v.x) == 0. {
                     continue;
                 }
+                // The analytic extremum c.x +- r for a circle whose plane holds the station direction (a cylinder
+                // across x), not the circle evaluated through its own frame: a wall arc left by an earlier cut
+                // starts elsewhere round its circle, and evaluating it at its extremum gave 0.8299999999999998 for
+                // cx + r = 0.83 (Bob's Pipe 1.25 18 Copes Rotated 90), whose two ulps acos turns into 2e-8 of angle,
+                // 1e-8 off the vertex and 7.6e-8 in^3. Otherwise the evaluated extremum, as before.
+                let exact = match edge.curve {
+                    Curve::Arc { n, r, .. } if n.x == 0. => Some(r),
+                    Curve::CylinderPair { a, rho, .. } if a.x == 0. => Some(rho),
+                    _ => None,
+                };
                 let phase = v.x.atan2(u.x);
-                for angle in [phase, phase + PI] {
+                for (k, angle) in [phase, phase + PI].into_iter().enumerate() {
                     for t in parameters(angle, t0, t1) {
-                        extrema.push(eval(&edge.curve, t).x);
+                        extrema.push(match exact {
+                            Some(r) => c.x + if k == 0 { r } else { -r },
+                            None => eval(&edge.curve, t).x,
+                        });
                     }
                 }
             }
@@ -683,8 +721,7 @@ fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
         let right = bands.get(i).map(Vec::as_slice).unwrap_or(&[]);
         result.extend(end_patches(left, right, xs[i], tol)?);
     }
-    let result = assemble(result, tol)?;
-    Ok(shift(&transform(&result, |p| f.world(p)), origin))
+    assemble(result, tol)
 }
 
 #[cfg(test)]
