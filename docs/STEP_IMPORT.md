@@ -285,3 +285,26 @@ conforming fan construction. No new neutral tag or C# geometry is required.
 Independent analytic solids exercise a quadratic roof with/without a hole,
 multiple knot spans, rigid frames, exact volume/area formulas, shared mesh
 boundaries, transport and rejection of mismatched/reversed/duplicated loops.
+
+## STEP serialization (2026-10-31)
+
+`step::write` serializes a complete batch of checked bodies to deterministic AP203
+text in inches. It preserves shared vertices/edges, face senses, loop orientation,
+line/circle/ellipse and polynomial/rational cubic boundaries. Plane, circular and
+elliptic cylinder, cone, sphere, torus and tensor spline supports are retained.
+Conjugate ellipse diameters use the exact principal-axis rotation identity.
+Tensor grids use degree-three piecewise Bezier knots; adjacent homogeneous control
+nets must agree within floating-point roundoff after consistent weight scaling.
+Cylinder-intersection curves and general revolved spline supports explicitly refuse.
+There is no tessellation, curve fitting, object omission or file writing.
+
+The strict reader validates emitted text before it is returned; this is an output
+check, not an independent oracle. Names use STEP escaping (including Unicode).
+Limits: 1024 bodies, 32768-byte names, 100000 vertices/edges/faces per body,
+16384 spline controls, 64 MiB text and one million emitted entities.
+Operation 17 request: [1, count, (nameByteCount, UTF8 bytes, bodyValueCount, body)...].
+Reply: [1, byteCount, ASCII STEP bytes]. KernelStep.Write transports detached bytes;
+callers explicitly own any destination write. Product/document intake is unchanged.
+Verification includes analytic mass/topology, Unicode, multiple bodies, malformed
+packets, strict round trips and independent EyeShot comparisons of four trimmed
+roof variants and four exported spline fixtures (29 native cases total).

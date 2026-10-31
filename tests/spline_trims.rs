@@ -8,6 +8,39 @@ use gc_kernel::{
     tessellate, topology,
 };
 const TOL: f64 = 1e-6;
+#[test]
+fn exported_trimmed_roofs_roundtrip_and_can_supply_native_reference_files() {
+    for hole in [false, true] {
+        for multi in [false, true] {
+            let b = solid(hole, multi);
+            let text = gc_kernel::step::write(&[("Trimmed roof", &b)], TOL).unwrap();
+            let restored = gc_kernel::step::read(text.as_bytes(), TOL)
+                .unwrap()
+                .bodies
+                .remove(0)
+                .body;
+            assert!(
+                (mass::measure(&restored, TOL).unwrap().volume
+                    - mass::measure(&b, TOL).unwrap().volume)
+                    .abs()
+                    < 1e-9
+            );
+            topology::check(&restored, TOL).unwrap();
+            tessellate::tessellate(&restored, 0.02).unwrap();
+            if let Ok(directory) = std::env::var("GC_STEP_EXPORT_FIXTURES") {
+                std::fs::write(
+                    std::path::Path::new(&directory).join(format!(
+                        "TrimmedRoof-{}-{}.step",
+                        if hole { "hole" } else { "solid" },
+                        if multi { "multi" } else { "single" }
+                    )),
+                    text,
+                )
+                .unwrap();
+            }
+        }
+    }
+}
 fn rectangle(a: f64, b: f64, c: f64, d: f64, reverse: bool) -> Vec<Curve> {
     let mut p = vec![
         Vec3::new(a, c, 0.),

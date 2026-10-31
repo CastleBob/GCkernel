@@ -53,6 +53,7 @@ pub const OP_PRISM_PROFILE: u32 = 13;
 pub const OP_DXF_READ: u32 = 14;
 pub const OP_DXF_WRITE: u32 = 15;
 pub const OP_STEP_READ: u32 = 16;
+pub const OP_STEP_WRITE: u32 = 17;
 
 pub struct Request {
     pub op: u32,
@@ -103,6 +104,7 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
         OP_DXF_READ => return crate::dxf::wire::read_op(&request.data),
         OP_DXF_WRITE => return crate::dxf::wire::write_op(&request.data),
         OP_STEP_READ => return crate::step::wire::read_op(&request.data, tol),
+        OP_STEP_WRITE => return crate::step::wire::write_op(&request.data, tol),
         _ => {}
     }
     let mut reader = Reader::with_tolerance(&request.data, tol);

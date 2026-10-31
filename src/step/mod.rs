@@ -4,6 +4,8 @@ mod spline;
 mod surface;
 mod syntax;
 pub mod wire;
+mod write;
+pub use write::write;
 use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::{Body, Edge, Face};
 use crate::{mass, neutral, topology, KernelError};

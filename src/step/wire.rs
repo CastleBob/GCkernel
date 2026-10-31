@@ -3,6 +3,45 @@
 //!  neutral body count, neutral body)...]. No source or destination writes.
 use super::{invalid, Result};
 use crate::{neutral, KernelError};
+/// Op 17: [1, count, (name byte count, UTF8 name bytes, body value count,
+/// body)...] -> [1, byte count, ASCII STEP bytes]. No filesystem writes.
+pub fn write_op(data: &[f64], tolerance: f64) -> Result<Vec<f64>> {
+    let mut r = neutral::Reader::with_tolerance(data, tolerance);
+    if r.next()? != 1. {
+        return invalid("invalid STEP export envelope version");
+    }
+    let n = r.count()?;
+    if n == 0 || n > 1024 {
+        return invalid("invalid STEP export body count");
+    }
+    let mut items = Vec::with_capacity(n);
+    for _ in 0..n {
+        let count = r.count()?;
+        if count > 32768 {
+            return invalid("STEP export name exceeds 32768 bytes");
+        }
+        let bytes = (0..count)
+            .map(|_| r.index(256, "name byte").map(|b| b as u8))
+            .collect::<Result<Vec<_>>>()?;
+        let name = String::from_utf8(bytes)
+            .map_err(|_| KernelError::InvalidInput("STEP export name is not UTF-8".into()))?;
+        let count = r.count()?;
+        let values = (0..count).map(|_| r.next()).collect::<Result<Vec<_>>>()?;
+        let mut body = neutral::Reader::with_tolerance(&values, tolerance);
+        let parsed = body.body()?;
+        body.finish()?;
+        items.push((name, parsed));
+    }
+    r.finish()?;
+    let pairs = items
+        .iter()
+        .map(|(name, body)| (name.as_str(), body))
+        .collect::<Vec<_>>();
+    let bytes = super::write(&pairs, tolerance)?.into_bytes();
+    let mut out = vec![1., bytes.len() as f64];
+    out.extend(bytes.into_iter().map(f64::from));
+    Ok(out)
+}
 pub fn read_op(data: &[f64], tolerance: f64) -> Result<Vec<f64>> {
     if data.len() < 2 || data[0] != 1.0 {
         return invalid("invalid STEP request version/envelope");
