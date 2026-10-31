@@ -196,13 +196,8 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     let axes: Vec<_> = (0..3)
         .filter(|k| lo[*k] <= base_lo[*k] && hi[*k] >= base_hi[*k])
         .collect();
-    if axes.len() >= 2 {
+    if axes.len() != 1 {
         return super::endcut::planar_cross_cut(body, tool, tol);
-    }
-    if axes.is_empty() {
-        return Err(unsupported(
-            "rectangular tool must have one unambiguous axis spanning the complete stock bounds",
-        ));
     }
     let axis = axes[0];
     let u = (axis + 1) % 3;
@@ -558,11 +553,14 @@ mod tests {
         );
     }
     #[test]
-    fn blind_box_cut_refuses_and_complete_removal_returns_empty() {
-        assert!(matches!(
-            crate::boolean::cut(&captured("base"), &tool(3., 7., 5., 7., -2., 1.), 1e-6),
-            Err(KernelError::Unsupported(_))
-        ));
+    fn blind_box_pocket_cuts_exactly_and_complete_removal_returns_empty() {
+        // A box spanning none of the stock's axes (Claude 2026-10-31, after Bob's angle copes): a blind pocket 0.115
+        // deep into the 0.23 web (z -2.115..-1.885) over 4 x 2, in the transverse chart.
+        let base = captured("base");
+        let pocket = crate::boolean::cut(&base, &tool(3., 7., 5., 7., -2., 1.), 1e-6).unwrap();
+        crate::topology::check(&pocket, 1e-6).unwrap();
+        let removed = crate::mass::measure(&base, 1e-6).unwrap().volume - crate::mass::measure(&pocket, 1e-6).unwrap().volume;
+        assert!((removed - 4. * 2. * 0.115).abs() < 1e-11, "{removed}");
         let empty =
             crate::boolean::cut(&captured("base"), &tool(-1., 11., -1., 37., -6., 1.), 1e-6)
                 .unwrap();

@@ -10,6 +10,8 @@ use std::f64::consts::{PI, TAU};
 
 #[path = "endcut_cross.rs"]
 mod cross;
+#[path = "endcut_split.rs"]
+mod split;
 
 type Result<T> = std::result::Result<T, KernelError>;
 fn unsupported(s: &str) -> KernelError {
@@ -1273,38 +1275,49 @@ fn frame(body: &Body, tool: &Body) -> Result<Frame> {
     let w = tool_axis.ok_or_else(|| {
         unsupported("end-cut sweep axis is not specified by a cylindrical tool wall")
     })?;
-    frame_for_axis(body, w)
+    frame_for_axis_with(body, Some(tool), w)
 }
+#[cfg(test)]
 fn frame_for_axis(body: &Body, w: usize) -> Result<Frame> {
-    let mut beam_axis = None;
+    frame_for_axis_with(body, None, w)
+}
+/// The beam axis v is the one longitudinal cylinder axis other than the sweep w. With two (a pipe already coped
+/// across another axis, Bob's Pipe 1.25 18 Copes Rotated 90), v is the one for which the other axis's faces lie
+/// wholly beyond the tool along v, so the cut runs on a split piece (`split`); chosen from the geometry before
+/// the cut, never by retrying a failed one.
+fn frame_for_axis_with(body: &Body, tool: Option<&Body>, w: usize) -> Result<Frame> {
+    let mut axes = Vec::new();
     for f in &body.faces {
         if let Surface::Cylinder { a, .. } = f.surface {
             let a = axis(a)?;
-            if a != w {
-                if beam_axis.is_some_and(|old| old != a) {
-                    return Err(unsupported(
-                        "end-cut base has more than one longitudinal cylinder axis",
-                    ));
-                }
-                beam_axis = Some(a);
+            if a != w && !axes.contains(&a) {
+                axes.push(a);
             }
         }
     }
-    let v = beam_axis.ok_or_else(|| {
-        unsupported("end-cut base has no perpendicular longitudinal cylinder axis")
-    })?;
     let unit = |i: usize| match i {
         0 => p(1., 0., 0.),
         1 => p(0., 1., 0.),
         _ => p(0., 0., 1.),
     };
-    let v = unit(v);
-    let w = unit(w);
-    Ok(Frame {
-        u: v.cross(w),
-        v,
-        w,
-    })
+    let make = |v: usize| Frame { u: unit(v).cross(unit(w)), v: unit(v), w: unit(w) };
+    let v = match (axes.as_slice(), tool) {
+        (&[v], _) => v,
+        (&[], _) => return Err(unsupported("end-cut base has no perpendicular longitudinal cylinder axis")),
+        (&[a, b], Some(tool)) => {
+            let fits = |v: usize| {
+                let f = make(v);
+                split::separable(&transform(body, |q| f.local(q)), &transform(tool, |q| f.local(q)))
+            };
+            match (fits(a), fits(b)) {
+                (true, false) => a,
+                (false, true) => b,
+                _ => return Err(unsupported("end-cut base has more than one longitudinal cylinder axis")),
+            }
+        }
+        _ => return Err(unsupported("end-cut base has more than one longitudinal cylinder axis")),
+    };
+    Ok(make(v))
 }
 fn transform(body: &Body, map: impl Fn(Vec3) -> Vec3) -> Body {
     let mut result = body.clone();
@@ -1444,12 +1457,25 @@ pub(super) fn planar_cross_cut(body: &Body, tool: &Body, tol: f64) -> Result<Bod
             }
         }
     }
+    // The stock's own planes must be section graphs in the chart too: a plane turned in both the beam direction v
+    // and the sweep w (Bob's earlier miter, normal in X and Y, under a later cardinal cope box) has no axial span
+    // there. Decided from the operands before the cut, never by retrying another chart after a failure.
+    let body_normals: Vec<[f64; 3]> = body
+        .faces
+        .iter()
+        .filter_map(|f| match f.surface {
+            Surface::Plane { n, .. } => Some(xyz(n)),
+            _ => None,
+        })
+        .collect();
     let chosen = (0..3)
         .find(|w| {
-            cylinder_axes.iter().filter(|k| **k != *w).count() == 1
+            let others: Vec<usize> = cylinder_axes.iter().copied().filter(|k| *k != *w).collect();
+            others.len() == 1
                 && normals.iter().all(|n| {
                     n[*w] == 0. || ((0..3).all(|k| k == *w || n[k] == 0.) && n[*w].abs() == 1.)
                 })
+                && body_normals.iter().all(|n| n[others[0]] == 0. || n[*w] == 0.)
         })
         .ok_or_else(|| {
             unsupported("no cardinal section chart for the planar cutter and stock cylinders")

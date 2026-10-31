@@ -124,8 +124,8 @@ Checks cover web/root rectangles, repeated pipe/tube trims, independent centroid
 volume integrals, 13,125 material probes per end case, transformed/scaled cases,
 complete removal, flush contact and severing rejection. Square trims commute
 with separated wall holes in the tested pipe and rectangular tube. General
-oblique geometry and a box not spanning a stock coordinate remain outside this
-entry's supported domain. Tests can export exact end-cut inputs/results to a
+oblique geometry remains outside this
+entry's supported domain (a box spanning no stock coordinate: see "Survey gaps closed 2026-10-31"). Tests can export exact end-cut inputs/results to a
 caller-selected directory with GCKERNEL_ASTRA_END_EXPORT for native review.
 
 ### Prism section cuts (Claude, 2026-10-29)
@@ -397,3 +397,54 @@ The fifth cut is tested on three axes and at1e5 translation. General convex
 profile checks cover a plain plate, two separated I-beam web triangles on all
 three axes, repeated-hole and partial-depth refusal. Native completion remains
 a separate handoff result, not implied by these Rust tests.
+
+
+## Survey gaps closed 2026-10-31 (Claude)
+
+Bob's linear-nesting parts that the GCmaker native survey found stopping in the kernel. Fixtures are the worker's
+own inputs (tests/fixtures/survey_gaps); tests/survey_gaps.rs checks every removed volume against an independent
+value from the parts' dimensions (closed form, or a quadrature of the analytic section written in the test).
+
+- **Box tools spanning no stock axis** (L3 Angle copes): a plain box that spans none of the curved stock's axes
+  now enters the transverse chart (planar_cross_cut) instead of being refused. A blind web pocket on the I-beam
+  takes the same path (exact 0.92 in^3 in box_cut's test, formerly a refusal). The chart is chosen from the tool's
+  normals AND the stock's planes: a sweep w whose beam axis v and w would both be in an earlier miter's normal has
+  no axial span for that plane, so the chart is not chosen (L3 Angle 18 Miter And Cope; geometry before the cut).
+- **Coplanar cell seams**: an earlier transverse result keeps partition seams; section segments on the IDENTICAL
+  graph, facing the same way and meeting at the seam's crossing, are one boundary segment and are joined (L3 Angle
+  8 Coped Both Ends). Distinct graphs, opposite orientations or gaps are left alone.
+- **Analytic extremal stations**: a circle whose plane holds the station direction (a cylinder across x) gives its
+  extremum station as c.x +- r, not its evaluation through its own frame. A wall arc left by an earlier cut,
+  evaluated at its extremum, gave 0.8299999999999998 for cx + r = 0.83; acos(1 - e) ~ sqrt(2 e) turned those two
+  ulps into 2e-8 of angle, an edge end 1e-8 off its vertex and 7.6e-8 in^3 of volume (Pipe 1.25 18 Copes Rotated
+  90 and the slot after a miter, both now exact to 1e-10 against their integrals). A snap of circle_angle itself to
+  the extremum within roundoff was tried and rejected: at a genuine crossing a few ulps from an extremum it moved
+  the rat-hole tests' pair ends and lost 3.7e-7 against their independent references.
+- **Radial bore on the wall's seam** (Pipe 1.25 12 Cross Holes, a side hole at 3:00): the seam of a plain periodic
+  wall (one full ring at each end, one straight seam used both ways, nothing else at its vertices) is a
+  parametrization choice, not geometry; when the new hole's angular interval reaches it, the seam moves to the
+  middle of the widest gap between the wall's holes (rings restarted at the new generator, surfaces unchanged).
+  Each hole's interval: centre direction branch * a, half-width asin((|offset| + rho) / r). The radial domain
+  now also refuses planar faces turned inside out (outward signed area), which the topology check alone misses.
+- **Split transverse cuts** (endcut_split.rs; Pipe 1.25 18 Copes Rotated 90, Pipe 1.25 24 Slot And Miter): when the
+  body has faces the chart cannot hold (a cylinder along the stations, a plane turned in both v and w) that lie
+  wholly beyond the tool along the beam axis, the body is split by y = c in the middle of the widest gap between
+  vertices and edge extrema there; every face y = c crosses must be a plane with n.y = 0 or a cylinder along y,
+  crossed by exactly two straight edge uses. Each piece gets a cap at y = c; the near piece is cut in the chart;
+  the caps are removed and the open edges along y = c are split at each other's vertices and joined where they are
+  the same curve (one vertex within tolerance), every one of them or the cut is refused. With two longitudinal
+  cylinder axes besides the sweep, the beam axis is the one for which the other axis's faces are separable this
+  way (geometry before the cut). The far piece keeps its faces, curves and surfaces exactly; the faces y = c crossed
+  keep a seam there.
+- **Oblique pipe copes** (cope.rs; Pipe 1.25 12 Coped 60 To 2.375): a full round cutter oblique to a plain pipe's
+  axis that holds one whole end annulus strictly inside its cylinder, clears the other end's whole disk, and whose
+  finite length covers every shared point on the material side. Each wall's new end is one CylinderPair loop (wall
+  = parameter cylinder, cutter = root, branch toward the material), discriminant proved positive all the way round;
+  the cutter's cylinder between the loops faces into the cope. Bounds: with phi between the axes, a shared point is
+  O_b + alpha b + beta d + gamma n with |alpha| <= Rc / sin phi, |beta| <= Ro / sin phi, clipped by the coped
+  end's half-space; its place along the cutter is extreme at that clipped box's vertices. The squared distance from
+  the cutter's axis round a circle across the pipe is a degree-two trigonometric polynomial (eight samples, chord
+  bound). Anything else (a pipe already holed or cut, a short cutter, an end not wholly inside) is refused by name.
+
+Not done: native normalized ends (GCmaker's Normalize End builds a sampled envelope; its analytic face, radial
+lines through the outer wall's cope curve, is not a surface the kernel has) and NC1 rolled-root cutters.
