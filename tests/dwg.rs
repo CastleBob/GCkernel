@@ -444,6 +444,166 @@ fn r2007_damage_beyond_repair_fails_by_name() {
     fails(&f, "'AcDb:AcDbObjects' data page");
 }
 
+/// The error message for a read that must fail as damaged beyond repair (never a drawing, never another error).
+fn beyond_repair(f: &[u8], what: &str) -> String {
+    match dwg::read(f) {
+        Err(e) => {
+            let m = e.to_string();
+            assert!(m.contains("the DWG 2007 file is damaged beyond repair at") && m.contains(what), "{what}: {m}");
+            m
+        }
+        Ok(_) => panic!("{what}: a damaged file read as a drawing"),
+    }
+}
+
+/// 3 or 4 byte errors in one data page code word: more than RS(255, 251) corrects. About half the time the decoder
+/// takes such a word to another code word; the page CRC and checksum catch that, so every case fails by name.
+#[test]
+fn r2007_data_word_miscorrection_is_caught() {
+    let base = sample_2007();
+    let (mut refused, mut caught) = (0, 0);
+    for (at, what) in [(R2007_OBJECTS_PAGE, "'AcDb:AcDbObjects' data page 8"), (R2007_HEADER_PAGE, "'AcDb:Header' data page 16")] {
+        for word in 0..at.1 {
+            for errors in [3, 4] {
+                for pattern in 0..6usize {
+                    let mut f = base.clone();
+                    for m in 0..errors {
+                        let i = (word * 37 + pattern * 53 + m * 71 + 11) % 255;
+                        f[at.0 + i * at.1 + word] ^= (1 + (pattern * 29 + m * 83 + word) % 255) as u8;
+                    }
+                    let message = beyond_repair(&f, what);
+                    if message.contains("error correction can repair") { refused += 1 } else { caught += 1 }
+                }
+            }
+        }
+    }
+    println!("{refused} refused by the decoder, {caught} miscorrections caught by the page CRC");
+    assert!(caught > 0 && refused > 0, "{refused} {caught}");
+}
+
+/// GF(2^8) product modulo `poly` (its x^8 term left out): 0x1D for the data page field x^8 + x^4 + x^3 + x^2 + 1,
+/// 0x69 for the system page field x^8 + x^6 + x^5 + x^3 + 1.
+fn gf_mul(mut a: u8, mut b: u8, poly: u8) -> u8 {
+    let mut p = 0u8;
+    while b != 0 {
+        if b & 1 != 0 {
+            p ^= a;
+        }
+        let high = a & 0x80 != 0;
+        a <<= 1;
+        if high {
+            a ^= poly;
+        }
+        b >>= 1;
+    }
+    p
+}
+
+/// The code's generator polynomial (x - a)(x - a^2)..(x - a^parity), a = 2, lowest coefficient first: itself a
+/// code word.
+fn generator(parity: usize, poly: u8) -> Vec<u8> {
+    let mut g = vec![1u8];
+    let mut root = 1u8;
+    for _ in 0..parity {
+        root = gf_mul(root, 2, poly);
+        let mut next = vec![0u8; g.len() + 1];
+        for (i, &c) in g.iter().enumerate() {
+            next[i + 1] ^= c;
+            next[i] ^= gf_mul(c, root, poly);
+        }
+        g = next;
+    }
+    g
+}
+
+/// The same for system pages and the file header: a code word added to every word (every copy) passes Reed-Solomon
+/// and fails their CRCs by name; where a copy is left whole, that copy is read.
+#[test]
+fn r2007_undetectable_system_changes_fail_their_crcs() {
+    let g = generator(16, 0x69);
+    assert_eq!(g.len(), 17);
+    let base = sample_2007();
+    let good = dwg::read(&base).unwrap();
+    // The generator shifted to 0, 20, .. 220 and summed (still a code word): every copy in the word is touched.
+    let add = |f: &mut [u8], (at, blocks): (usize, usize), word: usize| {
+        for shift in (0..=220).step_by(20) {
+            for (k, &c) in g.iter().enumerate() {
+                f[at + (shift + k) * blocks + word] ^= c;
+            }
+        }
+    };
+    for (at, what) in [(R2007_PAGE_MAP, "page map"), (R2007_SECTION_MAP, "section map")] {
+        let mut f = base.clone();
+        for word in 0..at.1 {
+            add(&mut f, at, word);
+        }
+        let message = beyond_repair(&f, what);
+        assert!(message.contains("CRC does not match"), "{message}");
+        // Only the first word: the copies held in later words are read.
+        let mut f = base.clone();
+        add(&mut f, at, 0);
+        assert_eq!(dwg::read(&f).unwrap(), good, "{what}: the first word changed");
+    }
+    // The file header: both copies changed fails; the copy at 0x80 changed alone reads from the end of the file.
+    let mut f = base.clone();
+    let end = (f.len() - 0x400, 3);
+    add(&mut f, R2007_HEADER, 0);
+    add(&mut f, end, 0);
+    // (Here the length field changes too, so the refusal names an impossible length rather than the CRC.)
+    beyond_repair(&f, "file header");
+    // The header's 0xC8-byte block is repeated 3 times in its 3 words (data bytes 0, 200, 400): a generator at data
+    // bytes 40, 240 and 440 (word 0 position 40, word 1 positions 1 and 201) of both header copies changes every
+    // copy's stored data and no length field.
+    let mut f = base.clone();
+    for (at, blocks) in [R2007_HEADER, end] {
+        for (word, position) in [(0, 40), (1, 1), (1, 201)] {
+            for (k, &c) in g.iter().enumerate() {
+                f[at + (position + k) * blocks + word] ^= c;
+            }
+        }
+    }
+    let message = beyond_repair(&f, "file header");
+    assert!(message.contains("CRC does not match"), "{message}");
+    let mut f = base.clone();
+    add(&mut f, R2007_HEADER, 0);
+    assert_eq!(dwg::read(&f).unwrap(), good, "file header copy at 0x80 changed");
+}
+
+/// Adding a code word of the data page code (the generator (x - a)(x - a^2)(x - a^3)(x - a^4), a = 2, shifted)
+/// leaves every syndrome zero, so Reed-Solomon sees nothing; only the page CRC can tell the data is wrong. A change
+/// that only touches parity or the filler after the page's stored bytes changes nothing read, and reads as before.
+#[test]
+fn r2007_undetectable_word_changes_fail_the_page_crc() {
+    let g = generator(4, 0x1D);
+    assert_eq!(g.len(), 5);
+    let base = sample_2007();
+    let good = dwg::read(&base).unwrap();
+    let (mut caught, mut unused) = (0, 0);
+    // (page, its stored (compressed) byte count, name)
+    for (at, stored, what) in [(R2007_OBJECTS_PAGE, 6942, "'AcDb:AcDbObjects' data page 8"),
+        (R2007_HEADER_PAGE, 1404, "'AcDb:Header' data page 16")] {
+        for word in 0..at.1 {
+            for shift in [0usize, 100, 246, 250] {
+                let mut f = base.clone();
+                for (k, &c) in g.iter().enumerate() {
+                    f[at.0 + ((shift + k) % 255) * at.1 + word] ^= c;
+                }
+                let used = (0..5).map(|k| (shift + k) % 255).any(|p| p < 251 && word * 251 + p < stored);
+                if used {
+                    let message = beyond_repair(&f, what);
+                    assert!(message.contains("CRC does not match"), "{message}");
+                    caught += 1;
+                } else {
+                    assert_eq!(dwg::read(&f).unwrap(), good, "{what} word {word} shift {shift}");
+                    unused += 1;
+                }
+            }
+        }
+    }
+    println!("{caught} wrong code words caught by the page CRC, {unused} in unused bytes read as before");
+    assert!(caught > 100 && unused > 0);
+}
+
 /// GCKERNEL_DWG_SCAN=<folder>[;<folder>...] reads every `*.dwg` under those folders (read only) and reports each
 /// one's version, curve count and warnings, or the reason it was refused; it fails only on a panic.
 #[test]

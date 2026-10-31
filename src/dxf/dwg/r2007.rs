@@ -3,12 +3,19 @@
 //! the R21 LZ77 variant. Byte errors are corrected with the parity (rs.rs): up to 8 per 255-byte code word in the
 //! file header and system pages, 2 in data pages. A system page holds its data several times and the file header
 //! is repeated at the end of the file, so a copy beyond repair falls back to the next one.
+//!
+//! After correction every integrity value the file carries is checked (crc.rs), so a code word with more errors
+//! than its parity can correct, which the decoder may take to another code word, is refused by name rather than
+//! read as wrong data: the file header's stored-data CRC and its own CRC; the page and section maps' CRCs of their
+//! stored and decompressed bytes (a copy that fails falls back to the next); each data page's CRC of its stored
+//! bytes and checksum of its decompressed data. A section is the concatenation of its pages, so that verifies it
+//! too; the spec gives no separate value for a whole section.
 
 use std::collections::HashMap;
 
 use super::bits::{bad, R};
 use super::r2004::Sections;
-use super::rs;
+use super::{crc, rs};
 
 /// Sections larger than this are refused rather than allocated (a damaged size field).
 const MAX_SECTION: u64 = 512 << 20;
@@ -119,6 +126,30 @@ impl<'a> Coded<'a> {
             "the DWG 2007 file is damaged beyond repair at byte 0x{:X} ({}, Reed-Solomon code word {} of {}): it has \
              more byte errors than its error correction can repair", self.base, self.what, j + 1, self.blocks))
     }
+
+    /// Damage found by an integrity value after error correction (more errors than the code could tell).
+    fn damaged(&self, why: &str) -> crate::KernelError {
+        crate::KernelError::InvalidInput(format!(
+            "the DWG 2007 file is damaged beyond repair at byte 0x{:X} ({}): {why}", self.base, self.what))
+    }
+}
+
+/// The CRCs of a system page and their seed (from the file header).
+struct PageChecks {
+    seed: u64,
+    compressed: u64,
+    decompressed: u64,
+}
+
+const CRC_MISMATCH: &str = "its CRC does not match after error correction";
+
+/// The file header's CRC (at 0x108, over its 0x110 bytes with that field taken as zero).
+fn header_crc_ok(header: &[u8]) -> bool {
+    let Some(h) = header.get(..0x110) else { return false };
+    let mut zeroed = h.to_vec();
+    zeroed[0x108..].fill(0);
+    let want = u64::from_le_bytes([h[0x108], h[0x109], h[0x10a], h[0x10b], h[0x10c], h[0x10d], h[0x10e], h[0x10f]]);
+    crc::normal(&zeroed, crc::seed2(0, zeroed.len())) == want
 }
 
 /// The file header's data (3 interleaved system code words at `at`), from the first copy that can be repaired.
@@ -128,21 +159,43 @@ fn file_header(file: &[u8], at: usize, code: &rs::Code) -> R<Vec<u8>> {
     let length = i64::from(i32::from_le_bytes([head[0x18], head[0x19], head[0x1a], head[0x1b]]));
     let n = length.unsigned_abs() as usize;
     if n > 3 * code.k() - 0x20 {
-        return bad("the R2007 file header is damaged");
+        return Err(coded.damaged("its data length is impossible"));
     }
-    // The 0x20 + n bytes are repeated, at a multiple of 8 bytes, as often as they fit.
+    // The 0x20 + n bytes are repeated, at a multiple of 8 bytes, as often as they fit. A copy is used when its
+    // code words can be repaired and both CRCs (stored data, header) match.
     let copy = (0x20 + n + 7) & !7;
-    let mut failed = 0;
+    let mut failure = None;
     for c in 0..(3 * code.k() / copy).max(1) {
-        match coded.bytes(c * copy, 0x20 + n) {
-            Ok(d) => {
-                let body = &d[0x20..];
-                return if length < 0 { Ok(body.to_vec()) } else { decompress(body, 0x110) };
+        let d = match coded.bytes(c * copy, 0x20 + n) {
+            Ok(d) => d,
+            Err(j) => {
+                failure = Some(coded.beyond_repair(j));
+                continue;
             }
-            Err(j) => failed = j,
+        };
+        let body = &d[0x20..];
+        if crc::normal(body, crc::seed2(0, body.len())) != le64(&d, 0x10)? {
+            failure = Some(coded.damaged(CRC_MISMATCH));
+            continue;
         }
+        let header = if length < 0 {
+            body.to_vec()
+        } else {
+            match decompress(body, 0x110) {
+                Ok(h) => h,
+                Err(e) => {
+                    failure = Some(e);
+                    continue;
+                }
+            }
+        };
+        if !header_crc_ok(&header) {
+            failure = Some(coded.damaged(CRC_MISMATCH));
+            continue;
+        }
+        return Ok(header);
     }
-    Err(coded.beyond_repair(failed))
+    Err(failure.unwrap_or_else(|| coded.beyond_repair(0)))
 }
 
 pub(super) fn sections(file: &[u8], wanted: &[&str]) -> R<Sections> {
@@ -165,9 +218,12 @@ pub(super) fn sections(file: &[u8], wanted: &[&str]) -> R<Sections> {
     let sections_map_id = field(0xC0)?;
     let sections_map_size = field(0xC8)?;
     let sections_map_factor = field(0xD8)?;
+    let crc_seed = field(0xF0)?;
+    let page_map_checks = PageChecks { seed: crc_seed, compressed: field(0x10)?, decompressed: field(0x80)? };
+    let section_map_checks = PageChecks { seed: crc_seed, compressed: field(0xD0)?, decompressed: field(0xA8)? };
 
     let page_map = system_page(file, pages_map_offset.saturating_add(0x480), pages_map_compressed, pages_map_size,
-        pages_map_factor, &system, "page map")?;
+        pages_map_factor, &system, "page map", &page_map_checks)?;
     let mut pages: HashMap<i64, (u64, u64)> = HashMap::new(); // id -> (stream position, size)
     let mut offset = 0u64;
     let mut at = 0;
@@ -182,7 +238,7 @@ pub(super) fn sections(file: &[u8], wanted: &[&str]) -> R<Sections> {
         return bad("the R2007 section map page is missing");
     };
     let map = system_page(file, map_at, sections_map_compressed, sections_map_size, sections_map_factor, &system,
-        "section map")?;
+        "section map", &section_map_checks)?;
 
     let mut by_name = HashMap::new();
     let mut at = 0usize;
@@ -206,7 +262,8 @@ pub(super) fn sections(file: &[u8], wanted: &[&str]) -> R<Sections> {
         let mut list = Vec::with_capacity(page_count);
         for _ in 0..page_count {
             // offset, size, id, uncompressed size, compressed size, checksum, CRC
-            list.push((le64(&map, at)?, le64(&map, at + 16)? as i64, le64(&map, at + 24)?, le64(&map, at + 32)?));
+            list.push((le64(&map, at)?, le64(&map, at + 16)? as i64, le64(&map, at + 24)?, le64(&map, at + 32)?,
+                le64(&map, at + 40)?, le64(&map, at + 48)?));
             at += 56;
         }
         if !wanted.iter().any(|w| w.eq_ignore_ascii_case(&name)) {
@@ -220,7 +277,7 @@ pub(super) fn sections(file: &[u8], wanted: &[&str]) -> R<Sections> {
             return bad(format!("section '{name}' claims {size} bytes"));
         }
         let mut data = vec![0u8; size as usize];
-        for (start, id, full, compressed) in list {
+        for (start, id, full, compressed, checksum, page_crc) in list {
             let Some(&(page_at, _)) = pages.get(&id) else {
                 return bad(format!("section '{name}' uses page {id}, which is not in the page map"));
             };
@@ -233,7 +290,15 @@ pub(super) fn sections(file: &[u8], wanted: &[&str]) -> R<Sections> {
             let what = format!("'{name}' data page {id}");
             let coded = Coded::new(file, at, blocks, &data_code, encoding == 4, aligned, &what)?;
             let stored = coded.bytes(0, compressed as usize).map_err(|j| coded.beyond_repair(j))?;
+            // The page CRC covers the stored bytes, the checksum the decompressed data: a code word that the
+            // correction took to the wrong code word (possible with 3 or more errors) is caught here.
+            if !crc::mirrored_matches(&stored, crc_seed, page_crc) {
+                return Err(coded.damaged(CRC_MISMATCH));
+            }
             let page = if compressed < full { decompress(&stored, full as usize)? } else { stored };
+            if ![0, crc_seed].iter().any(|&seed| u64::from(crc::checksum(seed, &page)) == checksum) {
+                return Err(coded.damaged("its checksum does not match after error correction"));
+            }
             let take = ((size - start) as usize).min(page.len());
             let start = start as usize;
             data[start..start + take].copy_from_slice(&page[..take]);
@@ -248,9 +313,10 @@ fn short() -> crate::KernelError {
 }
 
 /// A system page: the (padded) data repeated `factor` times, (255, 239) Reed-Solomon coded and interleaved. The
-/// first copy whose code words can all be repaired is used.
-fn system_page(file: &[u8], address: u64, compressed: u64, size: u64, factor: u64, code: &rs::Code, what: &str)
-    -> R<Vec<u8>> {
+/// first copy whose code words can all be repaired and whose CRCs match is used.
+#[allow(clippy::too_many_arguments)]
+fn system_page(file: &[u8], address: u64, compressed: u64, size: u64, factor: u64, code: &rs::Code, what: &str,
+    checks: &PageChecks) -> R<Vec<u8>> {
     if compressed > 0x400000 || size > 0x400000 || factor == 0 || factor > 0x10000 {
         return bad(format!("the R2007 {what} has impossible sizes"));
     }
@@ -258,18 +324,39 @@ fn system_page(file: &[u8], address: u64, compressed: u64, size: u64, factor: u6
     let blocks = (aligned * factor as usize).div_ceil(code.k());
     let at = usize::try_from(address).map_err(|_| short())?;
     let coded = Coded::new(file, at, blocks, code, true, 0, what)?;
-    let mut failed = 0;
+    let mut failure = None;
     for c in 0..factor as usize {
-        match coded.bytes(c * aligned, compressed as usize) {
-            Ok(stored) if compressed < size => return decompress(&stored, size as usize),
-            Ok(mut stored) => {
-                stored.truncate(size as usize);
-                return Ok(stored);
+        let stored = match coded.bytes(c * aligned, compressed as usize) {
+            Ok(stored) => stored,
+            Err(j) => {
+                failure = Some(coded.beyond_repair(j));
+                continue;
             }
-            Err(j) => failed = j,
+        };
+        if !crc::mirrored_matches(&stored, checks.seed, checks.compressed) {
+            failure = Some(coded.damaged(CRC_MISMATCH));
+            continue;
         }
+        let data = if compressed < size {
+            match decompress(&stored, size as usize) {
+                Ok(d) => d,
+                Err(e) => {
+                    failure = Some(e);
+                    continue;
+                }
+            }
+        } else {
+            let mut d = stored;
+            d.truncate(size as usize);
+            d
+        };
+        if !crc::mirrored_matches(&data, checks.seed, checks.decompressed) {
+            failure = Some(coded.damaged(CRC_MISMATCH));
+            continue;
+        }
+        return Ok(data);
     }
-    Err(coded.beyond_repair(failed))
+    Err(failure.unwrap_or_else(|| coded.beyond_repair(0)))
 }
 
 /// The order in which a literal run of 1-32 bytes lands in the output: (block size, source index) pairs, from the
@@ -518,3 +605,4 @@ mod tests {
         assert_eq!(dirty, 0);
     }
 }
+

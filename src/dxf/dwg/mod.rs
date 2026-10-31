@@ -6,6 +6,7 @@
 //! splines and polylines behave identically for both formats.
 
 mod bits;
+mod crc;
 mod header;
 mod objects;
 mod r15;
