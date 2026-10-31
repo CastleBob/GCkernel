@@ -647,7 +647,10 @@ impl Document {
                             };
                         }
                         let support_id = a[3].reference()?;
-                        let curves = if self.entity(support_id)?.has("B_SPLINE_CURVE_WITH_KNOTS") {
+                        let support = self.entity(support_id)?;
+                        let curves = if support.has("B_SPLINE_CURVE_WITH_KNOTS")
+                            || support.has("TRIMMED_CURVE")
+                        {
                             let mut spans = self
                                 .spline_spans(support_id, scale)
                                 .map_err(|e| context(e, support_id))?;
@@ -659,6 +662,9 @@ impl Document {
                                 || spans.last().unwrap().end().distance(body.vertices[end[1]])
                                     > self.tolerance
                             {
+                                if support.has("TRIMMED_CURVE") {
+                                    return invalid(format!("STEP trimmed spline #{support_id} endpoints disagree with EDGE_CURVE vertices within {} inches", self.tolerance));
+                                }
                                 return unsupported(format!("STEP spline #{support_id} edge endpoints require interior trimming"));
                             }
                             spans

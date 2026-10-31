@@ -714,3 +714,40 @@ fn polynomial_spline_cylinder_keeps_source_curves_and_proves_whole_span_agreemen
     // Only the tolerance explicitly requested by the caller may change admission.
     assert!(step::read(source.as_bytes(), 1e-10).is_err());
 }
+
+#[test]
+fn nonuniform_parameter_trimmed_polynomial_box_preserves_units_and_shared_edge_chain() {
+    for mm in [false, true] {
+        for reversed in [false, true] {
+            let scale = if mm { 25.4 } else { 1.0 };
+            let mut data = box_data(mm);
+            for (i, x) in [-1., 1., 3.].iter().enumerate() {
+                data += &format!("#{}=CARTESIAN_POINT('',({},0.,0.));", 601 + i, x * scale);
+            }
+            data += "#600=B_SPLINE_CURVE_WITH_KNOTS('',1,(#601,#602,#603),.POLYLINE_FORM.,.F.,.F.,(2,1,2),(-10.,2.,30.),.UNSPECIFIED.);";
+            let trim = if reversed {
+                "#102=TRIMMED_CURVE('',#600,(PARAMETER_VALUE(16.),#2),(PARAMETER_VALUE(-4.),#1),.F.,.PARAMETER.);"
+            } else {
+                "#102=TRIMMED_CURVE('',#600,(PARAMETER_VALUE(-4.),#1),(PARAMETER_VALUE(16.),#2),.T.,.PARAMETER.);"
+            };
+            data = data.replace("#102=LINE('',#1,#101);", trim);
+            if reversed {
+                data = data.replace(
+                    "#103=EDGE_CURVE('',#11,#12,#102,.T.);",
+                    "#103=EDGE_CURVE('',#11,#12,#102,.F.);",
+                );
+            }
+            let imported = read(&file(&data));
+            let b = &imported.bodies[0].body;
+            assert_eq!((b.vertices.len(), b.edges.len(), b.faces.len()), (9, 13, 6));
+            assert_eq!(topology::check(b, TOL).unwrap().genus(), 0.);
+            let m = mass::measure(b, TOL).unwrap();
+            assert!((m.volume - 24.).abs() < 1e-10);
+            assert!((m.area - 52.).abs() < 1e-10);
+            assert!(!tessellate::tessellate(b, 0.01)
+                .unwrap()
+                .triangles
+                .is_empty());
+        }
+    }
+}

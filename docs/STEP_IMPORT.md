@@ -30,7 +30,7 @@ partial-success result. Source IDs are file-local, not application reference nam
 - LINE, CIRCLE and ELLIPSE edge supports, trimmed by EDGE_CURVE vertices and
   same_sense; oriented edges/bounds and face sense are applied independently.
 - Clamped polynomial or positive-weight rational B_SPLINE_CURVE_WITH_KNOTS of degree 1..3, including
-  complex entity encoding, whose edge uses the complete curve domain. Exact
+  complex entity encoding, over the full domain or explicit parameter trim below. Exact
   homogeneous knot insertion and degree elevation produce cubic Bezier spans; no fitting.
   Both incident faces share each decomposed edge and intermediate vertex.
   same_sense and oriented-edge reversal reverse the complete span chain.
@@ -51,7 +51,7 @@ self-intersection detector or healing system. Import success does not guarantee
 all later boolean domains support the body. Tessellation remains display only.
 
 Assemblies/occurrence transforms/mapped items, higher-degree/unclamped
-splines, interior spline trims, general spline surfaces, pcurve
+splines, Cartesian-only/preferred or nested spline trims, general spline surfaces, pcurve
 reconciliation, arbitrary swept/revolved supports, void shells, faceted/non-solid
 models, unsupported shape representations and multiple/named DATA sections are
 refused explicitly. Old code-page shifting string directives are not supported.
@@ -121,8 +121,9 @@ explicit; this is not formal interval arithmetic. Mass uses boundary quadrature
 and reports `exact = false`. Display subdivision bounds the positive-weight
 control hull's distance from the chord; depth 24 and 200000 visits are hard limits.
 Booleans and profile extrusion explicitly refuse rational boundaries. General
-rational surfaces, higher degrees, unclamped/periodic knots and interior STEP
-trimming remain outside this milestone; a closed clamped circle is supported.
+rational surfaces, higher degrees and unclamped/periodic knots remain outside
+this milestone; a closed clamped circle is supported. Explicit parameter trims
+are supported by the subsequent increment below.
 
 Independent fixture `tests/fixtures/rational_cylinder.step` represents exact
 radius-2, height-4 cylinder rings with rational quadratic quarter circles, then
@@ -136,6 +137,50 @@ GCm stores the identical fixture for independent EyeShot intake comparison.
 Public mathematics/specification (no implementation source):
 https://pages.mtu.edu/~shene/COURSES/cs3621/NOTES/spline/NURBS/NURBS-knot-insert.html
 and https://www.steptools.com/stds/stp_aim/html/t_rational_b_spline_curve.html.
+
+## Explicit spline parameter trims (2026-10-31)
+
+Simple TRIMMED_CURVE entities can directly reference supported polynomial/rational
+B_SPLINE_CURVE_WITH_KNOTS. Each trim set must contain one PARAMETER_VALUE, with
+at most one additional CARTESIAN_POINT. PARAMETER preference selects the given
+parameter; a redundant point must agree within the unchanged request tolerance.
+UNSPECIFIED is admitted only for parameter-only sets. Cartesian-only/preferred,
+ambiguous dual-selector and nested trims are explicit refusals, never inversion
+or substitution. Other trimmed basis kinds remain outside this increment.
+
+Trim parameters are in the source knot domain, not normalized [0,1] and not
+scaled by length units. Span extraction uses exact de Casteljau subdivision
+(homogeneous for rational curves); all interior knot spans retain shared topology.
+SenseAgreement directs the trim from trim_1 to trim_2; EDGE_CURVE.same_sense and
+ORIENTED_EDGE/FACE_BOUND senses remain separate. A closed clamped basis can be
+traversed across its seam only when declared closed and its seam agrees within
+tolerance. This is not support for unclamped periodic knot vectors. Out-of-domain,
+equal/zero-length or direction-inconsistent open trims fail explicitly. Trimmed
+endpoints must agree with both EDGE_CURVE vertices; the source curve is never
+snapped or fitted to those vertices. Bare-spline vertex-only interior trimming
+still requires a future unambiguous point-inversion implementation.
+
+Evidence: independent weighted Cox-de Boor oracle across degrees 1..3 and all
+internal multiplicities, nonuniform source knot domains, four orientation
+combinations, polynomial boxes in inches/mm, malformed/contradictory selectors,
+cyclic/nested basis refusal and a complete rational cylinder whose eight source
+ring edges each cross a knot or the closed seam. That fixture produces 16 vertices,
+17 shared edges and 3 faces, with analytic volume/area and display-mesh checks;
+GCm carries an identical fixture for the independent EyeShot comparison.
+
+Independent native comparison limitation: EyeShot agrees on the parameter-trimmed
+polynomial box, rational interior trims without seam crossing, and rational seam
+trims at knot boundaries. It disagrees on the combined interior/seam fixture:
+Rust/analytic volume 50.2654824574 cubic inches, native mesh 5.8306674805. Uniform
+knots and forward senses alone do not remove the discrepancy; an equivalent
+interior trim on a shifted basis without seam crossing agrees. The combined case
+is retained for Rust analytic/basis/topology/display regression, not claimed as
+native agreement. This does not by itself establish the cause inside EyeShot.
+
+Specification: STEP Tools trimmed_curve and trimming_preference EXPRESS pages;
+ISO 10303-42:2003 section 4.4.40 gives the directed inherited parameter definition.
+Mathematics: MTU B-spline subdivision notes cited above. No kernel source or new
+dependency. Geometry/wire/bridge owners are unchanged; only STEP conversion expands.
 
 ## Operation 16
 

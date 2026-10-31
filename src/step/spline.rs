@@ -7,7 +7,19 @@ use crate::geom::{Curve, Vec3};
 
 impl Document {
     pub(super) fn spline_spans(&self, id: u64, scale: f64) -> Result<Vec<Curve>> {
+        if self.entity(id)?.has("TRIMMED_CURVE") {
+            return self.trimmed_spline(id, scale);
+        }
+        Ok(self.spline_data(id, scale)?.curves)
+    }
+
+    fn spline_data(&self, id: u64, scale: f64) -> Result<SplineData> {
         let e = self.entity(id)?;
+        if !e.has("B_SPLINE_CURVE_WITH_KNOTS") {
+            return unsupported(format!(
+                "STEP trimmed basis #{id} is not a supported spline"
+            ));
+        }
         let rational = e.has("RATIONAL_B_SPLINE_CURVE");
         let (base, knots) = if e.has("B_SPLINE_CURVE") {
             e.args("REPRESENTATION_ITEM", 1)?[0].text()?;
@@ -107,6 +119,7 @@ impl Document {
         }
         // Normalize the parameter domain before insertion. This changes only the
         // parameter, never control-point positions or shape.
+        let parameters = distinct.clone();
         let lo = distinct[0];
         let span = distinct[distinct.len() - 1] - lo;
         if !span.is_finite() || span <= 0.0 {
@@ -174,6 +187,148 @@ impl Document {
             } else {
                 out.push(Curve::Bezier { p });
             }
+        }
+        Ok(SplineData {
+            curves: out,
+            parameters,
+            closed: base[3].enumeration()? == "T",
+        })
+    }
+
+    fn trimmed_spline(&self, id: u64, scale: f64) -> Result<Vec<Curve>> {
+        let a = self.args(id, "TRIMMED_CURVE", 6)?;
+        a[0].text()?;
+        let basis = self.spline_data(a[1].reference()?, scale)?;
+        let preference = a[5].enumeration()?;
+        match preference {
+            "PARAMETER" | "UNSPECIFIED" => (),
+            "CARTESIAN" => {
+                return unsupported(
+                    "Cartesian-preferred STEP spline trimming requires point inversion",
+                )
+            }
+            _ => return invalid("invalid STEP trimming preference"),
+        }
+        let trim = |value: &Value| -> Result<(f64, Option<Vec3>)> {
+            let values = value.list()?;
+            if values.is_empty() || values.len() > 2 {
+                return invalid("trim set needs one or two selectors");
+            }
+            let (mut parameter, mut point) = (None, None);
+            for value in values {
+                match value {
+                    Value::Typed(kind, args) if kind == "PARAMETER_VALUE" && args.len() == 1 => {
+                        let u = args[0].number()?;
+                        if !u.is_finite() || parameter.replace(u).is_some() {
+                            return invalid("duplicate or nonfinite trim parameter");
+                        }
+                    }
+                    Value::Ref(id) => {
+                        let q = self.point(*id)?.scale(scale);
+                        if !q.is_finite() || point.replace(q).is_some() {
+                            return invalid("duplicate or nonfinite trim point");
+                        }
+                    }
+                    _ => return invalid("invalid STEP trim selector"),
+                }
+            }
+            let Some(u) = parameter else {
+                return unsupported("Cartesian-only STEP spline trimming requires point inversion");
+            };
+            if point.is_some() && preference == "UNSPECIFIED" {
+                return unsupported(
+                    "dual STEP trim selectors require explicit parameter preference",
+                );
+            }
+            Ok((u, point))
+        };
+        let (first, p1) = trim(&a[2])?;
+        let (last, p2) = trim(&a[3])?;
+        let forward = a[4].flag()?;
+        let (lo, hi) = (basis.parameters[0], *basis.parameters.last().unwrap());
+        if first < lo || first > hi || last < lo || last > hi {
+            return invalid("STEP trim parameter is outside the source knot domain");
+        }
+        if first == last {
+            return unsupported("equal STEP trim parameters do not specify an unambiguous span");
+        }
+        // Work in the basis's increasing direction, then reverse the COMPLETE chain.
+        let (start, end) = if forward {
+            (first, last)
+        } else {
+            (last, first)
+        };
+        let mut curves = if start < end {
+            basis.interval(start, end)?
+        } else {
+            if !basis.closed {
+                return invalid("open STEP spline trim order disagrees with sense_agreement");
+            }
+            let gap = basis.curves[0]
+                .start()
+                .distance(basis.curves.last().unwrap().end());
+            if !gap.is_finite() || gap > self.tolerance {
+                return invalid("closed STEP spline trim has a nonclosing seam");
+            }
+            let mut curves = basis.interval(start, hi)?;
+            curves.extend(basis.interval(lo, end)?);
+            if curves.is_empty() {
+                return unsupported("STEP seam endpoints specify a zero-length trim");
+            }
+            curves
+        };
+        if !forward {
+            curves.reverse();
+            curves = curves.into_iter().map(|c| c.reversed()).collect();
+        }
+        for (point, actual) in [(p1, curves[0].start()), (p2, curves.last().unwrap().end())] {
+            if let Some(point) = point {
+                let gap = actual.distance(point);
+                if !gap.is_finite() || gap > self.tolerance {
+                    return invalid(format!(
+                        "STEP parameter/Cartesian trim mismatch {gap} inches exceeds {}",
+                        self.tolerance
+                    ));
+                }
+            }
+        }
+        Ok(curves)
+    }
+}
+
+struct SplineData {
+    curves: Vec<Curve>,
+    parameters: Vec<f64>,
+    closed: bool,
+}
+impl SplineData {
+    fn interval(&self, start: f64, end: f64) -> Result<Vec<Curve>> {
+        let mut out = Vec::new();
+        for (curve, knots) in self.curves.iter().zip(self.parameters.windows(2)) {
+            let (lo, hi) = (start.max(knots[0]), end.min(knots[1]));
+            if lo >= hi {
+                continue;
+            }
+            if lo == knots[0] && hi == knots[1] {
+                out.push(curve.clone());
+                continue;
+            }
+            let a = (lo - knots[0]) / (knots[1] - knots[0]);
+            let b = (hi - knots[0]) / (knots[1] - knots[0]);
+            if !a.is_finite() || !b.is_finite() || a < 0.0 || b > 1.0 || a >= b {
+                return invalid("STEP trim loses parameter resolution");
+            }
+            out.push(match *curve {
+                Curve::Bezier { p } => Curve::Bezier {
+                    p: crate::geom::bezier_piece(p, a, b),
+                },
+                Curve::RationalBezier { p, w } => {
+                    let (p, w) = crate::rational::piece(p, w, a, b);
+                    crate::rational::validate(p, w)?;
+                    Curve::RationalBezier { p, w }
+                }
+                _ => return invalid("STEP spline decomposition produced a non-spline curve"),
+            });
         }
         Ok(out)
     }
@@ -339,6 +494,113 @@ mod tests {
                                 q.add(p.scale(w / den * 25.4))
                             });
                         assert!(curves[span].eval(t).0.distance(expected) < 1e-10);
+                    }
+                }
+            }
+        }
+    }
+    fn add_trim(doc: &mut Document, first: f64, last: f64, forward: bool) {
+        let parameter = |u| {
+            Value::List(vec![Value::Typed(
+                "PARAMETER_VALUE".into(),
+                vec![Value::Number(u)],
+            )])
+        };
+        doc.exchange.entities.insert(
+            101,
+            syntax::Entity {
+                components: std::collections::BTreeMap::from([(
+                    "TRIMMED_CURVE".into(),
+                    vec![
+                        Value::Text("".into()),
+                        Value::Ref(100),
+                        parameter(first),
+                        parameter(last),
+                        Value::Enum(if forward { "T" } else { "F" }.into()),
+                        Value::Enum("PARAMETER".into()),
+                    ],
+                )]),
+            },
+        );
+    }
+    #[test]
+    fn interior_trims_match_weighted_basis_for_all_supported_degrees_and_multiplicities() {
+        for degree in 1..=3 {
+            for mult in 1..=degree {
+                for rational in [false, true] {
+                    for reverse in [false, true] {
+                        let (mut doc, points, knots) = document(degree, mult, true);
+                        let weights: Vec<_> = (0..points.len())
+                            .map(|i| if rational { 0.5 + (i % 3) as f64 } else { 1. })
+                            .collect();
+                        if rational {
+                            doc.exchange
+                                .entities
+                                .get_mut(&100)
+                                .unwrap()
+                                .components
+                                .insert(
+                                    "RATIONAL_B_SPLINE_CURVE".into(),
+                                    vec![Value::List(
+                                        weights.iter().map(|&w| Value::Number(w)).collect(),
+                                    )],
+                                );
+                        }
+                        // Non-normalized source parameters; geometric units must not scale these.
+                        let source = &mut doc
+                            .exchange
+                            .entities
+                            .get_mut(&100)
+                            .unwrap()
+                            .components
+                            .get_mut("B_SPLINE_CURVE_WITH_KNOTS")
+                            .unwrap()[1];
+                        *source = Value::List(
+                            [0., 0.3, 0.8, 1.]
+                                .iter()
+                                .map(|&u| Value::Number(-7. + 20. * u))
+                                .collect(),
+                        );
+                        for (lo, hi) in [(0.1, 0.9), (0.3, 0.8), (0.31, 0.7), (0., 1.)] {
+                            let (first, last) = if reverse { (hi, lo) } else { (lo, hi) };
+                            add_trim(&mut doc, -7. + 20. * first, -7. + 20. * last, !reverse);
+                            let curves = doc.spline_spans(101, 25.4).unwrap();
+                            let mut ranges: Vec<_> = [0., 0.3, 0.8, 1.]
+                                .windows(2)
+                                .filter_map(|r| {
+                                    let (a, b) = (lo.max(r[0]), hi.min(r[1]));
+                                    (a < b).then_some((a, b))
+                                })
+                                .collect();
+                            if reverse {
+                                ranges.reverse();
+                            }
+                            assert_eq!(curves.len(), ranges.len());
+                            for (c, (a, b)) in curves.iter().zip(ranges) {
+                                for i in 1..100 {
+                                    let t = i as f64 / 100.;
+                                    let u = if reverse {
+                                        b - (b - a) * t
+                                    } else {
+                                        a + (b - a) * t
+                                    };
+                                    let bw: Vec<_> = (0..points.len())
+                                        .map(|i| weights[i] * basis(i, degree, u, &knots))
+                                        .collect();
+                                    let den: f64 = bw.iter().sum();
+                                    let expected = points
+                                        .iter()
+                                        .zip(&bw)
+                                        .fold(Vec3::new(0., 0., 0.), |q, (p, w)| {
+                                            q.add(p.scale(w / den * 25.4))
+                                        });
+                                    assert!(
+                                        c.eval(t).0.distance(expected) < 1e-10,
+                                        "degree={degree} reverse={reverse} range={lo}..{hi}"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
