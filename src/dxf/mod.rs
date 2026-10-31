@@ -5,11 +5,13 @@
 //! Reading gives the drawing as seen from above (world XY): every model-space curve, blocks exploded, object
 //! coordinate systems resolved, in drawing units. `fit` turns ellipses and splines into tangent lines and arcs within
 //! a tolerance for consumers that take lines, arcs and circles only. Writing produces an R12 (AC1009) DXF, the
-//! version every CAD and CAM program reads. `dwg` reads DWG files (R13 to 2018) into the same records as DXF.
+//! version every CAD and CAM program reads. `dwg` reads DWG files (R13 to 2018) into the same records as DXF; `pdf` reads PDF and PDF-compatible
+//! Illustrator drawings.
 
 mod codes;
 pub mod dwg;
 pub mod fit;
+pub mod pdf;
 mod read;
 pub mod svg;
 pub mod wire;
