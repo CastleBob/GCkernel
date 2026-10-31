@@ -3,8 +3,8 @@
 //! minimal XML reader; no third-party source.
 //!
 //! The drawing is turned right way up (SVG's y runs down). When the root's width and height carry an absolute unit
-//! (mm, cm, in, pt, pc) coordinates come out in millimetres with $INSUNITS 4; otherwise they stay in SVG pixels and the
-//! units are left unknown for the user to confirm (exporters disagree on what a pixel is).
+//! (mm, cm, in, pt, pc) coordinates come out in millimetres with $INSUNITS 4; a drawing sized in plain numbers or px
+//! is read at the standard's 96 pixels per inch and comes out in inches with $INSUNITS 1 (Bob 2026-10-31).
 
 use std::collections::HashMap;
 use std::f64::consts::TAU;
@@ -373,11 +373,12 @@ pub fn read(bytes: &[u8]) -> Result<Drawing, KernelError> {
         viewport = view_box_transform(vb, w, h, root.attr("preserveAspectRatio"));
     }
     let metric = absolute(root.attr("width")) && absolute(root.attr("height"));
-    let to_mm = if metric { 25.4 / 96.0 } else { 1.0 };
+    let to_mm = if metric { 25.4 / 96.0 } else { 1.0 / 96.0 };
     if metric {
         d.insunits = Some(4);
     } else {
-        d.warn("the SVG gives no physical size; its coordinates are SVG pixels".into());
+        d.insunits = Some(1);
+        d.warn("the SVG is sized in pixels; read at 96 pixels per inch".into());
     }
     let page_height = height.unwrap_or(0.0);
     let flip = Affine([to_mm, 0.0, 0.0, -to_mm, 0.0, page_height * to_mm]);

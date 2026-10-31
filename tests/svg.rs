@@ -127,13 +127,13 @@ fn transforms_groups_use_symbol_and_hidden_content() {
 }
 
 #[test]
-fn pixel_files_keep_pixels_and_say_so() {
+fn pixel_files_read_at_96_per_inch() {
     let d = read(r#"<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x.dtd" [<!ENTITY a "b">]>
-<!-- drawn in pixels --><svg width="300" height="200"><polygon points="10,10 110,10 110 60"/></svg>"#);
-    assert_eq!(d.insunits, None);
-    assert!(d.warnings.iter().any(|w| w.contains("SVG pixels")));
+<!-- drawn in pixels --><svg width="288" height="192"><polygon points="0,0 96,0 96 48"/></svg>"#);
+    assert_eq!(d.insunits, Some(1));
+    assert!(d.warnings.iter().any(|w| w.contains("96 pixels per inch")));
     let g: Vec<&Geometry> = d.curves.iter().map(|c| &c.geometry).collect();
-    assert_eq!(*g[0], Geometry::Line { a: [10.0, 190.0], b: [110.0, 190.0] });
+    assert_eq!(*g[0], Geometry::Line { a: [0.0, 2.0], b: [1.0, 2.0] });
     assert_eq!(g.len(), 3);
 }
 
