@@ -287,7 +287,7 @@ fn validate(body: &Body, tol: f64) -> Result<()> {
             Surface::Plane { p, n, x } => (p, n, x),
             Surface::Cylinder { p, a, x, .. } => (p, a, x),
             Surface::EllipticCylinder { .. } => return Err(unsupported("end cuts across elliptic-cylinder faces are not supported")),
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("end cuts across revolved (conical, spherical or toroidal) faces are not supported")),
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("end cuts across revolved or spline faces are not supported")),
         };
         if !anchor.is_finite()
             || !n.is_finite()
@@ -366,7 +366,7 @@ fn validate(body: &Body, tol: f64) -> Result<()> {
                 Surface::EllipticCylinder { .. } => {
                     return Err(unsupported("end cuts across elliptic-cylinder faces are not supported"));
                 }
-                Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("end cuts across revolved (conical, spherical or toroidal) faces are not supported")),
+                Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("end cuts across revolved or spline faces are not supported")),
             }
         }
     }

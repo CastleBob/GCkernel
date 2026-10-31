@@ -271,7 +271,7 @@ fn admit(tool: &Body, tol: f64) -> Result<Admitted> {
             Surface::Plane { p, n, x } => (p, n, x, None),
             Surface::Cylinder { p, a, x, r } => (p, a, x, Some(r)),
             Surface::EllipticCylinder { .. } => return Err(unsupported("capsule cutters with elliptic-cylinder faces are not supported")),
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("capsule cutters with revolved (conical, spherical or toroidal) faces are not supported")),
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("capsule cutters with revolved or spline faces are not supported")),
         };
         if !p.is_finite()
             || !unit(n)

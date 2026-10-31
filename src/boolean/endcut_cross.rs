@@ -223,7 +223,7 @@ fn boundary_hits(body: &Body, mid: f64, tol: f64) -> Result<Vec<Hit>> {
                     Surface::EllipticCylinder { .. } => {
                         return Err(unsupported("transverse sections across elliptic-cylinder faces are not supported"));
                     }
-                    Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("transverse sections across revolved (conical, spherical or toroidal) faces are not supported")),
+                    Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("transverse sections across revolved or spline faces are not supported")),
                     Surface::Cylinder { p, a, .. } => {
                         let d = q.sub(p);
                         d.sub(a.scale(d.dot(a)))
