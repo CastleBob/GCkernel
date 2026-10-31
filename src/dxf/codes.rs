@@ -100,7 +100,7 @@ pub fn pairs(bytes: &[u8]) -> Result<Vec<Pair>, KernelError> {
 }
 
 /// UTF-8 when the bytes are valid UTF-8, otherwise Windows-1252 (the code page of almost every pre-2007 DXF).
-fn decode(bytes: &[u8]) -> String {
+pub(crate) fn decode(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }

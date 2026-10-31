@@ -1,4 +1,4 @@
-//! Ops 14 READ DXF (also SVG, told apart by content) and 15 WRITE DXF on the numeric wire. Text (a path, a layer name, a message) travels as its UTF-8
+//! Ops 14 READ DXF (also SVG and DWG, told apart by content) and 15 WRITE DXF on the numeric wire. Text (a path, a layer name, a message) travels as its UTF-8
 //! byte count followed by one value per byte.
 //!
 //! Op 14 request: [1, mode (0 exact, 1 lines and arcs, 2 header and layers only), fit tolerance (drawing units), path].
@@ -77,6 +77,8 @@ pub fn read_op(data: &[f64]) -> Result<Vec<f64>, KernelError> {
         let mut d = super::svg::read(&bytes)?;
         if mode == 2.0 { d.curves.clear(); }
         d
+    } else if super::dwg::looks_like(&bytes) {
+        if mode == 2.0 { super::dwg::read_header(&bytes)? } else { super::dwg::read(&bytes)? }
     } else if mode == 2.0 {
         read_header(&bytes)?
     } else {
