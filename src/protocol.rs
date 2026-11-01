@@ -27,12 +27,20 @@
 //!        loops on the one cap facing d; refused by name when the body is not a straight-through plate; rebuild.rs),
 //!     14 read DXF (a path -> the drawing's layers and curves as seen from above, exact or as lines and arcs;
 //!        dxf::wire), 15 write DXF (layers and curves -> an R12 DXF at the path; dxf::wire),
-//!     16 read STEP (UTF-8 path -> all supported standalone solid bodies; step::wire).
+//!     16 read STEP (UTF-8 path -> all supported standalone solid bodies; step::wire),
+//!     19 blend (fillets and chamfers; blend.rs, Claude 2026-11-01). Request: a body, then N, then N items
+//!        [kind, edge, values]: kind 0 fillet [0, edge, radius]; 1 equal chamfer [1, edge, distance]; 2 two-distance
+//!        chamfer [2, edge, first distance, second distance, face the first distance runs on]; 3 distance-angle
+//!        chamfer [3, edge, distance, angle in radians, face the distance runs on and the angle is measured from].
+//!        Edges and faces are indices in the request body. Reply: the result body, its volume, 1 when that volume is
+//!        closed form (0: quadrature), then F (the result's face count) and F pairs [role, index]: role 0 = input
+//!        face index (kept, trimmed where blends meet it), 1 = the blend face of input edge index, 2 = the corner
+//!        patch where three blends meet at input vertex index. Unsupported configurations are refused by name.
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
 use crate::neutral::{put_curve, put_surface, write_body, write_profile, Reader};
-use crate::{boolean, extrude, mass, provenance, rebuild, revolve, tessellate, topology, KernelError};
+use crate::{blend, boolean, extrude, mass, provenance, rebuild, revolve, tessellate, topology, KernelError};
 
 pub const VERSION: u32 = 1;
 pub const UNITS_INCH: u32 = 1;
@@ -55,6 +63,7 @@ pub const OP_DXF_WRITE: u32 = 15;
 pub const OP_STEP_READ: u32 = 16;
 pub const OP_STEP_WRITE: u32 = 17;
 pub const OP_STL_READ: u32 = 18;
+pub const OP_BLEND: u32 = 19;
 
 pub struct Request {
     pub op: u32,
@@ -248,6 +257,40 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             let mut out = write_body(&body);
             out.push(revolve::volume_of(&rev, tol)?);
             if request.op == OP_REVOLVE_NAMED { provenance::write(&mut out, &prov); }
+            Ok(out)
+        }
+        OP_BLEND => {
+            let body = reader.body()?;
+            let n = reader.count()?;
+            let mut items = Vec::with_capacity(n);
+            for i in 0..n {
+                let kind = reader.next()?;
+                let edge = reader.index(body.edges.len(), "blend edge")?;
+                let kind = match kind {
+                    k if k == 0.0 => blend::Kind::Fillet { radius: reader.next()? },
+                    k if k == 1.0 => blend::Kind::Chamfer { distance: reader.next()? },
+                    k if k == 2.0 => {
+                        let (first, second) = (reader.next()?, reader.next()?);
+                        blend::Kind::ChamferDistances { first, second, face: reader.index(body.faces.len(), "chamfer face")? }
+                    }
+                    k if k == 3.0 => {
+                        let (distance, angle) = (reader.next()?, reader.next()?);
+                        blend::Kind::ChamferAngle { distance, angle, face: reader.index(body.faces.len(), "chamfer face")? }
+                    }
+                    k => return Err(KernelError::InvalidInput(format!("blend item {i}: unknown kind {k}"))),
+                };
+                items.push(blend::Item { edge, kind });
+            }
+            reader.finish()?;
+            let blended = blend::blend(&body, &items, tol)?;
+            let m = mass::measure(&blended.body, tol)
+                .map_err(|e| KernelError::Internal(format!("the blended solid could not be measured: {e}")))?;
+            let mut out = write_body(&blended.body);
+            out.extend_from_slice(&[m.volume, if m.exact { 1.0 } else { 0.0 }, blended.origins.len() as f64]);
+            for o in &blended.origins {
+                let (role, index) = match *o { blend::Origin::Face(f) => (0.0, f), blend::Origin::Edge(e) => (1.0, e), blend::Origin::Vertex(v) => (2.0, v) };
+                out.extend_from_slice(&[role, index as f64]);
+            }
             Ok(out)
         }
         op => Err(KernelError::Unsupported(format!("op {op}"))),
