@@ -31,7 +31,8 @@ fn assembly_data() -> String {
 }
 #[test]
 fn nested_assembly_instances_preserve_units_placement_and_source_identity() {
-    let text = file(&assembly_data()).replace(";#", ";\n#").replace(";ENDSEC", ";\nENDSEC");
+    let mut text = file(&assembly_data());
+    for token in ["#", "HEADER", "FILE_", "DATA", "ENDSEC", "END-ISO"] { text = text.replace(&format!(";{token}"), &format!(";\n{token}")); }
     let instances = step::assembly::read(text.as_bytes(), TOL).unwrap();
     assert_eq!(instances.len(), 2);
     for (item, expected, path) in [
