@@ -5,6 +5,7 @@
 //! GCmaker talks to it through `gckernel-worker.exe`, one request per process (see `protocol`), so a
 //! failure here cannot affect an open GCmaker.
 
+pub mod blend;
 pub mod boolean;
 pub mod dxf;
 pub mod extrude;
@@ -14,6 +15,7 @@ pub mod iges;
 pub mod mass;
 pub mod meridian;
 pub mod neutral;
+pub mod offset;
 pub mod protocol;
 pub mod provenance;
 pub mod rebuild;
