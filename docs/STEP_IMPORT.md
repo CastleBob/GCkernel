@@ -330,3 +330,21 @@ Independent cases include a nonplanar parabolic-boundary roof and a circular hol
 on a planar spline face, analytic volume/independent area integrals, rigid frames,
 shared meshes, source-preserving STEP export and crossing/tangent refusal.
 Public mathematical reference: https://pages.mtu.edu/~shene/COURSES/cs3621/NOTES/spline/NURBS/RB-circles.html .
+
+## Source mismatch diagnostics
+
+`step::diagnostic` / `step_diagnose` reports source solid/face/edge/curve/support IDs,
+unit factors, strict admission errors and analytic-support observations without
+returning unadmitted geometry. Spline supports are explicitly outside this report.
+All construction errors are retained; an empty observation list is not proof of
+validity. An independent Cox-de Boor evaluator uses the original full-domain spline
+controls, weights and knots. Its 129 observations per span diagnose source defects;
+samples never authorize admission. Partial/unsupported basis comparisons stay absent.
+
+`STEP_SOURCE_MISMATCHES.csv` records 100 edge/face pairs in the seven original
+failing samples. Every pair has an observed source-basis departure above 1e-6 inch;
+conversion differences are below 1e-10 inch. Thus these seven refusals have source
+geometry evidence, not just a conversion residual. This does not prove absence of
+all importer defects or give a continuous maximum. Inputs and admission tolerance
+are unchanged. Verification: diagnostic 2/2 and STEP regression 20/20 with the
+original corpus enabled.

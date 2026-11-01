@@ -84,7 +84,7 @@ pub fn check(body: &Body, tolerance: f64) -> Result<TopologyReport, KernelError>
 }
 
 /// Distance from a point to a surface.
-fn distance(q: Vec3, surface: &Surface) -> f64 {
+pub(crate) fn distance(q: Vec3, surface: &Surface) -> f64 {
     match *surface {
         Surface::Spline { .. } => f64::INFINITY,
         Surface::Plane { p, n, .. } => q.sub(p).dot(n).abs(),

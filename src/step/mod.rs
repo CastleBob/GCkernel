@@ -3,6 +3,7 @@
 mod spline;
 mod surface;
 mod syntax;
+pub mod diagnostic;
 pub mod wire;
 mod write;
 pub use write::write;
@@ -583,6 +584,9 @@ impl Document {
         unsupported(format!("STEP surface #{id} {}", e.kind()))
     }
     fn body(&self, id: u64, scale: f64, angle: f64) -> Result<ImportedBody> {
+        self.body_diagnostic(id,scale,angle,None)
+    }
+    fn body_diagnostic(&self, id:u64, scale:f64, angle:f64, report:Option<&mut Vec<diagnostic::Mismatch>>) -> Result<ImportedBody> {
         let a = self.args(id, "MANIFOLD_SOLID_BREP", 2)?;
         let name = a[0].text()?.to_owned();
         let shell_id = a[1].reference()?;
@@ -731,6 +735,9 @@ impl Document {
         let mut reader = neutral::Reader::with_tolerance(&data, self.tolerance);
         let body = reader.body()?;
         reader.finish()?;
+        if let Some(report)=report {
+            report.extend(self.geometry_report(id,scale,&body,&edges,&face_ids.iter().map(Value::reference).collect::<Result<Vec<_>>>()?)?);
+        }
         topology::check(&body, self.tolerance)?;
         // A CLOSED_SHELL is connected, even if disconnected shells share one file.
         let mut reached = BTreeSet::from([0]);
