@@ -418,7 +418,7 @@ mod tests {
             }
             for f in &mut body.faces {
                 match &mut f.surface {
-                    Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+                    Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                     Surface::Plane { p, .. } | Surface::Cylinder { p, .. } => *p = p.add(offset),
                 }
             }
@@ -634,12 +634,12 @@ mod tests {
                     *p = map(*p);
                     *b = map(*b);
                 }
-                Curve::Bezier { .. } | Curve::RationalBezier { .. } => unreachable!("no Bezier edges in these test bodies"),
+                Curve::Bezier { .. } | Curve::RationalBezier { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } => unreachable!("no Bezier or radial-pair edges in these test bodies"),
             }
         }
         for f in &mut body.faces {
             match &mut f.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p, n, x } => {
                     *p = map(*p);
                     *n = map(*n);

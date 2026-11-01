@@ -122,6 +122,12 @@ impl Writer {
             Curve::CylinderPair { .. } => {
                 unsupported("STEP export of cylinder-intersection curves is not implemented")
             }
+            Curve::RadialPair { .. } => {
+                unsupported("STEP export of radial cylinder-pair curves (normalized pipe ends) is not implemented")
+            }
+            Curve::ConePair { .. } => {
+                unsupported("STEP export of cylinder/cone intersection curves (holes through tapered walls) is not implemented")
+            }
         }
     }
     fn spline(&mut self, s: &SplineSurface) -> Result<usize> {
@@ -205,6 +211,9 @@ impl Writer {
                 return unsupported(
                     "STEP export of general revolved spline surfaces is not implemented",
                 )
+            }
+            Surface::Conoid { .. } => {
+                return unsupported("STEP export of radial conoids (normalized pipe ends) is not implemented")
             }
         };
         let axis = self.axis(p, a, x)?;

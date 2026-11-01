@@ -42,6 +42,10 @@
 //!        closed void (an inner shell of the same body); offset::shell_op),
 //!     21 offset (signed distance (positive outward), mode (0 rounded: the exact offset, rounding faces about convex
 //!        edges and corners; 1 sharp: moved faces extended to meet), then a body -> op 20's reply; offset::offset_op).
+//!     23 normalized pipe end waste (pipe axis point o, unit d from the cut end into the material, unit seam x square
+//!        to d, inner and outer wall radii, mating cylinder axis point p, unit axis b, radius, then the band's inner
+//!        and outer radii and its far level along d: 21 values -> the waste band whose top is the radial conoid of
+//!        the deeper wall's crossing (GCmaker's Normalize End), followed by its volume; normalize.rs).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
@@ -73,6 +77,7 @@ pub const OP_BLEND: u32 = 19;
 pub const OP_SHELL: u32 = 20;
 pub const OP_OFFSET: u32 = 21;
 pub const OP_IGES_READ: u32 = 22;
+pub const OP_NORMALIZED_END: u32 = 23;
 
 pub struct Request {
     pub op: u32,
@@ -216,6 +221,19 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             Ok(tessellate::write_mesh(&tessellate::tessellate(&body, chord)?))
         }
         OP_TRANSFORM => transform(&request.data, tol),
+        OP_NORMALIZED_END => {
+            let (o, d, x) = (reader.point()?, reader.point()?, reader.point()?);
+            let (ri, ro) = (reader.next()?, reader.next()?);
+            let (p, b, rc) = (reader.point()?, reader.point()?, reader.next()?);
+            let (sa, sb, far) = (reader.next()?, reader.next()?, reader.next()?);
+            reader.finish()?;
+            let envelope = crate::normalize::Envelope { o, d, x, ri, ro, p, b, rc };
+            let (body, volume) = crate::normalize::waste_tool(&envelope, sa, sb, far, tol)?;
+            topology::check(&body, tol).map_err(|e| KernelError::Internal(format!("normalized end built an invalid solid: {e}")))?;
+            let mut out = write_body(&body);
+            out.push(volume);
+            Ok(out)
+        }
         OP_REVOLVE => {
             let (p, a, x) = (reader.point()?, reader.point()?, reader.point()?);
             let n = reader.count()?;

@@ -189,7 +189,7 @@ fn sampled_area(lp: &[Curve]) -> f64 {
                     pts.push(Curve::conic_point(*center, *u, *v, t0 + (t1 - t0) * k as f64 / 2000.0));
                 }
             }
-            Curve::CylinderPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
+            Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
                 let (t0, t1) = c.domain();
                 for k in 0..2000 { pts.push(c.eval(t0 + (t1 - t0) * k as f64 / 2000.0).0); }
             }

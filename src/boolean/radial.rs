@@ -327,6 +327,36 @@ fn bounds(curve: &Curve) -> Option<([f64; 3], [f64; 3])> {
     }
 }
 
+/// A RadialPair edge (a normalized pipe end's rim) in 128 pieces, each with a rigorous box (the piece of its circle of
+/// radius s by its extrema, plus the pair's proved height range along a: geom::pair_height_range) and its angular
+/// interval in the frame (e1, e2) across the axis. None for any other curve, or when a height range is not proved.
+fn radial_pieces(curve: &Curve, e1: Vec3, e2: Vec3) -> Option<Vec<(([f64; 3], [f64; 3]), (f64, f64))>> {
+    let Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } = *curve else { return None };
+    let n = 128;
+    let y = a.cross(x);
+    let angle = |t: f64| { let u = x.scale(t.cos()).add(y.scale(t.sin())); u.dot(e2).atan2(u.dot(e1)) };
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let (ta, tb) = (t0 + (t1 - t0) * i as f64 / n as f64, t0 + (t1 - t0) * (i + 1) as f64 / n as f64);
+        let (mut lo, mut hi) = super::passage::curve_bounds(&Curve::Arc { c, n: a, x, r: s, t0: ta, t1: tb });
+        let (hl, hh) = crate::geom::pair_height_range(c, a, x, rho, p, b, r, branch, ta, tb, 16)?;
+        for (k, ak) in [a.x, a.y, a.z].into_iter().enumerate() {
+            lo[k] += (ak * hl).min(ak * hh);
+            hi[k] += (ak * hl).max(ak * hh);
+        }
+        let (aa, ab) = (angle(ta), angle(tb));
+        let ab = aa + (ab - aa + std::f64::consts::PI).rem_euclid(TAU) - std::f64::consts::PI;
+        out.push(((lo, hi), (aa.min(ab), aa.max(ab))));
+    }
+    Some(out)
+}
+
+/// Whether two angular intervals (lo, hi) on the circle meet, within `margin`.
+fn arcs_meet(i: (f64, f64), j: (f64, f64), margin: f64) -> bool {
+    let d = ((i.0 + i.1) * 0.5 - (j.0 + j.1) * 0.5 + std::f64::consts::PI).rem_euclid(TAU) - std::f64::consts::PI;
+    d.abs() <= (i.1 - i.0) * 0.5 + (j.1 - j.0) * 0.5 + margin
+}
+
 fn apart(a: ([f64; 3], [f64; 3]), b: ([f64; 3], [f64; 3]), gap: f64) -> bool {
     (0..3).any(|k| a.1[k] + gap < b.0[k] || b.1[k] + gap < a.0[k])
 }
@@ -359,20 +389,44 @@ fn clear(body: &Body, tool: &Body, k: &Cutter, pipe: &Pipe, tol: f64) -> Result<
     };
     let loops: Vec<Curve> = walls.iter().map(|&(_, r, branch)| loop_curve(r, branch)).collect();
     let loop_box = union(loops.iter().map(|c| bounds(c).expect("perpendicular by admission")));
-    for &face in [pipe.outer, pipe.inner].iter() {
+    let along_box = |bx: ([f64; 3], [f64; 3])| {
+        let along = |q: [f64; 3]| (q[0] - pipe.p.x) * b.x + (q[1] - pipe.p.y) * b.y + (q[2] - pipe.p.z) * b.z;
+        let corners = (0..8).map(|m| [if m & 1 == 0 { bx.0[0] } else { bx.1[0] }, if m & 2 == 0 { bx.0[1] } else { bx.1[1] }, if m & 4 == 0 { bx.0[2] } else { bx.1[2] }]);
+        let values: Vec<f64> = corners.map(along).collect();
+        (values.iter().cloned().fold(f64::INFINITY, f64::min), values.iter().cloned().fold(f64::NEG_INFINITY, f64::max))
+    };
+    for &(face, r) in [(pipe.outer, pipe.ro), (pipe.inner, pipe.ri)].iter() {
         let f = &body.faces[face];
         let edges: Vec<usize> = f.loops.iter().flatten().map(|(e, _)| *e).collect();
         let mut rings: Vec<(f64, f64)> = vec![];
+        // A normalized end's rim (Claude 2026-10-31) is bounded piece by piece: every piece clear of the loops, and the
+        // pieces at the hole's own angles (its intervals on this wall) taken together as that end's place along the axis.
+        let Surface::Cylinder { x: wx, .. } = f.surface else { unreachable!() };
+        let e1 = perp(wx, b).unit()?;
+        let e2 = b.cross(e1);
+        let busy: Vec<(f64, f64)> = walls.iter().filter(|w| w.0 == face)
+            .filter_map(|&(_, _, branch)| hole_interval(k.s, k.d, k.rho, branch, pipe, r, e1, e2)).collect();
         for &e in &edges {
+            if let Some(pieces) = radial_pieces(&body.edges[e].curve, e1, e2) {
+                let mut span: Option<(f64, f64)> = None;
+                for (bx, angles) in pieces {
+                    if !apart(bx, loop_box, tol) {
+                        return Err(unsupported("radial bore meets the normalized end of the pipe wall"));
+                    }
+                    if busy.iter().any(|i| arcs_meet(*i, angles, tol / r)) {
+                        let (l, h) = along_box(bx);
+                        span = Some(span.map_or((l, h), |(sl, sh)| (sl.min(l), sh.max(h))));
+                    }
+                }
+                rings.extend(span);
+                continue;
+            }
             let bx = bounds(&body.edges[e].curve).ok_or_else(|| unsupported("radial bore: a wall edge has no bounding box"))?;
             if !apart(bx, loop_box, tol) {
                 return Err(unsupported("radial bore meets a boundary of the pipe wall (an end, its seam or another hole)"));
             }
             if !matches!(body.edges[e].curve, Curve::Line { .. }) {
-                let along = |q: [f64; 3]| (q[0] - pipe.p.x) * b.x + (q[1] - pipe.p.y) * b.y + (q[2] - pipe.p.z) * b.z;
-                let corners = (0..8).map(|m| [if m & 1 == 0 { bx.0[0] } else { bx.1[0] }, if m & 2 == 0 { bx.0[1] } else { bx.1[1] }, if m & 4 == 0 { bx.0[2] } else { bx.1[2] }]);
-                let values: Vec<f64> = corners.map(along).collect();
-                rings.push((values.iter().cloned().fold(f64::INFINITY, f64::min), values.iter().cloned().fold(f64::NEG_INFINITY, f64::max)));
+                rings.push(along_box(bx));
             }
         }
         let corners = (0..8).map(|m| [if m & 1 == 0 { loop_box.0[0] } else { loop_box.1[0] }, if m & 2 == 0 { loop_box.0[1] } else { loop_box.1[1] }, if m & 4 == 0 { loop_box.0[2] } else { loop_box.1[2] }]);
@@ -389,8 +443,11 @@ fn clear(body: &Body, tool: &Body, k: &Cutter, pipe: &Pipe, tol: f64) -> Result<
             continue;
         }
         for (e, _) in f.loops.iter().flatten() {
-            let bx = bounds(&body.edges[*e].curve).ok_or_else(|| unsupported("radial bore: an edge has no bounding box"))?;
-            if !apart(bx, cutter_box, tol) {
+            let boxes = match radial_pieces(&body.edges[*e].curve, b.perpendicular(), b.cross(b.perpendicular())) {
+                Some(pieces) => pieces.into_iter().map(|(bx, _)| bx).collect(),
+                None => vec![bounds(&body.edges[*e].curve).ok_or_else(|| unsupported("radial bore: an edge has no bounding box"))?],
+            };
+            if boxes.into_iter().any(|bx| !apart(bx, cutter_box, tol)) {
                 return Err(unsupported("radial bore meets another face of the body"));
             }
         }
@@ -507,7 +564,7 @@ mod tests {
         }
         for f in &mut body.faces {
             f.surface = match f.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p, n, x } => Surface::Plane { p: place(p), n: turn(n), x: turn(x) },
                 Surface::Cylinder { p, a, x, r } => Surface::Cylinder { p: place(p), a: turn(a), x: turn(x), r },
             };

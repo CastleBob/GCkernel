@@ -38,7 +38,11 @@ kinds 0 point, 1 vector, 2 frame (o x y), 3 rigid (reply: T after it), 4 curve, 
 (frame, x, y; reply kind 0), 7 surface. One bad item fails the batch with its index.
 Curves: 0 line, 1 arc, 2 general B-spline (refused), 3 conic, 4 cylinder pair,
 5 polynomial cubic Bezier (four xyz points), 6 rational cubic Bezier (four xyz
-points then four positive weights); the Bezier parameter domain is [0, 1].
+points then four positive weights); the Bezier parameter domain is [0, 1];
+7 radial cylinder pair (type 4's twenty values then the radius s: a normalized pipe end's rim), 8 cylinder/cone
+pair (c, a, x, rho, p, b, r, k, branch, t0, t1: a hole through a tapered wall). Surface 9 is the
+radial conoid of a normalized pipe end (c, a, x, rho, p, b, r, branch); op 19 builds that end's waste band
+(`src/normalize.rs`; see `src/boolean/README.md`).
 Surfaces: 0 plane, 1 cylinder; subsequent analytic/revolved tags and tensor spline tag 8 are defined in the neutral reader. STEP spline admission and limits: `docs/STEP_IMPORT.md`. See `src/protocol.rs`, `src/neutral.rs`, `src/geom.rs`.
 
 Display polylines omit internal same-plane/same-cylinder divisions and periodic seams. Their IDs remain the

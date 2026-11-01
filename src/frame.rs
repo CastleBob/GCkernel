@@ -187,6 +187,12 @@ impl Rigid {
             Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => Curve::CylinderPair {
                 c: self.position(c), a: self.vector(a), x: self.vector(x), rho, p: self.position(p), b: self.vector(b), r, branch, t0, t1,
             },
+            Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => Curve::RadialPair {
+                c: self.position(c), a: self.vector(a), x: self.vector(x), rho, p: self.position(p), b: self.vector(b), r, branch, t0, t1, s,
+            },
+            Curve::ConePair { c, a, x, rho, p, b, r, k, branch, t0, t1 } => Curve::ConePair {
+                c: self.position(c), a: self.vector(a), x: self.vector(x), rho, p: self.position(p), b: self.vector(b), r, k, branch, t0, t1,
+            },
             Curve::Bezier { p } => Curve::Bezier { p: p.map(|q| self.position(q)) },
             Curve::RationalBezier { p, w } => Curve::RationalBezier { p: p.map(|q| self.position(q)), w },
         }
@@ -203,6 +209,9 @@ impl Rigid {
             Surface::Sphere { c, a, x, r } => Surface::Sphere { c: self.position(c), a: self.vector(a), x: self.vector(x), r },
             Surface::Torus { c, a, x, big, r } => Surface::Torus { c: self.position(c), a: self.vector(a), x: self.vector(x), big, r },
             Surface::Revolution { p, a, x, m } => Surface::Revolution { p: self.position(p), a: self.vector(a), x: self.vector(x), m },
+            Surface::Conoid { c, a, x, rho, p, b, r, branch } => Surface::Conoid {
+                c: self.position(c), a: self.vector(a), x: self.vector(x), rho, p: self.position(p), b: self.vector(b), r, branch,
+            },
         }
     }
     /// The body moved exactly; topology (indices, senses, loops) is untouched.

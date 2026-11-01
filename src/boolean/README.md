@@ -350,7 +350,13 @@ min(input tolerance, 16*machine epsilon*sum of evaluation term magnitudes).
 Interior critical points still require positive separation greater than the
 input tolerance. This is a bounded endpoint arithmetic allowance, not outward-
 rounded interval certification. Distinct near-coincident graphs are still
-refused; no supporting surfaces are snapped or merged.
+refused; no supporting surfaces are snapped or merged. One surface stored twice
+is not two (Claude 2026-10-31, `same_graph`): two line graphs agreeing within 64
+machine epsilons of their terms at both band ends (their difference is linear),
+or two circles equal to that roundoff, are one coordinate, the first kept. This
+is evaluation roundoff of a single plane (aa5's preparation wedge on the
+adjoining leg's miter plane, STR-1's wedges: 1 to 2 ulps), never the tolerance:
+5e-7 or 1e-9 apart is still refused.
 
 The captured Rect Tube now replays its first four tools; STR-1 replays its first
 partial-depth cope. The actual tube miter has an independent dimensional
@@ -358,7 +364,9 @@ area/first-moment integral and 47,027 material probes. Later captured steps are
 checked against Claude's independent Eyeshot mesh references (absolute allowance
 0.001 in^3 for tessellation; see tests/fixtures/parts/*/reference.md). Native
 returned-body acceptance is recorded separately by the GCmaker owner.
-STR-1's next wedge retains an explicit near-coincident-line refusal. Rect Tube's
+STR-1's wedges, once refused as two stored lines, are one plane each (see
+`same_graph`): all six captured steps now replay within 0.001 in^3 of the Eyeshot
+references (final 98.79992 vs 98.80041). Rect Tube's
 fifth, arbitrary side-profile cut uses the local passage below; the whole-body
 chart still cannot represent all three cylinder axes together.
 A pipe hole whose finite bottom crosses the inner wall is independently checked
@@ -446,5 +454,77 @@ value from the parts' dimensions (closed form, or a quadrature of the analytic s
   the cutter's axis round a circle across the pipe is a degree-two trigonometric polynomial (eight samples, chord
   bound). Anything else (a pipe already holed or cut, a short cutter, an end not wholly inside) is refused by name.
 
-Not done: native normalized ends (GCmaker's Normalize End builds a sampled envelope; its analytic face, radial
-lines through the outer wall's cope curve, is not a surface the kernel has) and NC1 rolled-root cutters.
+Not done in that round: native normalized ends (closed below) and NC1 rolled-root cutters.
+
+## Normalized pipe ends (Claude, 2026-10-31)
+
+Bob's "short pipe test" (7 x 0.5 pipe, Normalize End over a 13 diameter Preserve Length cope). GCmaker's rule
+(PipeCopeNormalizer, EndConditionSideCompositeBuilder): a radial torch cuts one boundary per angle, so at each angle
+the end keeps the deeper of the two walls' crossings with the mating cylinder and carries it radially across the
+wall. The exact face is a right conoid with radial rulings, `Surface::Conoid` (wire surface 9):
+S(t, s) = c + s rho(t) + h(t) a, h the deeper wall's CylinderPair height; its rims are `Curve::RadialPair` (wire
+curve 7: a CylinderPair's height carried to radius s). Construction (`normalize.rs`, worker op 23) proves the deeper
+wall: both walls' discriminants positive all the way round (else "does not cross both pipe walls all the way round")
+and h_in - h_out of one sign within the tolerance at every angle, by samples less max|D''| step^2 / 8 with |h''|
+bounded from the pair's trigonometric discriminant (`geom::pair_bend_bound`); a square cope's two crossings meet at
+the pipe's sides, which is the same within the tolerance. A wall that changes round the pipe (tilted or off-centre
+copes) is refused by name ("the deeper wall changes round the pipe"). The tool is GCmaker's waste band (radii sa..sb
+about the pipe, far cap beyond the end, conoid top). `normal_end.rs` cuts it from a plain pipe on the same axis line
+when the band reaches past both walls, the far cap lies beyond one end, and the conoid's height is proved strictly
+between the ends (else "the envelope reaches a pipe end"); the far cap, walls and far rings are kept exactly, each
+wall trimmed to its rim. Bodies with a normalized end take only the radial bore domain, whose clearance bounds a rim
+in 128 pieces (circle-piece extrema plus the proved height range), the pieces at the hole's own angles giving that
+end's place along the axis; anything else is refused by name. Mass: X.N = -s (C.a + h) + h' C.v with Green's theorem
+in (t, s); area from the closed-form antiderivative of sqrt(s^2 + h'^2) in s (quadrature in t). Tests
+(tests/normal_end.rs): Bob's end against (Ro^2 - Ri^2) / 2 times the integral of y0 + sqrt(Rc^2 - Ri^2 sin^2 t)
+(1e-9), its face area, the tool's own volume, his top hole after it (one-wall integral, 1e-10), the far end, a turned
+cope, the display mesh within area x chord, op 23 and the neutral round trip, and the named refusals.
+
+## NC1 angle cutters (Claude, 2026-10-31)
+
+Bob's aa5 (L4X4X5/16, NC1): GCmaker's EndCondition_NC1VM rules for Angle stock are reproduced by the GC Kernel
+view's recipe (C#): an As Imported AK region crossing the root fillet's band (Through Fillet, automatic or set) is
+drilled the fillet's radius past the leg, with the fixed 0.001 in overshoot; an edge-only preparation is its
+welding wedge (cross-section between the waste overlap and the bevel, DSTV land from the back of the plate, or the
+adjoining leg's source miter plane, swept along the edge). The wedge's bevel and the earlier triangle's face are the
+same plane stored two ways, which the transverse chart now takes as one graph (above). tests/survey_gaps.rs checks
+both cuts against the section's first moment below its top face (every point with y > L + z removed). C-Channel
+NC1 cutters stay refused by name: GCmaker's channel rules (source-aligned end planes, straight-stock extension,
+junction inflation, prepared flanges) are not reproduced, and the transverse chart refuses the first web cut of a
+tapered-flange channel ("an end-cut surface patch is below the admitted partition resolution").
+
+## Blind pockets in prism stock (Claude, 2026-10-31)
+
+`pocket.rs` (inside the section domain): a right-prism tool along the body's prism axis that leaves through one cap
+and ends inside the stock (a sketch cut part way into a Flat). Selected before construction unless both operands
+are cardinal boxes (the rectilinear domain cuts those pockets). The result is exactly the stack A over [lo, d] and
+A - B over [d, hi]: the bottom cap A, the top cap A - B, the floor A n B, one wall per segment of A stepping from hi
+down to d where B covers it (no seam across a wall), one pocket wall per piece of B's boundary inside A. The 2D
+arrangement is the section domain's (closed-form meetings, coincident pieces by direction, midpoints by winding);
+loops chain by the least clockwise turn and a pinch is refused ("touches a boundary at a point"). A pocket from the
+bottom is cut turned half a turn about the section's first axis (an exact rotation) and turned back. The volume is
+checked against area(A) (d - lo) + area(A - B) (hi - d). Tests (tests/pocket.rs): rounded-rectangle, round,
+triangular, rebate, flush, groove-across (top in two pieces), whole-top, counterbore about a through hole, bottom
+pockets, through holes after a pocket (passage domain), all against area times depth to 1e-12; op 13 (the flat
+nester's prism profile) still refuses a pocketed plate. Limits: one pocket per body (a pocketed body is no longer a
+right prism; a second pocket is refused by name); op 12 history is not recorded for pockets (refused by name).
+
+## Holes through conical walls (Claude, 2026-10-31)
+
+`cone_bore.rs`: bodies with conical faces (tapered Pole stock, solid or hollow) take only this domain; its admission
+names every refusal (conical tools stay refused). A full round cutter square to the stock's axis whose axial window
+[z - rho, z + rho] lies strictly inside one outer wall face (cone or cylinder about the axis) and, hollow, one inner
+wall face; starting outside the outer wall, ending in the bore (one wall), past the far side (through), or in solid
+stock inside the material deeper than every entry point (blind: the bottom disk joins the hole's wall). On a cone
+the loop is the new `Curve::ConePair` (wire type 8): per angle t round the hole, the height h along its axis solves
+A h^2 + 2 B h + C = 0 with A = |a'|^2 - k^2 (a.b)^2, B = D'.a' - k R0 (a.b), C = |D'|^2 - R0^2 (D = Q(t) - p, primes
+across the stock axis b, R0 = r + k D.b): not a conic. Its discriminant is a trigonometric polynomial of degree two
+(exact from eight samples, proved positive all the way round). On a cylinder it is the CylinderPair. Clearances: a
+loop's points lie within rho of the hole axis along b exactly (h a has no part along b when a is square to b) and
+within asin((offset + rho) / R_min) of the hole's direction about the axis, so rings, seams and earlier holes are
+cleared by those windows; other faces by boxes (pair edges: across both axes within rho, along the hole at
+sqrt(R^2 - w^2) for the wall's radius range). Mass on the cone: Green's theorem in (theta, s) as for its parallels,
+G(s) g(theta) dtheta along the curve by quadrature. Tests (tests/cone_bore.rs) check one wall, both walls off
+centre and turned, solid through and blind, three holes in turn and one on the straight base against independent
+disk quadratures of the walls' depth (1e-9). Not done: a hole on the revolve's seam (the seam is shared with the
+adjoining section and not moved; refused by name), holes not square to the axis, holes ending inside a wall.

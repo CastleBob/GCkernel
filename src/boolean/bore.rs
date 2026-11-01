@@ -369,7 +369,7 @@ mod tests {
         for face in &body.faces {
             let sign = if face.sense { 1. } else { -1. };
             match face.surface {
-                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
+                Surface::EllipticCylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => unreachable!("no elliptic-cylinder or revolved faces in these test bodies"),
                 Surface::Plane { p, n, .. } => {
                     let outward = n.scale(sign);
                     let mut area = 0.;
@@ -377,7 +377,7 @@ mod tests {
                         for (index, forward) in lp {
                             let travel = if *forward { 1. } else { -1. };
                             match body.edges[*index].curve {
-                                Curve::Conic { .. } | Curve::CylinderPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
+                                Curve::Conic { .. } | Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
                                     panic!("round-bore fixture unexpectedly contains a conic")
                                 }
                                 Curve::Line { a, b } => {
@@ -510,20 +510,20 @@ mod tests {
     #[test]
     fn boundary_crossing_bores_cut_in_the_section_domain_tangent_and_blind_stay_unsupported() {
         // Since 2026-10-29 a bore reaching the outline is a prism section cut: centred on the x = 0 face it leaves a
-        // half-disc notch. Tangent to that face from inside it would pinch the section (non-manifold), and a blind
-        // bore spans no prism; both stay refused.
+        // half-disc notch. Tangent to that face from inside it would pinch the section (non-manifold): refused. A blind
+        // bore is a pocket since 2026-10-31 (pocket.rs): 2 of its depth inside, pi r^2 2 removed.
         let (body, tool) = fixture(2, [0., 4., 0.], 1., (-1., 5.));
         let result = crate::boolean::cut(&body, &tool, 1e-7).unwrap();
         crate::topology::check(&result, 1e-7).unwrap();
         let volume = crate::mass::measure(&result, 1e-7).unwrap().volume;
         assert!((volume - (320. - 2. * std::f64::consts::PI)).abs() < 1e-9, "{volume}");
-        for (x, depth) in [(1., (-1., 5.)), (5., (2., 5.))] {
-            let (body, tool) = fixture(2, [x, 4., 0.], 1., depth);
-            assert!(matches!(
-                crate::boolean::cut(&body, &tool, 1e-7),
-                Err(KernelError::Unsupported(_))
-            ));
-        }
+        let (body, tool) = fixture(2, [1., 4., 0.], 1., (-1., 5.));
+        assert!(matches!(crate::boolean::cut(&body, &tool, 1e-7), Err(KernelError::Unsupported(_))));
+        let (body, tool) = fixture(2, [5., 4., 0.], 1., (2., 5.));
+        let result = crate::boolean::cut(&body, &tool, 1e-7).unwrap();
+        crate::topology::check(&result, 1e-7).unwrap();
+        let volume = crate::mass::measure(&result, 1e-7).unwrap().volume;
+        assert!((volume - (320. - 2. * std::f64::consts::PI)).abs() < 1e-9, "{volume}");
     }
 
     #[test]

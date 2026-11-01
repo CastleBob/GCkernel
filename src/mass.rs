@@ -12,6 +12,12 @@
 //! ellipse arcs on the cylinder are c + u cos t + v sin t with theta = theta_u + e t, so every integral is closed form.
 //! A CylinderPair edge has no closed form: its integrals use adaptive Gauss-Legendre quadrature (smooth integrand,
 //! converged to about 1e-14 relative), and the result says so (`exact` false).
+//!
+//! Radial conoid face (Claude 2026-10-31): X = C + s rho(t) + h(t) a, natural normal N = X_t x X_s = -s a + h'(t) v(t),
+//! v = a x rho. X.N = -s (C.a + h) + h' (C.v), with antiderivative in s G = -(s^2 / 2)(C.a + h) + s h' (C.v); as on the
+//! cylinder, Green's theorem in (t, s) makes the outward flux -(loop integral of G dt) whatever the face's sense, and
+//! |N| = sqrt(s^2 + h'^2) has antiderivative A = (s / 2) sqrt(s^2 + h'^2) + (h'^2 / 2) asinh(s / |h'|), the area
+//! -sense (loop integral of A dt). Rulings have dt = 0; every other boundary curve by quadrature in its own parameter.
 
 use crate::extrude::signed_area;
 use crate::geom::{Curve, Surface, Vec3};
@@ -88,8 +94,8 @@ fn segment(body: &Body, edge: usize, forward: bool, shift: Vec3) -> Curve {
 /// Curves that do not lie on their cylinder (beyond `tolerance`) are refused.
 pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelError> {
     let (mut volume, mut area) = (0.0, 0.0);
-    let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. } | Curve::RationalBezier { .. }))
-        && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. } | Surface::Revolution { .. } | Surface::Spline { .. })
+    let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::RationalBezier { .. }))
+        && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. })
             || matches!(f.surface, Surface::Cylinder { .. })
                 && f.loops.iter().flatten().any(|&(e, _)| matches!(body.edges[e].curve, Curve::Bezier { .. })));
     let n = body.vertices.len().max(1) as f64;
@@ -232,6 +238,18 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
                 volume -= flux / 3.0;
                 area -= sense * sweep;
             }
+            Surface::Conoid { c, a, x, rho, p, b, r, branch } => {
+                let (c, p) = (c.add(shift), p.add(shift));
+                let (mut flux, mut sweep) = (0.0, 0.0);
+                for &(e, fwd) in face.loops.iter().flatten() {
+                    let (j, k) = conoid_terms(&segment(body, e, fwd, shift), c, *a, *x, *rho, p, *b, *r, *branch, tolerance, size)
+                        .map_err(|m| KernelError::InvalidInput(format!("face {f}, edge {e}: {m}")))?;
+                    flux += j;
+                    sweep += k;
+                }
+                volume -= flux / 3.0;
+                area -= sense * sweep;
+            }
             Surface::EllipticCylinder { p, a, u, v } => {
                 let p = p.add(shift);
                 let (mut flux, mut sweep) = (0.0, 0.0);
@@ -266,7 +284,7 @@ fn cylinder_terms(curve: &Curve, p: Vec3, o: Vec3, a: Vec3, x: Vec3, y: Vec3, r:
         }
         Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
         Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
-        Curve::CylinderPair { .. } => return curve_on_cylinder_terms(curve, p, o, a, x, y, r, px, py, tol, size),
+        Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } => return curve_on_cylinder_terms(curve, p, o, a, x, y, r, px, py, tol, size),
         Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
             if crate::topology::off_surface(curve, &Surface::Cylinder { p, a, x, r }, tol).is_some() {
                 return Err("Bezier boundary is not proved within cylinder tolerance".into());
@@ -295,6 +313,52 @@ fn cylinder_terms(curve: &Curve, p: Vec3, o: Vec3, a: Vec3, x: Vec3, y: Vec3, r:
     let j = e * r * (sc * big_a * ic + sc * big_b * is + sc * r * span + cu * big_a * icc + (cu * big_b + cv * big_a) * ics
         + cu * r * ic + cv * big_b * iss + cv * r * is);
     let k = e * r * (sc * span + cu * ic + cv * is);
+    Ok((j, k))
+}
+
+/// For one boundary curve on a radial conoid (module notes): (loop integral of G dt, loop integral of A dt), the measuring
+/// origin at 0 (c and p already moved there). Along a curve t and s come from its point (angle and distance about the
+/// axis), dt = (w.x w'.y - w.y w'.x) / s^2; a ruling (a line square to the axis at one angle) gives nothing.
+#[allow(clippy::too_many_arguments)]
+fn conoid_terms(curve: &Curve, c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, tol: f64, size: f64)
+    -> Result<(f64, f64), String> {
+    let y = a.cross(x);
+    if let Curve::Line { a: s, b: e } = *curve {
+        let (ws, we) = (s.sub(c), e.sub(c));
+        let (ts, te) = (ws.dot(y).atan2(ws.dot(x)), we.dot(y).atan2(we.dot(x)));
+        let turn = (te - ts + PI).rem_euclid(TAU) - PI;
+        if turn.abs() * ws.length().max(we.length()) > tol || e.sub(s).dot(a).abs() > tol {
+            return Err("a line on a conoid must be one of its rulings".into());
+        }
+        return Ok((0.0, 0.0));
+    }
+    let (t0, t1) = curve.domain();
+    let ca = c.dot(a);
+    let parts = |tau: f64| {
+        let (q, d) = curve.eval(tau);
+        let w = q.sub(c);
+        let (wx, wy) = (w.dot(x), w.dot(y));
+        let s2 = wx * wx + wy * wy;
+        let t = wy.atan2(wx);
+        let dt = (wx * d.dot(y) - wy * d.dot(x)) / s2;
+        let (h, dh) = crate::geom::pair_height(c, a, x, rho, p, b, r, branch, t);
+        (s2.sqrt(), t, dt, h, dh, w.dot(a))
+    };
+    for i in 0..=8 {
+        let (s, _, _, h, _, along) = parts(t0 + (t1 - t0) * i as f64 / 8.0);
+        if !(s > tol) || (along - h).abs() > tol { return Err("a curve that does not lie on its conoid".into()); }
+    }
+    let j = quadrature(&|tau| {
+        let (s, t, dt, h, dh, _) = parts(tau);
+        let v = x.scale(-t.sin()).add(y.scale(t.cos()));
+        (-(s * s / 2.0) * (ca + h) + s * dh * c.dot(v)) * dt
+    }, t0, t1, 1e-14 * size.powi(3))?;
+    let k = quadrature(&|tau| {
+        let (s, _, dt, _, dh, _) = parts(tau);
+        let g = dh.abs();
+        let a_hat = s / 2.0 * (s * s + dh * dh).sqrt() + if g > 0.0 { dh * dh / 2.0 * (s / g).asinh() } else { 0.0 };
+        a_hat * dt
+    }, t0, t1, 1e-14 * size.powi(2))?;
     Ok((j, k))
 }
 
@@ -344,7 +408,8 @@ fn cone_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, k: f64,
         }
         Curve::Arc { c, n, x: ax, r: ar, t0, t1 } => (c, ax.scale(ar), n.cross(ax).scale(ar), t0, t1),
         Curve::Conic { c, u, v, t0, t1 } => (c, u, v, t0, t1),
-        Curve::CylinderPair { .. } => return Err("intersection curves on a cone are not supported yet".into()),
+        Curve::ConePair { .. } => return curve_on_cone_terms(curve, p, a, x, y, r, k, tol),
+        Curve::CylinderPair { .. } | Curve::RadialPair { .. } => return Err("cylinder intersection curves on a cone are not supported".into()),
         Curve::Bezier { .. } | Curve::RationalBezier { .. } => return Err("a Bezier curve on a cone is not supported".into()),
     };
     let sc = c.sub(p).dot(a);
@@ -357,6 +422,33 @@ fn cone_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, k: f64,
     let e = up.cross(vp).dot(a).signum();
     let theta_u = up.dot(y).atan2(up.dot(x));
     Ok(cone_parallel(sc, theta_u + e * t0, theta_u + e * t1, p, a, x, y, r, k))
+}
+
+/// The same two loop integrals for any curve on the cone (Claude 2026-10-31, a hole's ConePair rim), by quadrature in
+/// the curve's own parameter: with w = point - P, s = w.a and theta its angle about the axis, dtheta/dt = (w.x w'.y -
+/// w.y w'.x) / |w'|^2 across the axis, the integrands G(s) g(theta) and G(s) sqrt(1 + k^2) times dtheta/dt.
+#[allow(clippy::too_many_arguments)]
+fn curve_on_cone_terms(curve: &Curve, p: Vec3, a: Vec3, x: Vec3, y: Vec3, r: f64, k: f64, tol: f64) -> Result<(f64, f64), String> {
+    let (t0, t1) = curve.domain();
+    let (px, py, pa) = (p.dot(x), p.dot(y), p.dot(a));
+    let parts = |t: f64| {
+        let (q, d) = curve.eval(t);
+        let w = q.sub(p);
+        let (wx, wy, s) = (w.dot(x), w.dot(y), w.dot(a));
+        let rr = wx * wx + wy * wy;
+        let theta = wy.atan2(wx);
+        (s, theta, (wx * d.dot(y) - wy * d.dot(x)) / rr, rr.sqrt())
+    };
+    for i in 0..=8 {
+        let (s, _, _, rad) = parts(t0 + (t1 - t0) * i as f64 / 8.0);
+        if (rad - (r + k * s)).abs() > tol * (1.0 + k * k).sqrt() { return Err("a curve that does not lie on its cone".into()); }
+    }
+    let size = curve.start().sub(p).length().max(1e-9);
+    let big_g = |s: f64| r * s + k * s * s / 2.0;
+    let j = quadrature(&|t| { let (s, th, dth, _) = parts(t); big_g(s) * (px * th.cos() + py * th.sin() + r - k * pa) * dth }, t0, t1,
+        1e-14 * size.powi(3))?;
+    let area = quadrature(&|t| { let (s, _, dth, _) = parts(t); big_g(s) * (1.0 + k * k).sqrt() * dth }, t0, t1, 1e-14 * size.powi(2))?;
+    Ok((j, area))
 }
 
 /// The cone's loop integrals along a parallel at height s (from P) between angles ta and tb.

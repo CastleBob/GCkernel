@@ -46,7 +46,7 @@ pub fn signed_area(lp: &[Curve], n: Vec3) -> f64 {
             }
             // No closed form: x y' - y x' by quadrature (mass::quadrature); a refused integral makes the area NaN,
             // which mass::measure reports.
-            Curve::CylinderPair { .. } | Curve::RationalBezier { .. } => {
+            Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::RationalBezier { .. } => {
                 let (t0, t1) = c.domain();
                 let size = c.start().length().max(c.eval((t0 + t1) / 2.0).0.length()).max(1e-9);
                 area += 0.5 * crate::mass::quadrature(&|t| {
@@ -100,7 +100,7 @@ pub fn extrude_named(profile: &Profile, tolerance: f64) -> Result<(Body, Provena
                     return Err(KernelError::InvalidInput("a profile ellipse must lie in the profile plane with independent semi-diameters".into()));
                 }
             }
-            if let Curve::CylinderPair { .. } = c {
+            if let Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } = c {
                 return Err(KernelError::Unsupported("extruding a cylinder-intersection profile edge is not supported".into()));
             }
             if let Curve::Bezier { .. } | Curve::RationalBezier { .. } = c {
@@ -183,7 +183,7 @@ pub fn extrude_named(profile: &Profile, tolerance: f64) -> Result<(Body, Provena
                     let v = if turn > 0.0 { *cv } else { cv.scale(-1.0) };
                     (Surface::EllipticCylinder { p: center.add(down), a: n, u: *cu, v }, turn > 0.0)
                 }
-                Curve::CylinderPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => unreachable!("these profile edges are refused above"),
+                Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => unreachable!("these profile edges are refused above"),
             };
             let lp = vec![(bottom_e(j), true), (up_e(j + 1), true), (top_e(j), false), (up_e(j), false)];
             sides.push(Face { surface: surface_and_sense.0, sense: surface_and_sense.1, loops: vec![lp] });

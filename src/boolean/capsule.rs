@@ -271,7 +271,7 @@ fn admit(tool: &Body, tol: f64) -> Result<Admitted> {
             Surface::Plane { p, n, x } => (p, n, x, None),
             Surface::Cylinder { p, a, x, r } => (p, a, x, Some(r)),
             Surface::EllipticCylinder { .. } => return Err(unsupported("capsule cutters with elliptic-cylinder faces are not supported")),
-            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } => return Err(unsupported("capsule cutters with revolved or spline faces are not supported")),
+            Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => return Err(unsupported("capsule cutters with revolved or spline faces are not supported")),
         };
         if !p.is_finite()
             || !unit(n)
@@ -440,7 +440,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     // vertices. A semicircle can leave the box between its endpoints.
     for curve in &hole {
         let (minimum, maximum) = match curve {
-            Curve::Conic { .. } | Curve::CylinderPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
+            Curve::Conic { .. } | Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
                 return Err(unsupported("capsule cutters require circular end arcs"))
             }
             Curve::Line { a, b } => {

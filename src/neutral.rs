@@ -137,27 +137,32 @@ impl<'a> Reader<'a> {
                 }
                 Ok(Curve::Conic { c, u, v, t0, t1 })
             }
-            t if t == 4.0 => {
+            t if t == 4.0 => self.pair(),
+            t if t == 7.0 => {
+                let Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } = self.pair()? else { unreachable!() };
+                let s = self.next()?;
+                if !(s > 0.0) { return invalid("a radial cylinder pair needs a positive radius"); }
+                Ok(Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s })
+            }
+            t if t == 8.0 => {
                 let c = self.point()?;
                 let (a, x) = self.frame()?;
                 let rho = self.next()?;
                 let p = self.point()?;
                 let b = self.direction()?;
-                let (r, branch, t0, t1) = (self.next()?, self.next()?, self.next()?, self.next()?);
-                if rho <= 0.0 || r <= 0.0 { return invalid("a cylinder pair needs positive radii"); }
-                if branch != 1.0 && branch != -1.0 { return invalid("a cylinder pair's branch must be 1 or -1"); }
-                if a.sub(b.scale(a.dot(b))).length() < 1e-9 { return invalid("a cylinder pair needs axes that are not parallel"); }
+                let (r, k, branch, t0, t1) = (self.next()?, self.next()?, self.next()?, self.next()?, self.next()?);
+                if rho <= 0.0 || r <= 0.0 { return invalid("a cone pair needs a positive cylinder radius and cone radius at its point"); }
+                if branch != 1.0 && branch != -1.0 { return invalid("a cone pair's branch must be 1 or -1"); }
+                let ap = a.sub(b.scale(a.dot(b)));
+                if ap.dot(ap) - k * k * a.dot(b).powi(2) < 1e-9 { return invalid("a cone pair's cylinder runs along a generator of its cone"); }
                 if t1 <= t0 || t1 - t0 > 2.0 * std::f64::consts::PI + 1e-12 {
-                    return invalid("a cylinder pair needs t0 < t1 <= t0 + 2 pi");
+                    return invalid("a cone pair needs t0 < t1 <= t0 + 2 pi");
                 }
-                // The curve exists, and its two branches stay apart, only where the discriminant is positive (or, within
-                // the tolerance, where the trim ends at a touch).
-                if pair_trim_touches(c, a, x, rho, p, b, r, t0, t1, self.tolerance).is_none() {
-                    return invalid("a cylinder pair's discriminant is not proved positive over its interval",
-                    );
+                let q = crate::geom::cone_pair_disc_coefficients(c, a, x, rho, p, b, r, k);
+                if !(crate::geom::pair_disc_lower_bound(&q, t0, t1, 4096) > 0.0) {
+                    return invalid("a cone pair's discriminant is not proved positive over its interval");
                 }
-                Ok(Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1,
-                })
+                Ok(Curve::ConePair { c, a, x, rho, p, b, r, k, branch, t0, t1 })
             }
             t if t == 5.0 => {
                 let p = [self.point()?, self.point()?, self.point()?, self.point()?];
@@ -178,6 +183,28 @@ impl<'a> Reader<'a> {
             }
             t => invalid(format!("unknown curve type {t}")),
         }
+    }
+
+    /// A CylinderPair's twenty values (wire type 4, and the first twenty of type 7).
+    fn pair(&mut self) -> Result<Curve, KernelError> {
+        let c = self.point()?;
+        let (a, x) = self.frame()?;
+        let rho = self.next()?;
+        let p = self.point()?;
+        let b = self.direction()?;
+        let (r, branch, t0, t1) = (self.next()?, self.next()?, self.next()?, self.next()?);
+        if rho <= 0.0 || r <= 0.0 { return invalid("a cylinder pair needs positive radii"); }
+        if branch != 1.0 && branch != -1.0 { return invalid("a cylinder pair's branch must be 1 or -1"); }
+        if a.sub(b.scale(a.dot(b))).length() < 1e-9 { return invalid("a cylinder pair needs axes that are not parallel"); }
+        if t1 <= t0 || t1 - t0 > 2.0 * std::f64::consts::PI + 1e-12 {
+            return invalid("a cylinder pair needs t0 < t1 <= t0 + 2 pi");
+        }
+        // The curve exists, and its two branches stay apart, only where the discriminant is positive (or, within
+        // the tolerance, where the trim ends at a touch).
+        if pair_trim_touches(c, a, x, rho, p, b, r, t0, t1, self.tolerance).is_none() {
+            return invalid("a cylinder pair's discriminant is not proved positive over its interval");
+        }
+        Ok(Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 })
     }
 
     pub fn surface(&mut self) -> Result<Surface, KernelError> {
@@ -305,6 +332,23 @@ impl<'a> Reader<'a> {
                 Ok(Surface::Spline { data: Box::new(data),
                 })
             }
+            t if t == 9.0 => {
+                let c = self.point()?;
+                let (a, x) = self.frame()?;
+                let rho = self.next()?;
+                let p = self.point()?;
+                let b = self.direction()?;
+                let (r, branch) = (self.next()?, self.next()?);
+                if rho <= 0.0 || r <= 0.0 { return invalid("a conoid's cylinder pair needs positive radii"); }
+                if branch != 1.0 && branch != -1.0 { return invalid("a conoid's branch must be 1 or -1"); }
+                if a.sub(b.scale(a.dot(b))).length() < 1e-9 { return invalid("a conoid's cylinder pair needs axes that are not parallel"); }
+                // Its height is defined all the way round: the pair's discriminant proved positive over the whole turn.
+                let k = crate::geom::pair_disc_coefficients(c, a, x, rho, p, b, r);
+                if !(crate::geom::pair_disc_lower_bound(&k, 0.0, 2.0 * std::f64::consts::PI, 4096) > 0.0) {
+                    return invalid("a conoid's height is not proved defined all the way round");
+                }
+                Ok(Surface::Conoid { c, a, x, rho, p, b, r, branch })
+            }
             t => invalid(format!("unknown surface type {t}")),
         }
     }
@@ -381,6 +425,14 @@ pub fn put_curve(out: &mut Vec<f64>, c: &Curve) {
             out.push(4.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho);
             put(out, *p); put(out, *b); out.extend_from_slice(&[*r, *branch, *t0, *t1]);
         }
+        Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => {
+            out.push(7.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho);
+            put(out, *p); put(out, *b); out.extend_from_slice(&[*r, *branch, *t0, *t1, *s]);
+        }
+        Curve::ConePair { c, a, x, rho, p, b, r, k, branch, t0, t1 } => {
+            out.push(8.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho);
+            put(out, *p); put(out, *b); out.extend_from_slice(&[*r, *k, *branch, *t0, *t1]);
+        }
         Curve::Bezier { p } => { out.push(5.0); for q in p { put(out, *q); } }
         Curve::RationalBezier { p, w } => { out.push(6.0); for q in p { put(out, *q); } out.extend(w); }
     }
@@ -414,6 +466,10 @@ pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
         Surface::Cone { p, a, x, r, k } => { out.push(4.0); put(out, *p); put(out, *a); put(out, *x); out.extend_from_slice(&[*r, *k]); }
         Surface::Sphere { c, a, x, r } => { out.push(5.0); put(out, *c); put(out, *a); put(out, *x); out.push(*r); }
         Surface::Torus { c, a, x, big, r } => { out.push(6.0); put(out, *c); put(out, *a); put(out, *x); out.extend_from_slice(&[*big, *r]); }
+        Surface::Conoid { c, a, x, rho, p, b, r, branch } => {
+            out.push(9.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho); put(out, *p); put(out, *b);
+            out.extend_from_slice(&[*r, *branch]);
+        }
         Surface::Revolution { p, a, x, m } => {
             out.push(7.0); put(out, *p); put(out, *a); put(out, *x);
             match m {

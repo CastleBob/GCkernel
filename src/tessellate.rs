@@ -184,7 +184,7 @@ fn polyline(body: &Body, edge: usize, chord: f64) -> Result<Vec<Vec3>, KernelErr
             }
             params
         }
-        Curve::CylinderPair { .. } | Curve::Bezier { .. } => {
+        Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } => {
             // No closed-form bend: halve each span until its quarter points sit within chord / 2 of the chord.
             let mut params = vec![t0];
             let mut pending = vec![(t0, t1, 0u32)];
@@ -551,6 +551,11 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
                 }).collect();
                 (tris, normals)
             }
+            Surface::Conoid { c, a, x, rho, p, b, r, branch } => {
+                let (pts, tris, normals) = conoid_mesh(points3, &index, (c, a, x, rho, p, b, r, branch), side, chord, f)?;
+                points3 = pts;
+                (tris, normals)
+            }
             Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } | Surface::Revolution { .. } => {
                 let rev = Revolved::of(&face.surface).expect("a surface of revolution");
                 let (pts, tris, normals) = revolved_mesh(&rev, &loops3, side, chord, f)?;
@@ -664,6 +669,100 @@ pub fn tessellate(body: &Body, chord: f64) -> Result<Mesh, KernelError> {
         }
     }
     Ok(mesh)
+}
+
+/// A radial conoid face's display mesh (Claude 2026-10-31): the chart (R t, side s) with t unwrapped round the axis (R the
+/// face's greatest radius), triangulated, then inner edges longer in t than the chord allows split and lifted onto the
+/// surface (exact along the rulings: the surface is straight in s). The allowed step takes the circle of radius R and the
+/// height's sampled bend max |h''| together; display only, not a certified bound.
+#[allow(clippy::type_complexity)]
+fn conoid_mesh(mut points3: Vec<Vec3>, index: &[Vec<usize>], k: (Vec3, Vec3, Vec3, f64, Vec3, Vec3, f64, f64), side: f64, chord: f64,
+    f: usize) -> Result<(Vec<Vec3>, Vec<[usize; 3]>, Vec<Vec3>), KernelError> {
+    let (c, a, x, rho, p, b, r, branch) = k;
+    let y = a.cross(x);
+    let height = |t: f64| crate::geom::pair_height(c, a, x, rho, p, b, r, branch, t);
+    let param = |q: Vec3| { let w = q.sub(c); (w.dot(y).atan2(w.dot(x)), w.sub(a.scale(w.dot(a))).length()) };
+    let big_r = points3.iter().map(|q| param(*q).1).fold(0.0, f64::max).max(1e-9);
+    let mut p2 = Vec::with_capacity(points3.len());
+    let mut spans = Vec::new();
+    for l in index {
+        let mut prev: Option<f64> = None;
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &i in l {
+            let (raw, s) = param(points3[i]);
+            let theta = match prev { None => raw, Some(t) => t + (raw - t + PI).rem_euclid(TAU) - PI };
+            prev = Some(theta);
+            lo = lo.min(theta);
+            hi = hi.max(theta);
+            p2.push([big_r * theta, side * s]);
+        }
+        let (first, last) = (p2[l[0]][0] / big_r, prev.unwrap());
+        let close = last + (first - last + PI).rem_euclid(TAU) - PI;
+        if (close - first).abs() > PI {
+            return unsupported(format!("conoid face {f}: a loop wraps the axis without a ruling seam"));
+        }
+        spans.push((lo, hi));
+    }
+    if let Some(k) = (0..index.len()).max_by(|&i, &j| (spans[i].1 - spans[i].0).total_cmp(&(spans[j].1 - spans[j].0))) {
+        let (lo, hi) = spans[k];
+        for (j, l) in index.iter().enumerate() {
+            if j == k { continue; }
+            let mid = (spans[j].0 + spans[j].1) / 2.0;
+            let turns = if mid < lo { ((lo - mid) / TAU).ceil() } else if mid > hi { -((mid - hi) / TAU).ceil() } else { 0.0 };
+            for &i in l { p2[i][0] += turns * TAU * big_r; }
+        }
+    }
+    let mut tris = triangulate(&p2, index, true)?;
+    // The height's bend, sampled: h'' by differences of h' at 256 angles.
+    let bend = (0..256).map(|i| {
+        let t = TAU * i as f64 / 256.0;
+        ((height(t + 1e-4).1 - height(t - 1e-4).1) / 2e-4).abs()
+    }).fold(0.0, f64::max);
+    let step = angle_step(big_r, chord).min(if bend > 0.0 { (8.0 * chord / bend).sqrt() } else { PI / 2.0 });
+    let limit = big_r * step;
+    let boundary: std::collections::HashSet<(usize, usize)> = index.iter()
+        .flat_map(|l| (0..l.len()).map(move |k| { let (u, w) = (l[k], l[(k + 1) % l.len()]); (u.min(w), u.max(w)) }))
+        .collect();
+    let lift = |m: [f64; 2]| {
+        let (t, s) = (m[0] / big_r, side * m[1]);
+        c.add(x.scale(s * t.cos())).add(y.scale(s * t.sin())).add(a.scale(height(t).0))
+    };
+    for pass in 0..64 {
+        let mut by_edge: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (t, tri) in tris.iter().enumerate() {
+            for k in 0..3 { let (u, w) = (tri[k], tri[(k + 1) % 3]); by_edge.entry((u.min(w), u.max(w))).or_default().push(t); }
+        }
+        let mut long: Vec<(usize, usize)> = by_edge.keys().copied()
+            .filter(|e| !boundary.contains(e) && (p2[e.0][0] - p2[e.1][0]).abs() > limit).collect();
+        if long.is_empty() { break; }
+        long.sort_by(|e1, e2| (p2[e2.0][0] - p2[e2.1][0]).abs().total_cmp(&(p2[e1.0][0] - p2[e1.1][0]).abs()).then(e1.cmp(e2)));
+        let mut touched = vec![false; tris.len()];
+        for (u, w) in long {
+            let around = &by_edge[&(u, w)];
+            if around.iter().any(|&t| touched[t]) { continue; }
+            let m = p2.len();
+            let mid = [(p2[u][0] + p2[w][0]) / 2.0, (p2[u][1] + p2[w][1]) / 2.0];
+            p2.push(mid);
+            points3.push(lift(mid));
+            for &t in around {
+                touched[t] = true;
+                let tri = tris[t];
+                let k = (0..3).find(|&k| { let (s0, e0) = (tri[k], tri[(k + 1) % 3]); (s0 == u && e0 == w) || (s0 == w && e0 == u) }).unwrap();
+                let (s0, e0, o) = (tri[k], tri[(k + 1) % 3], tri[(k + 2) % 3]);
+                tris[t] = [s0, m, o];
+                tris.push([m, e0, o]);
+                touched.push(true);
+            }
+        }
+        if pass == 63 { return unsupported(format!("conoid face {f} needs too many display triangles")); }
+    }
+    let normals = points3.iter().map(|q| {
+        let (t, s) = param(*q);
+        let v = x.scale(-t.sin()).add(y.scale(t.cos()));
+        let n = v.scale(height(t).1).sub(a.scale(s));
+        n.scale(side / n.length())
+    }).collect();
+    Ok((points3, tris, normals))
 }
 
 /// A surface of revolution's chart (Claude 2026-10-29): theta round the axis, u along the meridian (a cone's height from
