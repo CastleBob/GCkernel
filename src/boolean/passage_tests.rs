@@ -273,7 +273,7 @@ fn permute(body: &Body, shift: usize) -> Body {
                 *u = map(*u);
                 *v = map(*v);
             }
-            Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => panic!("pair edges are outside these passage fixtures"),
+            Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => panic!("pair edges are outside these passage fixtures"),
             Curve::Line { a, b } => {
                 *a = map(*a);
                 *b = map(*b);

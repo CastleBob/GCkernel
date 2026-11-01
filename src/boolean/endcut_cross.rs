@@ -1957,7 +1957,7 @@ mod tests {
                     *rho *= scale;
                     *r *= scale;
                 }
-                Curve::Bezier { .. } | Curve::RationalBezier { .. } | Curve::RadialPair { .. } => unreachable!("no Bezier or radial-pair edges in these test bodies"),
+                Curve::Bezier { .. } | Curve::RationalBezier { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } => unreachable!("no Bezier or radial-pair edges in these test bodies"),
             }
         }
         for f in &mut out.faces {

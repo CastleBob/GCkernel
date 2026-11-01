@@ -140,6 +140,26 @@ impl<'a> Reader<'a> {
                 if !(s > 0.0) { return invalid("a radial cylinder pair needs a positive radius"); }
                 Ok(Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s })
             }
+            t if t == 8.0 => {
+                let c = self.point()?;
+                let (a, x) = self.frame()?;
+                let rho = self.next()?;
+                let p = self.point()?;
+                let b = self.direction()?;
+                let (r, k, branch, t0, t1) = (self.next()?, self.next()?, self.next()?, self.next()?, self.next()?);
+                if rho <= 0.0 || r <= 0.0 { return invalid("a cone pair needs a positive cylinder radius and cone radius at its point"); }
+                if branch != 1.0 && branch != -1.0 { return invalid("a cone pair's branch must be 1 or -1"); }
+                let ap = a.sub(b.scale(a.dot(b)));
+                if ap.dot(ap) - k * k * a.dot(b).powi(2) < 1e-9 { return invalid("a cone pair's cylinder runs along a generator of its cone"); }
+                if t1 <= t0 || t1 - t0 > 2.0 * std::f64::consts::PI + 1e-12 {
+                    return invalid("a cone pair needs t0 < t1 <= t0 + 2 pi");
+                }
+                let q = crate::geom::cone_pair_disc_coefficients(c, a, x, rho, p, b, r, k);
+                if !(crate::geom::pair_disc_lower_bound(&q, t0, t1, 4096) > 0.0) {
+                    return invalid("a cone pair's discriminant is not proved positive over its interval");
+                }
+                Ok(Curve::ConePair { c, a, x, rho, p, b, r, k, branch, t0, t1 })
+            }
             t if t == 5.0 => {
                 let p = [self.point()?, self.point()?, self.point()?, self.point()?];
                 if p.iter().any(|q| !q.is_finite()) { return invalid("a Bezier curve needs finite control points"); }
@@ -369,6 +389,10 @@ pub fn put_curve(out: &mut Vec<f64>, c: &Curve) {
         Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => {
             out.push(7.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho);
             put(out, *p); put(out, *b); out.extend_from_slice(&[*r, *branch, *t0, *t1, *s]);
+        }
+        Curve::ConePair { c, a, x, rho, p, b, r, k, branch, t0, t1 } => {
+            out.push(8.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho);
+            put(out, *p); put(out, *b); out.extend_from_slice(&[*r, *k, *branch, *t0, *t1]);
         }
         Curve::Bezier { p } => { out.push(5.0); for q in p { put(out, *q); } }
         Curve::RationalBezier { p, w } => { out.push(6.0); for q in p { put(out, *q); } out.extend(w); }

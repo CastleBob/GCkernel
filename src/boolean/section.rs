@@ -24,6 +24,9 @@ fn unsupported(message: &str) -> KernelError {
 
 const LIMIT: usize = 2000;
 
+#[path = "pocket.rs"]
+mod pocket;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct P {
     x: f64,
@@ -774,6 +777,12 @@ pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
             continue;
         };
         if tlo > lo + tol || thi < hi - tol {
+            // A blind pocket from the top or the bottom (pocket.rs), unless the tool is a cardinal box: the
+            // rectilinear and transverse box domains cut those (pockets, notches, end cuts on tubes) as before.
+            let cardinal = |b: &Body| b.faces.iter().all(|f| matches!(f.surface, Surface::Plane { n, .. } if [n.x, n.y, n.z].iter().filter(|c| **c != 0.).count() == 1));
+            if pocketed(lo, hi, tlo, thi, tol).is_some() && !cardinal(tool) {
+                return true;
+            }
             continue;
         }
         let meets = a.iter().flatten().any(|s| b.iter().flatten().any(|t| meetings(s, t, tol).map_or(true, |m| !m.is_empty())));
@@ -790,6 +799,18 @@ pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
         return meets || elliptic || !plain_box || !passage || !matches!(winding(&a, b[0][0].start()), Ok(1));
     }
     false
+}
+
+/// A blind pocket's place: Some(true) when the tool [tlo, thi] leaves through the top cap and ends inside the stock
+/// [lo, hi], Some(false) through the bottom, None otherwise.
+fn pocketed(lo: f64, hi: f64, tlo: f64, thi: f64, tol: f64) -> Option<bool> {
+    if thi >= hi - tol && tlo > lo + tol && tlo < hi - tol {
+        Some(true)
+    } else if tlo <= lo + tol && thi > lo + tol && thi < hi - tol {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
@@ -817,6 +838,32 @@ fn section_cut(body: &Body, tool: &Body, tol: f64, named: bool) -> Result<(Body,
                 chart = Some((k, a, b));
                 break;
             }
+        }
+    }
+    if chart.is_none() {
+        // A blind pocket (pocket.rs): the first axis along which both are right prisms and the tool leaves through one
+        // cap and ends inside; a pocket from the bottom is cut turned half a turn about the section's first axis.
+        for k in (0..3).filter(|&k| prism_along(tool, k)) {
+            let (Some(a), Some(b)) = (prism(body, k, tol)?, prism(tool, k, tol)?) else { continue };
+            let Some(from_top) = pocketed(a.lo, a.hi, b.lo, b.hi, tol) else { continue };
+            if named {
+                return Err(unsupported("cut history is not recorded for blind pockets yet"));
+            }
+            if from_top {
+                return pocket::cut(body, &a, &b, k, tol).map(|r| (r, Provenance::default()));
+            }
+            let (u, _) = axes(k);
+            let mut m = [[0.; 3]; 3];
+            for (i, row) in m.iter_mut().enumerate() {
+                row[i] = if i == u { 1. } else { -1. };
+            }
+            let turn = crate::frame::Rigid::from_rows(m, Vec3::new(0., 0., 0.))?;
+            let (tb, tt) = (turn.body(body), turn.body(tool));
+            let (Some(a), Some(b)) = (prism(&tb, k, tol)?, prism(&tt, k, tol)?) else {
+                return Err(KernelError::Internal("blind pocket: a prism turned half a turn is not a prism".into()));
+            };
+            let result = pocket::cut(&tb, &a, &b, k, tol)?;
+            return Ok((turn.body(&result), Provenance::default()));
         }
     }
     let (k, a, mut b) = chart.ok_or_else(|| unsupported("section cut needs a right-prism body and a tool spanning it along one axis"))?;
@@ -1095,7 +1142,8 @@ mod tests {
         assert!(cut(&plate(), &all, TOL).unwrap().faces.is_empty());
         let band = prism_of(vec![polygon(&[(4., -1.), (6., -1.), (6., 9.), (4., 9.)])], -1., 1.);
         assert!(matches!(cut(&plate(), &band, TOL), Err(KernelError::Unsupported(_))));
+        // Part way down (2026-10-31): a pocket, here a corner rebate 2 x 2 x 0.25 (pocket.rs).
         let shallow = prism_of(vec![polygon(&[(8., -1.), (11., -1.), (11., 2.), (8., 2.)])], 0.25, 1.);
-        assert!(matches!(cut(&plate(), &shallow, TOL), Err(KernelError::Unsupported(_))));
+        assert!((removed(&plate(), &shallow) - 1.).abs() < 1e-12);
     }
 }

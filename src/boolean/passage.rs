@@ -37,7 +37,7 @@ fn sign(forward: bool) -> f64 {
 
 fn harmonic(curve: &Curve) -> Option<(Vec3, Vec3, Vec3, f64, f64)> {
     match *curve {
-        Curve::Line { .. } | Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => None,
+        Curve::Line { .. } | Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => None,
         Curve::Arc { c, n, x, r, t0, t1 } => Some((c, x.scale(r), n.cross(x).scale(r), t0, t1)),
         Curve::Conic { c, u, v, t0, t1 } => Some((c, u, v, t0, t1)),
     }
@@ -78,7 +78,7 @@ pub(super) fn curve_bounds(curve: &Curve) -> ([f64; 3], [f64; 3]) {
 
 fn distance(curve: &Curve, q: Vec3) -> f64 {
     match *curve {
-        Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => unreachable!("pair edges are refused by passage admission"),
+        Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => unreachable!("pair edges are refused by passage admission"),
         Curve::Conic { .. } => {
             // A lower distance bound is sufficient for clearance admission.
             // An inconclusive box rejects the cut; it never substitutes a curve.
@@ -112,7 +112,7 @@ fn loop_area(body: &Body, lp: &[(usize, bool)], n: Vec3) -> f64 {
         .map(|(i, fwd)| {
             let c = &body.edges[*i].curve;
             let integral = match *c {
-                Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
+                Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
                     unreachable!("pair edges are refused by passage admission")
                 }
                 Curve::Conic {
@@ -237,7 +237,7 @@ fn validate(body: &Body, tol: f64) -> Result<Vec<([f64; 3], [f64; 3])>> {
     }
     for edge in &body.edges {
         match edge.curve {
-            Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
+            Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
                 return Err(unsupported(
                     "cylinder-pair trims require transverse admission",
                 ))

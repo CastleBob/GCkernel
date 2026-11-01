@@ -5,6 +5,7 @@
 mod bore;
 mod box_cut;
 mod capsule;
+mod cone_bore;
 mod cope;
 mod endcut;
 mod normal_end;
@@ -24,6 +25,7 @@ enum Domain {
     Capsule,
     Cope,
     NormalEnd,
+    ConeBore,
 }
 
 /// The exact drill the bore domain takes: one cylinder wall between two caps, one seam.
@@ -43,9 +45,14 @@ fn select(
     if body.edges.iter().chain(&tool.edges).any(|e| matches!(e.curve, crate::geom::Curve::RationalBezier { .. })) {
         return Err(crate::KernelError::Unsupported("cuts on rational Bezier boundaries are not supported yet".into()));
     }
-    // No boolean domain handles conical faces yet (tapered Pole stock): refused by name before any selector reads them.
-    if body.faces.iter().chain(&tool.faces).any(|f| matches!(f.surface, crate::geom::Surface::Cone { .. })) {
-        return Err(crate::KernelError::Unsupported("cuts on bodies with conical faces are not supported yet".into()));
+    // Conical faces (tapered Pole stock): only radial bores through the walls (cone_bore.rs, Claude 2026-10-31); its
+    // admission names why anything else is refused, before any other selector reads them.
+    if tool.faces.iter().any(|f| matches!(f.surface, crate::geom::Surface::Cone { .. })) {
+        return Err(crate::KernelError::Unsupported("cuts with tools that have conical faces are not supported yet".into()));
+    }
+    if body.faces.iter().any(|f| matches!(f.surface, crate::geom::Surface::Cone { .. })) {
+        cone_bore::admit(body, tool, tolerance)?;
+        return Ok(Domain::ConeBore);
     }
     if body.faces.iter().chain(&tool.faces).any(|f| matches!(f.surface, crate::geom::Surface::Sphere { .. } | crate::geom::Surface::Torus { .. } | crate::geom::Surface::Revolution { .. })) {
         return Err(crate::KernelError::Unsupported("cuts on bodies with spherical, toroidal or general revolved faces are not supported yet".into()));
@@ -118,6 +125,7 @@ pub fn cut(
         Domain::Capsule => capsule::cut(body, tool, tolerance),
         Domain::Cope => cope::cut(body, tool, tolerance),
         Domain::NormalEnd => normal_end::cut(body, tool, tolerance),
+        Domain::ConeBore => cone_bore::cut(body, tool, tolerance),
     }
 }
 

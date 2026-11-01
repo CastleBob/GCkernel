@@ -160,7 +160,7 @@ fn polyline(body: &Body, edge: usize, chord: f64) -> Result<Vec<Vec3>, KernelErr
             }
             params
         }
-        Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } => {
+        Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } => {
             // No closed-form bend: halve each span until its quarter points sit within chord / 2 of the chord.
             let mut params = vec![t0];
             let mut pending = vec![(t0, t1, 0u32)];

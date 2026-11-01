@@ -15,7 +15,7 @@ fn boundary_volume(body: &Body) -> f64 {
                 for (i, forward) in face.loops.iter().flatten() {
                     let curve = &body.edges[*i].curve;
                     let integral = match *curve {
-                        Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
+                        Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
                             panic!("this independent prism integral excludes cylinder pairs")
                         }
                         Curve::Conic { c, u, v, t0, t1 } => c
@@ -226,18 +226,18 @@ fn indexing_curve_direction_and_loop_start_do_not_change_the_slot() {
 fn slot_crossing_cuts_in_the_section_domain_tangent_and_blind_stay_unsupported() {
     // Since 2026-10-29 a slot reaching the outline is a prism section cut. At offset 3 its right half circle is
     // past x = 10: inside remain the straight part x 6..10 (8) and the left half disc (pi / 2). At offset 2 its end
-    // touches x = 10 at a point (non-manifold), and a blind slot spans no prism: both stay refused.
+    // touches x = 10 at a point (non-manifold): refused. A blind slot is a pocket since 2026-10-31 (pocket.rs): 2 of
+    // its depth inside, (8 + pi) 2 removed.
     let (body, tool) = fixture(2, 0., 3., (-1., 5.));
     let result = crate::boolean::cut(&body, &tool, TOL).unwrap();
     crate::topology::check(&result, TOL).unwrap();
     assert!((boundary_volume(&result) - (320. - 4. * (8. + PI / 2.))).abs() < 1e-9);
-    for (offset, depth) in [(2., (-1., 5.)), (0., (2., 5.))] {
-        let (body, tool) = fixture(2, 0., offset, depth);
-        assert!(matches!(
-            crate::boolean::cut(&body, &tool, TOL),
-            Err(KernelError::Unsupported(_))
-        ));
-    }
+    let (body, tool) = fixture(2, 0., 2., (-1., 5.));
+    assert!(matches!(crate::boolean::cut(&body, &tool, TOL), Err(KernelError::Unsupported(_))));
+    let (body, tool) = fixture(2, 0., 0., (2., 5.));
+    let result = crate::boolean::cut(&body, &tool, TOL).unwrap();
+    crate::topology::check(&result, TOL).unwrap();
+    assert!((boundary_volume(&result) - (320. - 2. * (8. + PI))).abs() < 1e-9);
     let (body, tool) = fixture(2, 0., 0., (0., 4.));
     let result = crate::boolean::cut(&body, &tool, TOL).unwrap();
     assert!((boundary_volume(&result) - (320. - 4. * (8. + PI))).abs() < 1e-9);

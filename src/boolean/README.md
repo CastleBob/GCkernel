@@ -492,3 +492,39 @@ both cuts against the section's first moment below its top face (every point wit
 NC1 cutters stay refused by name: GCmaker's channel rules (source-aligned end planes, straight-stock extension,
 junction inflation, prepared flanges) are not reproduced, and the transverse chart refuses the first web cut of a
 tapered-flange channel ("an end-cut surface patch is below the admitted partition resolution").
+
+## Blind pockets in prism stock (Claude, 2026-10-31)
+
+`pocket.rs` (inside the section domain): a right-prism tool along the body's prism axis that leaves through one cap
+and ends inside the stock (a sketch cut part way into a Flat). Selected before construction unless both operands
+are cardinal boxes (the rectilinear domain cuts those pockets). The result is exactly the stack A over [lo, d] and
+A - B over [d, hi]: the bottom cap A, the top cap A - B, the floor A n B, one wall per segment of A stepping from hi
+down to d where B covers it (no seam across a wall), one pocket wall per piece of B's boundary inside A. The 2D
+arrangement is the section domain's (closed-form meetings, coincident pieces by direction, midpoints by winding);
+loops chain by the least clockwise turn and a pinch is refused ("touches a boundary at a point"). A pocket from the
+bottom is cut turned half a turn about the section's first axis (an exact rotation) and turned back. The volume is
+checked against area(A) (d - lo) + area(A - B) (hi - d). Tests (tests/pocket.rs): rounded-rectangle, round,
+triangular, rebate, flush, groove-across (top in two pieces), whole-top, counterbore about a through hole, bottom
+pockets, through holes after a pocket (passage domain), all against area times depth to 1e-12; op 13 (the flat
+nester's prism profile) still refuses a pocketed plate. Limits: one pocket per body (a pocketed body is no longer a
+right prism; a second pocket is refused by name); op 12 history is not recorded for pockets (refused by name).
+
+## Holes through conical walls (Claude, 2026-10-31)
+
+`cone_bore.rs`: bodies with conical faces (tapered Pole stock, solid or hollow) take only this domain; its admission
+names every refusal (conical tools stay refused). A full round cutter square to the stock's axis whose axial window
+[z - rho, z + rho] lies strictly inside one outer wall face (cone or cylinder about the axis) and, hollow, one inner
+wall face; starting outside the outer wall, ending in the bore (one wall), past the far side (through), or in solid
+stock inside the material deeper than every entry point (blind: the bottom disk joins the hole's wall). On a cone
+the loop is the new `Curve::ConePair` (wire type 8): per angle t round the hole, the height h along its axis solves
+A h^2 + 2 B h + C = 0 with A = |a'|^2 - k^2 (a.b)^2, B = D'.a' - k R0 (a.b), C = |D'|^2 - R0^2 (D = Q(t) - p, primes
+across the stock axis b, R0 = r + k D.b): not a conic. Its discriminant is a trigonometric polynomial of degree two
+(exact from eight samples, proved positive all the way round). On a cylinder it is the CylinderPair. Clearances: a
+loop's points lie within rho of the hole axis along b exactly (h a has no part along b when a is square to b) and
+within asin((offset + rho) / R_min) of the hole's direction about the axis, so rings, seams and earlier holes are
+cleared by those windows; other faces by boxes (pair edges: across both axes within rho, along the hole at
+sqrt(R^2 - w^2) for the wall's radius range). Mass on the cone: Green's theorem in (theta, s) as for its parallels,
+G(s) g(theta) dtheta along the curve by quadrature. Tests (tests/cone_bore.rs) check one wall, both walls off
+centre and turned, solid through and blind, three holes in turn and one on the straight base against independent
+disk quadratures of the walls' depth (1e-9). Not done: a hole on the revolve's seam (the seam is shared with the
+adjoining section and not moved; refused by name), holes not square to the axis, holes ending inside a wall.

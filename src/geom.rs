@@ -63,6 +63,14 @@ pub enum Curve {
     /// cylinder of radius `s` about (c, a); at s = rho it is the CylinderPair itself. Wire type 7: type 4's twenty
     /// values, then s.
     RadialPair { c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, branch: f64, t0: f64, t1: f64, s: f64 },
+    /// Where a cylinder crosses a cone (Claude 2026-10-31, holes through tapered Pole walls), wire type 8. t runs round
+    /// the **parameter** cylinder (axis point `c`, unit axis `a`, unit `x` perpendicular, y = a x x, radius `rho`):
+    /// Q(t) = c + rho (cos t x + sin t y); the point is Q(t) + h(t) a on the **root** cone (axis point `p`, unit axis
+    /// `b`, radius `r + k s` at p + s b), h the root of A h^2 + 2 B h + C = 0 chosen by `branch` (+1 the larger): with
+    /// D = Q - p, primes the parts across b and R0 = r + k (D.b), A = |a'|^2 - k^2 (a.b)^2 (positive),
+    /// B = D'.a' - k R0 (a.b), C = |D'|^2 - R0^2. The discriminant S = B^2 - A C is a trigonometric polynomial of
+    /// degree two in t, positive over [t0, t1]. Not a conic.
+    ConePair { c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, k: f64, branch: f64, t0: f64, t1: f64 },
     /// A cubic Bezier curve (Claude 2026-10-29, revolved Bezier meridians), wire type 5: control points p0..p3, t in [0, 1].
     Bezier { p: [Vec3; 4] },
     /// Positive-weight rational cubic, t in [0, 1]. Wire type 6: four points then four weights.
@@ -221,6 +229,47 @@ pub fn pair_height_range(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, 
     (lo.is_finite() && hi.is_finite() && pad.is_finite()).then_some((lo - pad, hi + pad))
 }
 
+/// The pieces of a ConePair at t: point less c, tangent, and the discriminant S(t) (see `Curve::ConePair`).
+#[allow(clippy::too_many_arguments)]
+pub fn cone_pair_eval(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, k: f64, branch: f64, t: f64)
+    -> (Vec3, Vec3, f64) {
+    let y = a.cross(x);
+    let perp = |w: Vec3| w.sub(b.scale(w.dot(b)));
+    let round = x.scale(rho * t.cos()).add(y.scale(rho * t.sin()));
+    let dq = x.scale(-rho * t.sin()).add(y.scale(rho * t.cos()));
+    // D = (c - p) + round, the large difference taken once.
+    let cp = c.sub(p);
+    let (dp, ddp) = (perp(cp).add(perp(round)), perp(dq));
+    let (db, ddb) = (cp.dot(b) + round.dot(b), dq.dot(b));
+    let (ap, ab) = (perp(a), a.dot(b));
+    let (r0, dr0) = (r + k * db, k * ddb);
+    let big_a = ap.dot(ap) - k * k * ab * ab;
+    let (big_b, dbig_b) = (dp.dot(ap) - k * r0 * ab, ddp.dot(ap) - k * dr0 * ab);
+    let (big_c, dbig_c) = (dp.dot(dp) - r0 * r0, 2.0 * dp.dot(ddp) - 2.0 * r0 * dr0);
+    let s = big_b * big_b - big_a * big_c;
+    let ds = 2.0 * big_b * dbig_b - big_a * dbig_c;
+    let root = s.max(0.0).sqrt();
+    let h = (-big_b + branch * root) / big_a;
+    let dh = (-dbig_b + branch * ds / (2.0 * root)) / big_a;
+    (round.add(a.scale(h)), dq.add(a.scale(dh)), s)
+}
+
+/// The discriminant of a ConePair as a trigonometric polynomial (exact from eight samples: degree two).
+#[allow(clippy::too_many_arguments)]
+pub fn cone_pair_disc_coefficients(c: Vec3, a: Vec3, x: Vec3, rho: f64, p: Vec3, b: Vec3, r: f64, k: f64) -> [f64; 5] {
+    let mut q = [0.0; 5];
+    for i in 0..8 {
+        let t = std::f64::consts::PI * i as f64 / 4.0;
+        let s = cone_pair_eval(c, a, x, rho, p, b, r, k, 1.0, t).2;
+        q[0] += s / 8.0;
+        q[1] += s * t.cos() / 4.0;
+        q[2] += s * t.sin() / 4.0;
+        q[3] += s * (2.0 * t).cos() / 4.0;
+        q[4] += s * (2.0 * t).sin() / 4.0;
+    }
+    q
+}
+
 /// The control points of a cubic Bezier curve's piece over [a, b] (de Casteljau).
 pub fn bezier_piece(p: [Vec3; 4], a: f64, b: f64) -> [Vec3; 4] {
     let split = |p: [Vec3; 4], t: f64| -> ([Vec3; 4], [Vec3; 4]) {
@@ -246,7 +295,7 @@ impl Curve {
         match self {
             Curve::Line { .. } => (0.0, 1.0),
             Curve::Arc { t0, t1, .. } | Curve::Conic { t0, t1, .. } | Curve::CylinderPair { t0, t1, .. }
-            | Curve::RadialPair { t0, t1, .. } => (*t0, *t1),
+            | Curve::RadialPair { t0, t1, .. } | Curve::ConePair { t0, t1, .. } => (*t0, *t1),
             Curve::Bezier { .. } | Curve::RationalBezier { .. } => (0.0, 1.0),
         }
     }
@@ -265,6 +314,10 @@ impl Curve {
             }
             Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => {
                 let (offset, d) = radial_eval(c, a, x, rho, p, b, r, branch, s, t, Self::pair_side(t, t0, t1));
+                (c.add(offset), d)
+            }
+            Curve::ConePair { c, a, x, rho, p, b, r, k, branch, .. } => {
+                let (offset, d, _) = cone_pair_eval(c, a, x, rho, p, b, r, k, branch, t);
                 (c.add(offset), d)
             }
             Curve::RationalBezier { p, w } => crate::rational::eval(p, w, t),
@@ -289,6 +342,10 @@ impl Curve {
                 let (offset, d) = radial_eval(c, a, x, rho, p, b, r, branch, s, t, Self::pair_side(t, t0, t1));
                 (c.sub(o).add(offset), d)
             }
+            Curve::ConePair { c, a, x, rho, p, b, r, k, branch, .. } => {
+                let (offset, d, _) = cone_pair_eval(c, a, x, rho, p, b, r, k, branch, t);
+                (c.sub(o).add(offset), d)
+            }
             Curve::RationalBezier { p, w } => crate::rational::eval(p.map(|q| q.sub(o)), w, t),
             _ => { let (q, d) = self.eval(t); (q.sub(o), d) }
         }
@@ -300,7 +357,7 @@ impl Curve {
             Curve::Line { a, .. } => *a,
             Curve::Arc { c, n, x, r, t0, .. } => Self::point_at_angle(*c, *n, *x, *r, *t0),
             Curve::Conic { c, u, v, t0, .. } => Self::conic_point(*c, *u, *v, *t0),
-            Curve::CylinderPair { t0, .. } | Curve::RadialPair { t0, .. } => self.eval(*t0).0,
+            Curve::CylinderPair { t0, .. } | Curve::RadialPair { t0, .. } | Curve::ConePair { t0, .. } => self.eval(*t0).0,
             Curve::Bezier { p } | Curve::RationalBezier { p, .. } => p[0],
         }
     }
@@ -309,7 +366,7 @@ impl Curve {
             Curve::Line { b, .. } => *b,
             Curve::Arc { c, n, x, r, t1, .. } => Self::point_at_angle(*c, *n, *x, *r, *t1),
             Curve::Conic { c, u, v, t1, .. } => Self::conic_point(*c, *u, *v, *t1),
-            Curve::CylinderPair { t1, .. } | Curve::RadialPair { t1, .. } => self.eval(*t1).0,
+            Curve::CylinderPair { t1, .. } | Curve::RadialPair { t1, .. } | Curve::ConePair { t1, .. } => self.eval(*t1).0,
             Curve::Bezier { p } | Curve::RationalBezier { p, .. } => p[3],
         }
     }
@@ -323,6 +380,9 @@ impl Curve {
             },
             Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => Curve::RadialPair {
                 c: c.add(d), a: *a, x: *x, rho: *rho, p: p.add(d), b: *b, r: *r, branch: *branch, t0: *t0, t1: *t1, s: *s,
+            },
+            Curve::ConePair { c, a, x, rho, p, b, r, k, branch, t0, t1 } => Curve::ConePair {
+                c: c.add(d), a: *a, x: *x, rho: *rho, p: p.add(d), b: *b, r: *r, k: *k, branch: *branch, t0: *t0, t1: *t1,
             },
             Curve::Bezier { p } => Curve::Bezier { p: p.map(|q| q.add(d)) },
             Curve::RationalBezier { p, w } => Curve::RationalBezier { p: p.map(|q| q.add(d)), w: *w },
@@ -345,6 +405,10 @@ impl Curve {
             // As the pair: the height and the radius at each angle stay; only the direction of travel turns.
             Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => Curve::RadialPair {
                 c: *c, a: a.scale(-1.0), x: *x, rho: *rho, p: *p, b: *b, r: *r, branch: -branch, t0: -t1, t1: -t0, s: *s,
+            },
+            // As the cylinder pair: t -> -t flips y, so a flips, and h with it (h a stays): the branch flips.
+            Curve::ConePair { c, a, x, rho, p, b, r, k, branch, t0, t1 } => Curve::ConePair {
+                c: *c, a: a.scale(-1.0), x: *x, rho: *rho, p: *p, b: *b, r: *r, k: *k, branch: -branch, t0: -t1, t1: -t0,
             },
             Curve::Bezier { p } => Curve::Bezier { p: [p[3], p[2], p[1], p[0]] },
             Curve::RationalBezier { p, w } => Curve::RationalBezier { p: [p[3], p[2], p[1], p[0]], w: [w[3], w[2], w[1], w[0]] },

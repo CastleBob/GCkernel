@@ -190,6 +190,9 @@ impl Rigid {
             Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s } => Curve::RadialPair {
                 c: self.position(c), a: self.vector(a), x: self.vector(x), rho, p: self.position(p), b: self.vector(b), r, branch, t0, t1, s,
             },
+            Curve::ConePair { c, a, x, rho, p, b, r, k, branch, t0, t1 } => Curve::ConePair {
+                c: self.position(c), a: self.vector(a), x: self.vector(x), rho, p: self.position(p), b: self.vector(b), r, k, branch, t0, t1,
+            },
             Curve::Bezier { p } => Curve::Bezier { p: p.map(|q| self.position(q)) },
             Curve::RationalBezier { p, w } => Curve::RationalBezier { p: p.map(|q| self.position(q)), w },
         }

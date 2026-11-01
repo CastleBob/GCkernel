@@ -41,7 +41,7 @@ fn domain(c: &Curve) -> (f64, f64) {
 }
 fn conic(c: &Curve) -> Option<(Vec3, Vec3, Vec3, f64, f64)> {
     match *c {
-        Curve::Line { .. } | Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => None,
+        Curve::Line { .. } | Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => None,
         Curve::Arc { c, n, x, r, t0, t1 } => Some((c, x.scale(r), n.cross(x).scale(r), t0, t1)),
         Curve::Conic { c, u, v, t0, t1 } => Some((c, u, v, t0, t1)),
     }
@@ -1121,6 +1121,7 @@ fn slice(curve: &Curve, t0: f64, t1: f64) -> Curve {
             t1,
         },
         Curve::RadialPair { c, a, x, rho, p, b, r, branch, s, .. } => Curve::RadialPair { c, a, x, rho, p, b, r, branch, t0, t1, s },
+        Curve::ConePair { c, a, x, rho, p, b, r, k, branch, .. } => Curve::ConePair { c, a, x, rho, p, b, r, k, branch, t0, t1 },
     }
 }
 fn same_curve(a: &Curve, b: &Curve, reverse: bool, tol: f64) -> bool {
@@ -1341,7 +1342,7 @@ fn transform(body: &Body, map: impl Fn(Vec3) -> Vec3) -> Body {
                 *u = map(*u);
                 *v = map(*v);
             }
-            Curve::CylinderPair { c, a, x, p, b, .. } | Curve::RadialPair { c, a, x, p, b, .. } => {
+            Curve::CylinderPair { c, a, x, p, b, .. } | Curve::RadialPair { c, a, x, p, b, .. } | Curve::ConePair { c, a, x, p, b, .. } => {
                 *c = map(*c);
                 *a = map(*a);
                 *x = map(*x);
@@ -1790,7 +1791,7 @@ mod tests {
                     *rho *= scale;
                     *r *= scale;
                 }
-                Curve::Bezier { .. } | Curve::RationalBezier { .. } | Curve::RadialPair { .. } => unreachable!("no Bezier or radial-pair edges in these test bodies"),
+                Curve::Bezier { .. } | Curve::RationalBezier { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } => unreachable!("no Bezier or radial-pair edges in these test bodies"),
             }
         }
         for f in &mut out.faces {

@@ -440,7 +440,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     // vertices. A semicircle can leave the box between its endpoints.
     for curve in &hole {
         let (minimum, maximum) = match curve {
-            Curve::Conic { .. } | Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
+            Curve::Conic { .. } | Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::Bezier { .. } | Curve::RationalBezier { .. } => {
                 return Err(unsupported("capsule cutters require circular end arcs"))
             }
             Curve::Line { a, b } => {

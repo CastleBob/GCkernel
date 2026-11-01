@@ -238,6 +238,24 @@ pub(crate) fn off_surface(curve: &Curve, surface: &Surface, tolerance: f64) -> O
             if same_conoid(c, a, rho, p, b, r, branch, surface, tolerance) { return None; }
             return if same(c, a, rho) || same(p, b, r) { None } else { Some(f64::INFINITY) };
         }
+        // On its own cylinder (c, a, rho) and on its own cone: the same axis line and the same radius everywhere along
+        // it (k b the same vector, the radius agreeing at p); nothing else.
+        Curve::ConePair { c, a, rho, p, b, r, k, .. } => {
+            let perp = |w: Vec3, d: Vec3| w.sub(d.scale(w.dot(d)));
+            let on = match *surface {
+                Surface::Cylinder { p: fp, a: fa, r: fr, .. } => {
+                    fa.cross(a).length() <= 1e-9 && perp(c.sub(fp), fa).length() <= tolerance && (fr - rho).abs() <= tolerance
+                }
+                Surface::Cone { p: fp, a: fa, r: fr, k: fk, .. } => {
+                    let turn = fa.dot(b).signum();
+                    fa.cross(b).length() <= 1e-9 && perp(p.sub(fp), fa).length() <= tolerance
+                        && (fk * turn - k).abs() <= 1e-12 * (1.0 + k.abs())
+                        && (fr + fk * p.sub(fp).dot(fa) - r).abs() <= tolerance
+                }
+                _ => false,
+            };
+            return if on { None } else { Some(f64::INFINITY) };
+        }
         // On the cylinder of radius s about the pair's own axis, and on the conoid of the same pair; nothing else.
         Curve::RadialPair { c, a, rho, p, b, r, branch, s, .. } => {
             let on_cylinder = match *surface {
