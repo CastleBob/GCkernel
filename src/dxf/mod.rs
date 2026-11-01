@@ -14,10 +14,12 @@ pub mod fit;
 pub mod pdf;
 mod read;
 pub mod svg;
+mod text;
 pub mod wire;
 mod write;
 
 pub use read::{read, read_header};
+pub use text::{mtext_plain, text_plain};
 pub use write::write_r12;
 
 /// A point or vector in the drawing's XY plane.
@@ -51,6 +53,64 @@ pub struct Curve {
     pub group: usize,
 }
 
+/// Where a text came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextKind {
+    /// TEXT: one line.
+    Text,
+    /// MTEXT: paragraphs, formatting codes stripped.
+    MText,
+    /// A visible ATTRIB of a block insert (its value).
+    Attrib,
+}
+
+/// A text as seen from above (world XY), blocks and object coordinates resolved, in drawing units.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Text {
+    pub kind: TextKind,
+    /// Plain text; lines (MTEXT paragraphs and line breaks) separated by a line feed. %%d, %%p and %%c are °, ± and Ø.
+    pub text: String,
+    /// The point the alignment places: the left end of the baseline for left/baseline text, the alignment point
+    /// otherwise (TEXT 11 when 72/73 are not both 0), the attachment point of an MTEXT; the first point of aligned
+    /// and fit text.
+    pub at: P2,
+    /// The second point of aligned (3) and fit (5) text; `at` otherwise.
+    pub end: P2,
+    /// Cap height measured square to the baseline.
+    pub height: f64,
+    /// Baseline direction, radians counter-clockwise from +X.
+    pub rotation: f64,
+    /// Relative character width (1 normal).
+    pub width: f64,
+    /// 0 left, 1 centre, 2 right, 3 aligned, 5 fit (TEXT 72; "middle" (4) is given as centre with `valign` 2).
+    pub halign: i32,
+    /// 0 baseline, 1 bottom, 2 middle, 3 top (TEXT 73, ATTRIB 74; MTEXT attachment rows are top, middle, bottom).
+    pub valign: i32,
+    /// MTEXT reference rectangle width (where lines wrap) in drawing units; 0 for no wrapping.
+    pub box_width: f64,
+    /// Text style name (code 7), "Standard" when the entity names none.
+    pub style: String,
+    /// The style's font: the TrueType family when the style gives one, else its font file ("txt", "romans.shx",
+    /// "arial.ttf"); empty when the style is not in the file.
+    pub font: String,
+    /// The text was mirrored (a mirroring insert, a backward or upside-down TEXT, an object coordinate system seen
+    /// from below): it is given readable instead, over the same place (baseline turned, left and right swapped).
+    pub mirrored: bool,
+    pub layer: usize,
+    pub color: i32,
+    pub group: usize,
+}
+
+/// A text style table entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextStyle {
+    pub name: String,
+    /// Primary font file (code 3).
+    pub file: String,
+    /// TrueType family name from the style's extended data (ACAD 1000), when present.
+    pub family: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
     pub name: String,
@@ -70,10 +130,18 @@ pub struct Drawing {
     pub measurement: Option<i32>,
     pub layers: Vec<Layer>,
     pub curves: Vec<Curve>,
-    /// Entities that are not curves (TEXT, DIMENSION, HATCH, ...) by DXF type name, with their counts.
+    /// Model-space texts: TEXT, MTEXT and visible insert ATTRIBs (DXF and DWG; not SVG or PDF).
+    pub texts: Vec<Text>,
+    /// The text style table.
+    pub styles: Vec<TextStyle>,
+    /// Entities that are not curves (TEXT, DIMENSION, HATCH, ...) by DXF type name, with their counts. TEXT and
+    /// MTEXT are counted here as well as given in `texts`.
     pub skipped: Vec<(String, usize)>,
     /// Things the reader noticed and handled, in words for the user (a missing block, curves off the XY plane, ...).
     pub warnings: Vec<String>,
+    /// The same about texts (mirrored, on edge, not decodable, ...), kept apart so that what a curves-only reader
+    /// is told does not change.
+    pub text_warnings: Vec<String>,
 }
 
 impl Drawing {
@@ -91,6 +159,19 @@ impl Drawing {
         match self.skipped.iter_mut().find(|(k, _)| k == kind) {
             Some((_, n)) => *n += 1,
             None => self.skipped.push((kind.to_string(), 1)),
+        }
+    }
+
+    /// The font a text of style `name` uses (family before file), empty when the style is not in the table.
+    pub(crate) fn style_font(&self, name: &str) -> String {
+        self.styles.iter().find(|s| s.name.eq_ignore_ascii_case(name.trim()))
+            .map(|s| if s.family.trim().is_empty() { s.file.trim().to_string() } else { s.family.trim().to_string() })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn warn_text(&mut self, message: String) {
+        if !self.text_warnings.contains(&message) {
+            self.text_warnings.push(message);
         }
     }
 

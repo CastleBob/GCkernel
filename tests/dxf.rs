@@ -4,7 +4,7 @@
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use gc_kernel::dxf::{fit, read, write_r12, Curve, Drawing, Geometry, Layer, P2};
+use gc_kernel::dxf::{fit, mtext_plain, read, text_plain, write_r12, Curve, Drawing, Geometry, Layer, Text, TextKind, P2};
 use gc_kernel::protocol::{encode_request, handle, parse_request, OP_DXF_READ, OP_DXF_WRITE};
 
 const EPS: f64 = 1e-9;
@@ -578,13 +578,18 @@ fn header_only_read_skips_the_drawing() {
 fn damaged_files_never_panic() {
     let pairs = [
         (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "B"), (10, "0"), (20, "0"), (30, "0"),
-        (0, "ARC"), (10, "1"), (20, "0"), (30, "0"), (40, "1"), (50, "0"), (51, "90"), (0, "ENDBLK"), (0, "ENDSEC"),
+        (0, "ARC"), (10, "1"), (20, "0"), (30, "0"), (40, "1"), (50, "0"), (51, "90"),
+        (0, "TEXT"), (10, "1"), (20, "0"), (40, "0.5"), (1, "in block"), (0, "ENDBLK"), (0, "ENDSEC"),
         (0, "SECTION"), (2, "ENTITIES"),
         (0, "LWPOLYLINE"), (90, "3"), (70, "1"), (10, "0"), (20, "0"), (42, "0.5"), (10, "2"), (20, "0"), (10, "2"), (20, "2"),
         (0, "SPLINE"), (71, "3"), (72, "8"), (73, "4"), (40, "0"), (40, "0"), (40, "0"), (40, "0"), (40, "1"), (40, "1"), (40, "1"), (40, "1"),
         (10, "0"), (20, "0"), (30, "0"), (10, "1"), (20, "2"), (30, "0"), (10, "3"), (20, "-2"), (30, "0"), (10, "4"), (20, "0"), (30, "0"),
         (0, "ELLIPSE"), (10, "0"), (20, "0"), (30, "0"), (11, "4"), (21, "0"), (31, "0"), (40, "0.5"),
         (0, "INSERT"), (2, "B"), (10, "0"), (20, "0"), (30, "0"), (41, "2"), (70, "2"), (71, "2"), (44, "3"), (45, "3"),
+        (0, "TEXT"), (10, "1"), (20, "1"), (11, "2"), (21, "2"), (40, "1"), (50, "30"), (72, "1"), (1, "T %%d"),
+        (0, "MTEXT"), (10, "0"), (20, "0"), (40, "1"), (41, "5"), (71, "5"), (3, r"{\fA;x}\P"), (1, r"\S1/2;"),
+        (0, "INSERT"), (2, "B"), (66, "1"), (10, "0"), (20, "0"), (30, "0"), (41, "-1"),
+        (0, "ATTRIB"), (10, "0"), (20, "0"), (40, "1"), (1, "V"), (2, "T"), (70, "0"), (0, "SEQEND"),
         (0, "ENDSEC"), (0, "EOF"),
     ];
     let mut seed = 0x2545F4914F6CDD1Du64;
@@ -645,4 +650,221 @@ fn an_empty_model_space_reads_the_layout() {
     ])).unwrap();
     assert_eq!(*geometry(&d)[0], Geometry::Circle { c: [1.0, 1.0], r: 2.0 });
     assert!(d.warnings.iter().any(|w| w.contains("model space is empty")), "{:?}", d.warnings);
+}
+
+fn near_text(t: &Text, at: P2, height: f64, rotation: f64) -> bool {
+    let d = (t.rotation - rotation).rem_euclid(TAU);
+    near_p(t.at, at) && near(t.height, height) && d.min(TAU - d) <= 1e-9
+}
+
+/// TEXT (left baseline, centred, aligned, middle), MTEXT with its formatting stripped and an insert's attributes
+/// come through with their strings, places, heights, turns, alignment and fonts; texts that draw nothing or stand on
+/// edge are left out, the second with a warning.
+#[test]
+fn texts_read_with_their_place_and_plain_strings() {
+    let d = read(&dxf(&[
+        (0, "SECTION"), (2, "TABLES"), (0, "TABLE"), (2, "STYLE"), (70, "2"),
+        (0, "STYLE"), (2, "Standard"), (70, "0"), (3, "txt"),
+        (0, "STYLE"), (2, "Label"), (70, "0"), (3, "arial.ttf"), (1001, "ACAD"), (1000, "Arial"), (1071, "0"),
+        (0, "ENDTAB"), (0, "ENDSEC"),
+        (0, "SECTION"), (2, "BLOCKS"),
+        (0, "BLOCK"), (2, "TAG"), (70, "2"), (10, "0"), (20, "0"), (30, "0"),
+        (0, "ATTDEF"), (10, "0"), (20, "0"), (40, "1"), (1, ""), (2, "PARTNO"), (3, "Part number"), (70, "0"),
+        (0, "ENDBLK"), (0, "ENDSEC"),
+        (0, "SECTION"), (2, "ENTITIES"),
+        (0, "TEXT"), (8, "NOTES"), (10, "1"), (20, "2"), (30, "0"), (40, "2.5"), (50, "30"), (41, "0.8"), (7, "Label"),
+        (1, "  Part %%c10 %%p0.1 45%%d"),
+        (0, "TEXT"), (10, "0"), (20, "0"), (11, "5"), (21, "5"), (40, "1"), (72, "1"), (73, "2"), (1, "MID"),
+        (0, "TEXT"), (10, "0"), (20, "10"), (11, "0"), (21, "20"), (40, "1"), (50, "0"), (72, "3"), (1, "ALIGNED"),
+        (0, "TEXT"), (10, "0"), (20, "0"), (11, "-3"), (21, "4"), (40, "1"), (72, "4"), (1, "MIDDLE"),
+        (0, "MTEXT"), (8, "NOTES"), (10, "3"), (20, "4"), (30, "0"), (40, "1.5"), (41, "20"), (71, "5"), (72, "1"),
+        (11, "0"), (21, "1"), (31, "0"),
+        (3, "{\\fArial|b0|i0|c0|p34;Hello}\\PSecond\\~line "),
+        (1, "\\H2.5;\\LWorld\\l %%d \\S1/2; \\{x\\}\\P"),
+        (0, "INSERT"), (8, "TAGS"), (66, "1"), (2, "TAG"), (10, "7"), (20, "8"), (30, "0"),
+        (0, "ATTRIB"), (8, "0"), (10, "7"), (20, "8"), (11, "9"), (21, "8"), (40, "0.5"), (1, "A-101"), (2, "PARTNO"),
+        (70, "0"), (72, "2"), (74, "1"),
+        (0, "ATTRIB"), (8, "0"), (10, "7"), (20, "7"), (40, "0.5"), (1, "hidden"), (2, "NOTE"), (70, "1"),
+        (0, "SEQEND"),
+        (0, "TEXT"), (10, "0"), (20, "0"), (40, "1"), (210, "1"), (220, "0"), (230, "0"), (1, "edge on"),
+        (0, "TEXT"), (10, "0"), (20, "0"), (40, "1"), (1, ""),
+        (0, "LINE"), (10, "0"), (20, "0"), (11, "1"), (21, "0"),
+        (0, "ENDSEC"), (0, "EOF"),
+    ])).unwrap();
+    let t = &d.texts;
+    assert_eq!(t.len(), 6, "{t:?}");
+    let strings: Vec<&str> = t.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(strings, ["  Part \u{d8}10 \u{b1}0.1 45\u{b0}", "MID", "ALIGNED", "MIDDLE",
+        "Hello\nSecond line World \u{b0} 1/2 {x}", "A-101"]);
+    assert_eq!(t.iter().map(|t| t.kind).collect::<Vec<_>>(),
+        [TextKind::Text, TextKind::Text, TextKind::Text, TextKind::Text, TextKind::MText, TextKind::Attrib]);
+
+    assert!(near_text(&t[0], [1.0, 2.0], 2.5, PI / 6.0) && near(t[0].width, 0.8), "{:?}", t[0]);
+    assert_eq!((t[0].halign, t[0].valign, t[0].style.as_str(), t[0].font.as_str()), (0, 0, "Label", "Arial"));
+    assert_eq!(d.layers[t[0].layer].name, "NOTES");
+    assert!(near_text(&t[1], [5.0, 5.0], 1.0, 0.0) && (t[1].halign, t[1].valign) == (1, 2), "the alignment point: {:?}", t[1]);
+    assert_eq!((t[1].style.as_str(), t[1].font.as_str()), ("Standard", "txt"), "no 7: the Standard style");
+    assert!(near_text(&t[2], [0.0, 10.0], 1.0, FRAC_PI_2) && near_p(t[2].end, [0.0, 20.0]) && t[2].halign == 3,
+        "aligned text runs from its first point to its second: {:?}", t[2]);
+    assert!(near_text(&t[3], [-3.0, 4.0], 1.0, 0.0) && (t[3].halign, t[3].valign) == (1, 2), "middle: {:?}", t[3]);
+    assert!(near_text(&t[4], [3.0, 4.0], 1.5, FRAC_PI_2) && near(t[4].box_width, 20.0), "{:?}", t[4]);
+    assert_eq!((t[4].halign, t[4].valign), (1, 2), "attachment 5 is middle centre");
+    assert!(near_text(&t[5], [9.0, 8.0], 0.5, 0.0) && (t[5].halign, t[5].valign) == (2, 1), "{:?}", t[5]);
+    assert_eq!(d.layers[t[5].layer].name, "TAGS", "an attribute on layer 0 takes the layer of its insert");
+    assert!(t.iter().all(|t| !t.mirrored));
+
+    assert!(d.text_warnings.iter().any(|w| w.contains("1 texts stand on edge")), "{:?}", d.text_warnings);
+    assert_eq!(d.skipped, vec![("TEXT".to_string(), 6), ("MTEXT".to_string(), 1), ("ATTDEF".to_string(), 1)],
+        "TEXT and MTEXT are still not curves");
+    assert_eq!(d.styles.len(), 2);
+}
+
+/// Texts inside block inserts are moved, turned and scaled with the insert (height with the Y scale, width factor
+/// with X over Y); mirroring inserts, object coordinates seen from below and backward text give readable text over
+/// the same place.
+#[test]
+fn texts_in_inserts_turn_scale_and_mirror_readably() {
+    let d = read(&dxf(&[
+        (0, "SECTION"), (2, "BLOCKS"),
+        (0, "BLOCK"), (2, "LBL"), (70, "0"), (10, "1"), (20, "0"), (30, "0"),
+        (0, "TEXT"), (8, "0"), (62, "0"), (10, "1"), (20, "0"), (30, "0"), (40, "1"), (1, "R"),
+        (0, "MTEXT"), (8, "0"), (10, "1"), (20, "0"), (30, "0"), (40, "1"), (41, "4"), (71, "1"), (1, "M"),
+        (0, "ENDBLK"), (0, "ENDSEC"),
+        (0, "SECTION"), (2, "ENTITIES"),
+        (0, "INSERT"), (8, "TAGS"), (62, "3"), (2, "LBL"), (10, "10"), (20, "10"), (30, "0"), (50, "90"), (41, "2"), (42, "2"),
+        (0, "INSERT"), (2, "LBL"), (10, "0"), (20, "0"), (30, "0"), (41, "-1"),
+        (0, "INSERT"), (2, "LBL"), (10, "0"), (20, "50"), (30, "0"), (41, "2"), (42, "3"),
+        (0, "TEXT"), (10, "5"), (20, "0"), (30, "0"), (40, "1"), (210, "0"), (220, "0"), (230, "-1"), (1, "below"),
+        (0, "TEXT"), (10, "2"), (20, "3"), (40, "1"), (71, "2"), (1, "backward"),
+        (0, "ENDSEC"), (0, "EOF"),
+    ])).unwrap();
+    let t = &d.texts;
+    assert_eq!(t.len(), 8, "{t:?}");
+    // Turned 90 and doubled: the base point of the block (1, 0) lands on (10, 10).
+    assert!(near_text(&t[0], [10.0, 10.0], 2.0, FRAC_PI_2) && near(t[0].width, 1.0) && !t[0].mirrored, "{:?}", t[0]);
+    assert_eq!((d.layers[t[0].layer].name.as_str(), t[0].color), ("TAGS", 3), "layer 0 and BYBLOCK take the insert's");
+    assert!(near_text(&t[1], [10.0, 10.0], 2.0, FRAC_PI_2) && near(t[1].box_width, 8.0) && (t[1].halign, t[1].valign) == (0, 3));
+    assert_eq!((t[0].group, t[1].group), (0, 0));
+    // Mirrored in X: readable, ending where the mirrored text began (right aligned); the MTEXT top left is now top right.
+    assert!(near_text(&t[2], [0.0, 0.0], 1.0, 0.0) && t[2].mirrored && t[2].halign == 2, "{:?}", t[2]);
+    assert!(near_text(&t[3], [0.0, 0.0], 1.0, 0.0) && t[3].mirrored && (t[3].halign, t[3].valign) == (2, 3), "{:?}", t[3]);
+    // Scaled 2 by 3: 3 high, two thirds as wide; the MTEXT box doubles.
+    assert!(near_text(&t[4], [0.0, 50.0], 3.0, 0.0) && near(t[4].width, 2.0 / 3.0), "{:?}", t[4]);
+    assert!(near_text(&t[5], [0.0, 50.0], 3.0, 0.0) && near(t[5].box_width, 8.0), "{:?}", t[5]);
+    // Extrusion (0, 0, -1): object X is world -X, so (5, 0) is at (-5, 0) and the text is seen mirrored.
+    assert!(near_text(&t[6], [-5.0, 0.0], 1.0, 0.0) && t[6].mirrored && t[6].halign == 2, "{:?}", t[6]);
+    assert!(near_text(&t[7], [2.0, 3.0], 1.0, 0.0) && t[7].mirrored && t[7].halign == 2, "backward: {:?}", t[7]);
+    assert!(d.text_warnings.iter().any(|w| w.contains("4 texts are mirrored")), "{:?}", d.text_warnings);
+}
+
+#[test]
+fn text_codes_become_plain_text() {
+    assert_eq!(text_plain("%%d%%D %%p %%c %%% %%u50%%u %%o %%065 ^ x^2 a^Jb"), "\u{b0}\u{b0} \u{b1} \u{d8} % 50  A ^x^2 a\nb");
+    assert_eq!(text_plain("100%"), "100%");
+    assert_eq!(mtext_plain("\\A1;{\\C1;\\Q15;\\T1.1;\\W0.8;red} \\Ooverline\\o \\Kstrike\\k \\S+0.1^-0.2; \\S3#4;"),
+        "red overline strike +0.1/-0.2 3/4");
+    assert_eq!(mtext_plain("\\pxi-3,l3,t3;1.\\Pone\\Ntwo\\\\three"), "1.\none\ntwo\\three");
+    assert_eq!(mtext_plain("unterminated \\fArial"), "unterminated ");
+    assert_eq!(mtext_plain("trailing \\"), "trailing \\");
+}
+
+/// Op 14 mode 3: the mode 1 reply with TEXT and MTEXT no longer listed as skipped, then the texts. Mode 1 keeps
+/// skipping them and ends at its warnings.
+#[test]
+fn the_read_op_gives_texts_in_mode_3_only() {
+    let dir = std::env::temp_dir().join(format!("gckernel-dxf-text-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("label.dxf");
+    std::fs::write(&path, entities(&[
+        (0, "LINE"), (10, "0"), (20, "0"), (11, "4"), (21, "0"),
+        (0, "TEXT"), (8, "MARK"), (10, "1"), (20, "-2"), (40, "0.5"), (50, "90"), (1, "P-1 %%c2"),
+        (0, "MTEXT"), (10, "2"), (20, "3"), (40, "0.25"), (71, "7"), (1, "two\\Plines"),
+        (0, "HATCH"),
+    ])).unwrap();
+    let request = |mode: f64| {
+        let mut req = vec![1.0, mode, 1e-4];
+        req.extend(text_values(path.to_str().unwrap()));
+        handle(&parse_request(&encode_request(OP_DXF_READ, 1e-6, &req)).unwrap()).unwrap()
+    };
+    let text_at = |r: &[f64], at: &mut usize| -> String {
+        let n = r[*at] as usize;
+        let s: Vec<u8> = r[*at + 1..*at + 1 + n].iter().map(|b| *b as u8).collect();
+        *at += 1 + n;
+        String::from_utf8(s).unwrap()
+    };
+    // Where the skipped list starts: after the header, layers and curves (lines only here).
+    let skipped_at = |r: &[f64]| {
+        let mut at = 4 + r[3] as usize;
+        let layers = r[at] as usize;
+        at += 1;
+        for _ in 0..layers {
+            at += 2;
+            at += 1 + r[at] as usize;
+        }
+        let curves = r[at] as usize;
+        at + 1 + curves * 8
+    };
+    let one = request(1.0);
+    let three = request(3.0);
+    let (s1, s3) = (skipped_at(&one), skipped_at(&three));
+    assert_eq!(&one[..s1], &three[..s3], "header, layers and curves are the same");
+    let mut at = s1;
+    assert_eq!(one[at], 3.0, "mode 1 skips TEXT, MTEXT and HATCH");
+    at += 1;
+    let names: Vec<String> = (0..3).map(|_| { let n = text_at(&one, &mut at); at += 1; n }).collect();
+    assert_eq!(names, ["TEXT", "MTEXT", "HATCH"]);
+    assert_eq!(&one[at..], &[0.0], "no warnings, and nothing after them");
+
+    let mut at = s3;
+    assert_eq!(three[at], 1.0, "mode 3 skips only the HATCH");
+    at += 1;
+    assert_eq!(text_at(&three, &mut at), "HATCH");
+    at += 1;
+    assert_eq!(three[at], 0.0, "no warnings");
+    at += 1;
+    assert_eq!(three[at], 2.0, "two texts");
+    at += 1;
+    let fields = &three[at..at + 15];
+    let mark = fields[1] as usize;
+    assert_eq!(fields[0], 0.0, "a TEXT");
+    assert_eq!(&fields[2..], &[256.0, 1.0, 1.0, -2.0, 1.0, -2.0, 0.5, FRAC_PI_2, 1.0, 0.0, 0.0, 0.0, 0.0]);
+    at += 15;
+    assert_eq!(text_at(&three, &mut at), "P-1 \u{d8}2");
+    assert_eq!(text_at(&three, &mut at), "Standard");
+    assert_eq!(text_at(&three, &mut at), "", "no style table: no font");
+    let fields = &three[at..at + 15];
+    assert_eq!(fields[0], 1.0, "an MTEXT");
+    assert_eq!(&fields[3..], &[2.0, 2.0, 3.0, 2.0, 3.0, 0.25, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+        "group 2, attachment 7 is bottom left");
+    at += 15;
+    assert_eq!(text_at(&three, &mut at), "two\nlines");
+    text_at(&three, &mut at);
+    text_at(&three, &mut at);
+    assert_eq!(at, three.len());
+    // The layer index points into the layer table.
+    let mut at = 5 + three[3] as usize;
+    for _ in 0..mark {
+        at += 2;
+        at += 1 + three[at] as usize;
+    }
+    at += 2;
+    assert_eq!(text_at(&three, &mut at), "MARK");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A text with values that are not numbers is left out with a text warning; the curves still read, and the
+/// curves-only warnings do not mention it.
+#[test]
+fn an_unreadable_text_does_not_stop_the_drawing() {
+    let d = read(&entities(&[
+        (0, "LINE"), (10, "0"), (20, "0"), (11, "1"), (21, "0"),
+        (0, "TEXT"), (10, "abc"), (20, "0"), (40, "1"), (1, "t"),
+        (0, "INSERT"), (2, "NONE"), (66, "1"), (10, "0"), (20, "0"),
+        (0, "ATTRIB"), (10, "q"), (40, "1"), (1, "a"), (2, "T"), (0, "SEQEND"),
+        (0, "TEXT"), (10, "0"), (20, "0"), (1, "no height"),
+    ])).unwrap();
+    assert_eq!((d.curves.len(), d.texts.len()), (1, 0));
+    assert!(d.text_warnings.iter().any(|w| w.starts_with("2 texts could not be read")), "{:?}", d.text_warnings);
+    assert!(d.text_warnings.iter().any(|w| w.contains("1 texts have no height")), "{:?}", d.text_warnings);
+    assert!(d.warnings.iter().all(|w| !w.contains("text")), "{:?}", d.warnings);
 }

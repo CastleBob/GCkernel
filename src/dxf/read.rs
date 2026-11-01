@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 
 use super::codes::{pairs, Pair};
-use super::{fit, Curve, Drawing, Geometry, Layer, P2};
+use super::text::{mtext_plain, text_plain};
+use super::{fit, Curve, Drawing, Geometry, Layer, Text, TextKind, TextStyle, P2};
 use crate::KernelError;
 
 type P3 = [f64; 3];
@@ -210,7 +211,26 @@ fn header(body: &[Pair], d: &mut Drawing) {
 }
 
 fn tables(body: &[Pair], d: &mut Drawing) -> Result<(), KernelError> {
-    for record in records(body).iter().filter(|r| r.kind == "LAYER") {
+    let all = records(body);
+    for record in all.iter().filter(|r| r.kind == "STYLE") {
+        let name = text(record, 2).unwrap_or_default();
+        // Flag 1: a shape file (symbols), not a text font.
+        if name.is_empty() || flag(record, 70) & 1 != 0 {
+            continue;
+        }
+        // The TrueType family is the first 1000 string of the ACAD extended data.
+        let mut family = String::new();
+        let mut acad = false;
+        for p in &record.pairs {
+            match p.code {
+                1001 => acad = p.text().eq_ignore_ascii_case("ACAD"),
+                1000 if acad && family.is_empty() => family = p.text(),
+                _ => {}
+            }
+        }
+        d.styles.push(TextStyle { name, file: text(record, 3).unwrap_or_default(), family });
+    }
+    for record in all.iter().filter(|r| r.kind == "LAYER") {
         let name = text(record, 2).unwrap_or_default();
         if name.is_empty() {
             continue;
@@ -338,9 +358,23 @@ struct Notes {
     off_plane: usize,
     edge_on: usize,
     zero: usize,
+    text_edge_on: usize,
+    text_no_height: usize,
+    text_mirrored: usize,
+    text_skewed: usize,
+    text_vertical: usize,
+    text_bad: usize,
+    text_bad_first: String,
 }
 
 impl Notes {
+    fn bad_text(&mut self, reason: String) {
+        self.text_bad += 1;
+        if self.text_bad_first.is_empty() {
+            self.text_bad_first = reason;
+        }
+    }
+
     fn finish(&self, d: &mut Drawing) {
         if self.paper > 0 {
             d.warn(format!("{} entities on a paper-space layout were left out (only model space is read)", self.paper));
@@ -353,6 +387,26 @@ impl Notes {
         }
         if self.zero > 0 {
             d.warn(format!("{} zero-length curves were left out", self.zero));
+        }
+        if self.text_bad > 0 {
+            d.warn_text(format!("{} texts could not be read and were left out (the first: {})", self.text_bad,
+                self.text_bad_first));
+        }
+        if self.text_edge_on > 0 {
+            d.warn_text(format!("{} texts stand on edge when seen from above and were left out", self.text_edge_on));
+        }
+        if self.text_no_height > 0 {
+            d.warn_text(format!("{} texts have no height and were left out", self.text_no_height));
+        }
+        if self.text_mirrored > 0 {
+            d.warn_text(format!("{} texts are mirrored in the drawing; they are read readable, over the same place",
+                self.text_mirrored));
+        }
+        if self.text_skewed > 0 {
+            d.warn_text(format!("{} texts are slanted by a non-uniformly scaled insert; they are read upright", self.text_skewed));
+        }
+        if self.text_vertical > 0 {
+            d.warn_text(format!("{} MTEXTs are written top to bottom; they are read left to right", self.text_vertical));
         }
     }
 }
@@ -371,7 +425,25 @@ fn too_many(d: &Drawing) -> Result<(), KernelError> {
     if d.curves.len() > MAX_CURVES {
         return Err(KernelError::Unsupported(format!("the drawing expands to more than {MAX_CURVES} curves")));
     }
+    if d.texts.len() > MAX_CURVES {
+        return Err(KernelError::Unsupported(format!("the drawing expands to more than {MAX_CURVES} texts")));
+    }
     Ok(())
+}
+
+/// An entity's layer and colour: layer 0 and colour 0 (BYBLOCK) take the enclosing insert's.
+fn resolve(d: &mut Drawing, e: &Entity, parent: Option<usize>, parent_color: i32) -> Result<(usize, i32), KernelError> {
+    let layer_name = text(e, 8).unwrap_or_else(|| "0".into());
+    let layer = match parent {
+        Some(p) if layer_name.trim() == "0" || layer_name.trim().is_empty() => p,
+        _ => d.layer_index(&layer_name),
+    };
+    let color = match int(e, 62)?.unwrap_or(256) as i32 {
+        0 => parent_color,
+        c if c < 0 => c.abs(),
+        c => c,
+    };
+    Ok((layer, color))
 }
 
 impl Explode<'_> {
@@ -382,18 +454,17 @@ impl Explode<'_> {
         if flag(e, 60) == 1 {
             return Ok(());
         }
-        let layer_name = text(e, 8).unwrap_or_else(|| "0".into());
-        let layer = match parent {
-            Some(p) if layer_name.trim() == "0" || layer_name.trim().is_empty() => p,
-            _ => d.layer_index(&layer_name),
-        };
-        let color = match int(e, 62)?.unwrap_or(256) as i32 {
-            0 => parent_color,
-            c if c < 0 => c.abs(),
-            c => c,
-        };
+        let (layer, color) = resolve(d, e, parent, parent_color)?;
         if e.kind == "INSERT" {
             return self.insert(d, e, m, layer, color, group);
+        }
+        if e.kind == "TEXT" || e.kind == "MTEXT" {
+            // Still counted as not a curve; the text itself goes to `texts`.
+            d.skip(&e.kind);
+            if let Err(err) = self.text(d, e, m, layer, color, group) {
+                self.notes.bad_text(err.to_string());
+            }
+            return Ok(());
         }
         let mut out = Emit { d, layer, color, group, notes: &mut self.notes };
         match e.kind.as_str() {
@@ -478,6 +549,21 @@ impl Explode<'_> {
     fn insert(&mut self, d: &mut Drawing, e: &Entity, m: &Affine, layer: usize, color: i32, group: usize)
         -> Result<(), KernelError>
     {
+        // Attribute values sit in the insert's own coordinates, not the block's.
+        for attrib in &e.children {
+            if attrib.kind != "ATTRIB" {
+                // The DWG reader's attributes it could not give as text, the reason as their kind.
+                self.notes.bad_text(attrib.kind.clone());
+                continue;
+            }
+            if flag(attrib, 60) == 1 || flag(attrib, 70) & 1 != 0 {
+                continue; // invisible
+            }
+            let placed = resolve(d, attrib, Some(layer), color).and_then(|(l, c)| self.text(d, attrib, m, l, c, group));
+            if let Err(err) = placed {
+                self.notes.bad_text(err.to_string());
+            }
+        }
         let name = text(e, 2).unwrap_or_default();
         let key = name.to_ascii_uppercase();
         let Some(block) = self.blocks.get(&key) else {
@@ -521,6 +607,141 @@ impl Explode<'_> {
             }
         }
         self.stack.pop();
+        Ok(())
+    }
+}
+
+impl Explode<'_> {
+    /// A TEXT, MTEXT or ATTRIB under world transform `m`, as seen from above.
+    fn text(&mut self, d: &mut Drawing, e: &Entity, m: &Affine, layer: usize, color: i32, group: usize)
+        -> Result<(), KernelError>
+    {
+        if let Some(reason) = text(e, 999) {
+            // The DWG reader could not decode this text's data.
+            self.notes.bad_text(reason);
+            return Ok(());
+        }
+        let kind = match e.kind.as_str() {
+            "MTEXT" => TextKind::MText,
+            "ATTRIB" => TextKind::Attrib,
+            _ => TextKind::Text,
+        };
+        let value = if kind == TextKind::MText {
+            // Text over 250 characters comes in 3 chunks, the last piece in 1.
+            let mut s: String = e.pairs.iter().filter(|p| p.code == 3).map(|p| p.raw()).collect();
+            s.push_str(&find(e, 1).map(|p| p.raw()).unwrap_or_default());
+            mtext_plain(&s).trim_end().to_string()
+        } else {
+            text_plain(&find(e, 1).map(|p| p.raw()).unwrap_or_default()).trim_end().to_string()
+        };
+        if value.trim().is_empty() {
+            return Ok(()); // draws nothing
+        }
+        let height = real(e, 40)?.unwrap_or(0.0);
+        if !(height > 0.0) {
+            self.notes.text_no_height += 1;
+            return Ok(());
+        }
+        let style = text(e, 7).filter(|s| !s.is_empty()).unwrap_or_else(|| "Standard".into());
+        let p10 = point(e, 10)?.unwrap_or([0.0; 3]);
+        let (at, end, x, up, mut halign, valign, mut width, mut box_width);
+        if kind == TextKind::MText {
+            // MTEXT's point and its 11 direction are world (here: block) coordinates. Without 11, 50 turns the
+            // object coordinate system's X axis; it is read in degrees like every other entity's angle (the DXF
+            // Reference lists radians for this one code), and 11 wins when both are given.
+            let n = unit(extrusion(e)?).unwrap_or([0.0, 0.0, 1.0]);
+            let direction = match point(e, 11)? {
+                Some(v) if norm(v) > 0.0 => v,
+                _ => {
+                    let r = real(e, 50)?.unwrap_or(0.0).to_radians();
+                    Affine::ocs(n).vector([r.cos(), r.sin(), 0.0])
+                }
+            };
+            let direction = unit(direction).unwrap_or([1.0, 0.0, 0.0]);
+            let attachment = flag(e, 71).clamp(1, 9) as i32;
+            halign = (attachment - 1) % 3;
+            valign = [3, 2, 1][((attachment - 1) / 3) as usize];
+            if flag(e, 72) == 3 {
+                self.notes.text_vertical += 1;
+            }
+            at = m.point(p10);
+            end = at;
+            x = m.vector(direction);
+            up = m.vector(cross(n, direction));
+            width = 1.0;
+            box_width = real(e, 41)?.unwrap_or(0.0).max(0.0);
+        } else {
+            let h72 = flag(e, 72).clamp(0, 5) as i32;
+            let v = flag(e, if kind == TextKind::Attrib { 74 } else { 73 }).clamp(0, 3) as i32;
+            let p11 = point(e, 11)?;
+            let mut r = real(e, 50)?.unwrap_or(0.0).to_radians();
+            let (anchor, second) = match (h72, v) {
+                (3 | 5, _) => (p10, p11.unwrap_or(p10)),
+                (0, 0) => (p10, p10),
+                _ => (p11.unwrap_or(p10), p11.unwrap_or(p10)),
+            };
+            if (h72 == 3 || h72 == 5) && (second[0] - anchor[0]).hypot(second[1] - anchor[1]) > 0.0 {
+                // Aligned and fit text run from the first point to the second.
+                r = (second[1] - anchor[1]).atan2(second[0] - anchor[0]);
+            }
+            (halign, valign) = if h72 == 4 { (1, 2) } else { (h72, v) };
+            let generation = flag(e, 71);
+            let (sn, cs) = r.sin_cos();
+            let mut lx = [cs, sn, 0.0];
+            let mut ly = [-sn, cs, 0.0];
+            if generation & 2 != 0 {
+                lx = [-lx[0], -lx[1], 0.0]; // backward
+            }
+            if generation & 4 != 0 {
+                ly = [-ly[0], -ly[1], 0.0]; // upside down
+            }
+            let frame = m.then(&Affine::ocs(extrusion(e)?));
+            at = frame.point(anchor);
+            end = frame.point(second);
+            x = frame.vector(lx);
+            up = frame.vector(ly);
+            width = real(e, 41)?.filter(|w| *w > 0.0).unwrap_or(1.0);
+            box_width = 0.0;
+        }
+        // The frame as seen from above: the baseline direction and the part of "up" square to it.
+        let x2: P2 = [x[0], x[1]];
+        let u2: P2 = [up[0], up[1]];
+        let lx = fit::len(x2);
+        let scale = norm(x).max(norm(up));
+        if scale <= 0.0 || lx <= 1e-9 * scale {
+            self.notes.text_edge_on += 1;
+            return Ok(());
+        }
+        let xh = [x2[0] / lx, x2[1] / lx];
+        let square = fit::cross(xh, u2);
+        if square.abs() <= 1e-9 * scale {
+            self.notes.text_edge_on += 1;
+            return Ok(());
+        }
+        if fit::dot(xh, u2).abs() > 1e-6 * square.abs() {
+            self.notes.text_skewed += 1;
+        }
+        let mirrored = square < 0.0;
+        let mut rotation = xh[1].atan2(xh[0]);
+        let (mut at2, mut end2): (P2, P2) = ([at[0], at[1]], [end[0], end[1]]);
+        if mirrored {
+            // Readable over the same place: the baseline turned round, so the text's far end is where its start was.
+            self.notes.text_mirrored += 1;
+            rotation += std::f64::consts::PI;
+            halign = match halign { 0 => 2, 2 => 0, h => h };
+            if halign == 3 || halign == 5 {
+                std::mem::swap(&mut at2, &mut end2);
+            }
+        }
+        width *= lx / square.abs();
+        box_width *= lx;
+        let rotation = rotation.rem_euclid(std::f64::consts::TAU);
+        let rotation = if rotation >= std::f64::consts::TAU - 1e-12 { 0.0 } else { rotation };
+        let font = d.style_font(&style);
+        d.texts.push(Text {
+            kind, text: value, at: at2, end: end2, height: height * square.abs(), rotation, width, halign, valign,
+            box_width, style, font, mirrored, layer, color, group,
+        });
         Ok(())
     }
 }

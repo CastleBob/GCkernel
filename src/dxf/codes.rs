@@ -34,6 +34,14 @@ impl Pair {
         }
     }
 
+    /// Text exactly as stored (no trimming): text values and MTEXT chunks, where spaces count.
+    pub fn raw(&self) -> String {
+        match &self.value {
+            Value::Text(s) => s.clone(),
+            _ => self.text(),
+        }
+    }
+
     pub fn real(&self) -> Result<f64, KernelError> {
         let r = match &self.value {
             Value::Real(r) => *r,
@@ -117,7 +125,7 @@ pub(crate) fn decode(bytes: &[u8]) -> String {
 }
 
 /// DXF writes characters outside the code page as \U+XXXX.
-fn unescape(s: &str) -> String {
+pub(crate) fn unescape(s: &str) -> String {
     if !s.contains("\\U+") && !s.contains("\\u+") {
         return s.to_string();
     }

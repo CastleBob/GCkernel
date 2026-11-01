@@ -1,16 +1,18 @@
 //! DWG objects (ODA specification chapter 20): the common object and entity data, the classes, layers and block
-//! headers, and every curve entity decoded into the DXF reader's entity records (DXF group codes).
+//! headers, text styles, and every curve and text entity decoded into the DXF reader's entity records (DXF group
+//! codes).
 
 use std::collections::HashMap;
 
 use super::bits::{bad, Bits, Ver, R};
 use super::Source;
-use crate::dxf::codes::{Pair, Value};
+use crate::dxf::codes::{unescape, Pair, Value};
 use crate::dxf::read::{Block, Entity};
-use crate::dxf::{Drawing, Layer};
+use crate::dxf::{Drawing, Layer, TextStyle};
 
 /// Fixed object type numbers (spec 20.3).
 mod t {
+    pub const TEXT: u16 = 1;
     pub const ATTRIB: u16 = 2;
     pub const BLOCK: u16 = 4;
     pub const ENDBLK: u16 = 5;
@@ -31,6 +33,8 @@ mod t {
     pub const SPLINE: u16 = 0x24;
     pub const BLOCK_HEADER: u16 = 0x31;
     pub const LAYER: u16 = 0x33;
+    pub const SHAPEFILE: u16 = 0x35;
+    pub const MTEXT: u16 = 0x2c;
     pub const LWPOLYLINE: u16 = 0x4d;
 }
 
@@ -102,6 +106,8 @@ pub(super) struct Obj<'a> {
     pub mat_flags: u8,
     pub styles: usize,
     pub invisible: bool,
+    /// Extended data: (first bit, byte count) of each application's items.
+    pub eed: Vec<(usize, usize)>,
 }
 
 struct LayerInfo {
@@ -123,6 +129,8 @@ pub(super) struct Reader<'a> {
     classes: HashMap<u16, Class>,
     layers: HashMap<u64, LayerInfo>,
     blocks: HashMap<u64, BlockInfo>,
+    /// Text style handle -> name.
+    styles: HashMap<u64, String>,
 }
 
 /// Counts read from a damaged file are refused past this.
@@ -130,7 +138,9 @@ const MAX_ITEMS: usize = 10_000_000;
 
 impl<'a> Reader<'a> {
     pub fn new(src: &'a Source) -> R<Reader<'a>> {
-        let mut r = Reader { src, classes: HashMap::new(), layers: HashMap::new(), blocks: HashMap::new() };
+        let mut r = Reader {
+            src, classes: HashMap::new(), layers: HashMap::new(), blocks: HashMap::new(), styles: HashMap::new(),
+        };
         r.read_classes();
         Ok(r)
     }
@@ -226,12 +236,14 @@ impl<'a> Reader<'a> {
         };
         let own = b.h(0)?.value;
         // Extended entity data: (size, application handle, bytes) until a zero size.
+        let mut eed = Vec::new();
         for _ in 0..100_000 {
             let n = b.bs()? as u16 as usize;
             if n == 0 {
                 break;
             }
             b.h(0)?;
+            eed.push((b.pos, n));
             b.skip(n * 8)?;
         }
         let entity = self.is_entity(kind);
@@ -257,7 +269,7 @@ impl<'a> Reader<'a> {
         let mut o = Obj {
             kind, handle: own, data: b, refs, strings, entity, entmode: 0, reactors: 0, xdic: true, nolinks: true,
             bylayer_lt: true, color: 256, color_book: false, lt_flags: 0, ps_flags: 0, mat_flags: 0, styles: 0,
-            invisible: false,
+            invisible: false, eed,
         };
         let b = &mut o.data;
         if entity {
@@ -376,6 +388,12 @@ impl<'a> Reader<'a> {
         let handles: Vec<u64> = self.src.order.clone();
         for handle in handles {
             let Ok(mut o) = self.object(handle) else { continue };
+            if o.kind == t::SHAPEFILE {
+                if let Err(e) = self.style(&mut o, handle, d) {
+                    d.warn_text(format!("a text style could not be decoded ({e}); its texts name no font"));
+                }
+                continue;
+            }
             if o.kind != t::LAYER {
                 continue;
             }
@@ -412,6 +430,76 @@ impl<'a> Reader<'a> {
             self.layers.insert(handle, LayerInfo { name });
         }
         Ok(())
+    }
+
+    /// A text style (spec 20.4.56, SHAPEFILE): name, flags, font file; the TrueType family from the extended data.
+    fn style(&mut self, o: &mut Obj<'a>, handle: u64, d: &mut Drawing) -> R<()> {
+        let ver = self.ver();
+        let b = &mut o.data;
+        let name = b.table_entry(&mut o.strings)?;
+        b.b()?; // vertical
+        let shape = b.b()?;
+        b.bd()?; // fixed height
+        b.bd()?; // width factor
+        b.bd()?; // oblique angle
+        b.rc()?; // generation
+        b.bd()?; // last height
+        let file = b.tv(&mut o.strings)?;
+        let name = name.trim().to_string();
+        self.styles.insert(handle, name.clone());
+        if name.is_empty() || shape {
+            return Ok(());
+        }
+        let family = o.eed.iter().find_map(|&(start, n)| eed_string(&o.data.window(start, start + n * 8), ver))
+            .unwrap_or_default();
+        d.styles.push(TextStyle { name, file: file.trim().to_string(), family: family.trim().to_string() });
+        Ok(())
+    }
+
+    fn style_name(&self, handle: u64) -> String {
+        self.styles.get(&handle).cloned().unwrap_or_else(|| "Standard".to_string())
+    }
+
+    /// An insert's ATTRIB (spec 20.4.4) as a DXF-style child record; refused ones carry their reason as the kind.
+    fn attrib(&self, handle: u64) -> Entity {
+        match self.attrib_record(handle) {
+            Ok(Some(e)) => e,
+            Ok(None) => Entity { kind: "SEQEND".into(), pairs: Vec::new(), children: Vec::new() },
+            Err(e) => refused_attrib(format!("an attribute could not be decoded ({e})")),
+        }
+    }
+
+    fn attrib_record(&self, handle: u64) -> R<Option<Entity>> {
+        let mut o = self.object(handle)?;
+        if o.kind != t::ATTRIB {
+            return Ok(None);
+        }
+        let (_, layer) = self.entity_refs(&mut o)?;
+        let ver = self.ver();
+        let mut e = Rec { kind: "ATTRIB".into(), pairs: Vec::new(), children: Vec::new() };
+        e.text(8, &self.layer_name(layer));
+        e.int(62, o.color as i64);
+        if o.invisible {
+            e.int(60, 1);
+        }
+        let h = o.handle;
+        let b = &mut o.data;
+        text_data(b, ver, &mut o.strings, &mut e, 74)?;
+        if ver >= Ver::R2010 {
+            b.rc()?; // version
+        }
+        if ver >= Ver::R2018 {
+            let kind = b.rc()?;
+            if kind == 2 || kind == 4 {
+                return Ok(Some(refused_attrib("a multi-line attribute (DWG 2018), which is not read".into())));
+            }
+        }
+        e.text(2, &b.tv(&mut o.strings)?);
+        b.bs()?; // field length
+        e.int(70, b.rc()? as i64);
+        let style = o.refs.h(h)?.value;
+        e.text(7, &self.style_name(style));
+        Ok(Some(e.done()))
     }
 
     /// Block headers (spec 20.4.52).
@@ -628,9 +716,7 @@ impl<'a> Reader<'a> {
                 let n = b.p3()?;
                 // The owned attribute count is stored only when attributes follow.
                 let attributes = b.b()?;
-                if attributes && ver >= Ver::R2004 {
-                    b.bl()?;
-                }
+                let owned = if attributes && ver >= Ver::R2004 { b.bl()?.max(0) as usize } else { 0 };
                 e.point(10, p);
                 e.real(41, s[0]);
                 e.real(42, s[1]);
@@ -648,6 +734,28 @@ impl<'a> Reader<'a> {
                     return bad(format!("insert {h:X} names block {block:X}, which is not a block header"));
                 };
                 e.text(2, &info.key);
+                if attributes {
+                    // R2004 on lists them; before, they are the entities the insert owns. A damaged list loses the
+                    // attributes, not the insert.
+                    let list: R<Vec<u64>> = if ver >= Ver::R2004 {
+                        if owned > o.refs.left() / 8 || owned > MAX_ITEMS {
+                            bad(format!("insert {h:X} owns {owned} attributes, more than its data holds"))
+                        } else {
+                            (0..owned).map(|_| o.refs.h(h).map(|x| x.value)).collect()
+                        }
+                    } else {
+                        Ok(by_owner.get(&h).cloned().unwrap_or_default())
+                    };
+                    match list {
+                        Ok(list) => for a in list {
+                            let child = self.attrib(a);
+                            if child.kind != "SEQEND" {
+                                e.children.push(child);
+                            }
+                        },
+                        Err(err) => e.children.push(refused_attrib(format!("attributes could not be found ({err})"))),
+                    }
+                }
             }
             t::POLYLINE_2D | t::POLYLINE_3D | t::POLYLINE_PFACE | t::POLYLINE_MESH => {
                 let flags: i64;
@@ -693,6 +801,35 @@ impl<'a> Reader<'a> {
                 e.kind = "LWPOLYLINE".into();
                 lwpolyline(b, ver, &mut e)?;
             }
+            t::TEXT | t::MTEXT => {
+                // A text that cannot be decoded stays a skipped TEXT or MTEXT (as for a curves-only read), with the
+                // reason in 999 for the text reader.
+                let mut decode = || -> R<()> {
+                    if o.kind == t::TEXT {
+                        text_data(b, ver, &mut o.strings, &mut e, 73)?;
+                    } else {
+                        e.point(10, b.p3()?);
+                        e.point(210, b.p3()?);
+                        e.point(11, b.p3()?);
+                        e.real(41, b.bd()?);
+                        if ver >= Ver::R2007 {
+                            b.bd()?; // reference rectangle height
+                        }
+                        e.real(40, b.bd()?);
+                        e.int(71, b.bs()? as i64);
+                        e.int(72, b.bs()? as i64);
+                        b.bd()?; // extents height
+                        b.bd()?; // extents width
+                        e.text(1, &unescape(&b.tv(&mut o.strings)?));
+                    }
+                    let style = o.refs.h(h)?.value;
+                    e.text(7, &self.style_name(style));
+                    Ok(())
+                };
+                if let Err(err) = decode() {
+                    e.text(999, &format!("{} {h:X}: {err}", e.kind));
+                }
+            }
             _ => {}
         }
         Ok(Some(e.done()))
@@ -724,6 +861,99 @@ impl<'a> Reader<'a> {
         }
         Ok(e.done())
     }
+}
+
+/// An attribute the reader does not give as text, its reason as the record kind (the text reader reports it).
+fn refused_attrib(reason: String) -> Entity {
+    Entity { kind: reason, pairs: Vec::new(), children: Vec::new() }
+}
+
+/// The data TEXT, ATTRIB and ATTDEF share (spec 20.4.3) as DXF codes; `vertical` is 73 for TEXT, 74 for ATTRIB.
+fn text_data<'a>(b: &mut Bits<'a>, ver: Ver, strings: &mut Option<Bits<'a>>, e: &mut Rec, vertical: i32) -> R<()> {
+    let (elevation, insertion, alignment, normal, rotation, height, width, value, generation, horizontal, upright);
+    if ver <= Ver::R14 {
+        elevation = b.bd()?;
+        insertion = [b.rd()?, b.rd()?];
+        alignment = Some([b.rd()?, b.rd()?]);
+        normal = b.p3()?;
+        b.bd()?; // thickness
+        b.bd()?; // oblique angle
+        rotation = b.bd()?;
+        height = b.bd()?;
+        width = b.bd()?;
+        value = b.tv(strings)?;
+        generation = b.bs()?;
+        horizontal = b.bs()?;
+        upright = b.bs()?;
+    } else {
+        // Data flags: a set bit means the value is not stored (and takes its default).
+        let flags = b.rc()?;
+        elevation = if flags & 0x01 == 0 { b.rd()? } else { 0.0 };
+        insertion = [b.rd()?, b.rd()?];
+        alignment = if flags & 0x02 == 0 {
+            let x = b.dd(insertion[0])?;
+            Some([x, b.dd(insertion[1])?])
+        } else {
+            None
+        };
+        normal = b.be()?;
+        b.bt()?; // thickness
+        if flags & 0x04 == 0 {
+            b.rd()?; // oblique angle
+        }
+        rotation = if flags & 0x08 == 0 { b.rd()? } else { 0.0 };
+        height = b.rd()?;
+        width = if flags & 0x10 == 0 { b.rd()? } else { 1.0 };
+        value = b.tv(strings)?;
+        generation = if flags & 0x20 == 0 { b.bs()? } else { 0 };
+        horizontal = if flags & 0x40 == 0 { b.bs()? } else { 0 };
+        upright = if flags & 0x80 == 0 { b.bs()? } else { 0 };
+    }
+    e.point(10, [insertion[0], insertion[1], elevation]);
+    if let Some(a) = alignment {
+        e.point(11, [a[0], a[1], elevation]);
+    }
+    e.point(210, normal);
+    e.real(50, rotation.to_degrees());
+    e.real(40, height);
+    e.real(41, width);
+    e.text(1, &unescape(&value));
+    e.int(71, generation as i64);
+    e.int(72, horizontal as i64);
+    e.int(vertical, upright as i64);
+    Ok(())
+}
+
+/// The first string item (code 0, DXF 1000) of one application's extended data (spec chapter 28).
+fn eed_string(b: &Bits, ver: Ver) -> Option<String> {
+    let mut b = b.clone();
+    for _ in 0..1000 {
+        let code = b.rc().ok()?;
+        match code {
+            0 => {
+                if ver >= Ver::R2007 {
+                    let n = b.rs().ok()? as usize;
+                    let units: Vec<u16> = (0..n).map(|_| b.rs()).collect::<R<_>>().ok()?;
+                    return Some(String::from_utf16_lossy(&units).trim_end_matches('\0').to_string());
+                }
+                let n = b.rc().ok()? as usize;
+                b.rs().ok()?; // code page
+                let bytes: Vec<u8> = (0..n).map(|_| b.rc()).collect::<R<_>>().ok()?;
+                return Some(crate::dxf::codes::decode(&bytes));
+            }
+            2 => b.skip(8).ok()?,
+            3 | 5 | 40..=42 => b.skip(64).ok()?,
+            4 => {
+                let n = b.rc().ok()? as usize;
+                b.skip(n * 8).ok()?;
+            }
+            10..=13 => b.skip(192).ok()?,
+            70 => b.skip(16).ok()?,
+            71 => b.skip(32).ok()?,
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn spline(b: &mut Bits, ver: Ver, e: &mut Rec) -> R<()> {

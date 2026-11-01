@@ -25,8 +25,8 @@
 //!        name in a domain that records no history; boolean::cut_named),
 //!     13 prism profile (a unit direction d then a body -> the op 2 profile whose sweep along -d is exactly the body, its
 //!        loops on the one cap facing d; refused by name when the body is not a straight-through plate; rebuild.rs),
-//!     14 read DXF (a path -> the drawing's layers and curves as seen from above, exact or as lines and arcs;
-//!        dxf::wire), 15 write DXF (layers and curves -> an R12 DXF at the path; dxf::wire),
+//!     14 read DXF (a path -> the drawing's layers and curves as seen from above, exact or as lines and arcs; mode 3
+//!        adds its texts; dxf::wire), 15 write DXF (layers and curves -> an R12 DXF at the path; dxf::wire),
 //!     16 read STEP (UTF-8 path -> all supported standalone solid bodies; step::wire).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};

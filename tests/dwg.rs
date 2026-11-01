@@ -6,7 +6,7 @@
 use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
 
-use gc_kernel::dxf::{dwg, fit, read, write_r12, Curve, Drawing, Geometry};
+use gc_kernel::dxf::{dwg, fit, read, write_r12, Curve, Drawing, Geometry, TextKind};
 use gc_kernel::protocol::{encode_request, handle, parse_request, OP_DXF_READ};
 
 fn near(a: f64, b: f64, scale: f64) -> bool {
@@ -605,7 +605,7 @@ fn r2007_undetectable_word_changes_fail_the_page_crc() {
 }
 
 /// GCKERNEL_DWG_SCAN=<folder>[;<folder>...] reads every `*.dwg` under those folders (read only) and reports each
-/// one's version, curve count and warnings, or the reason it was refused; it fails only on a panic.
+/// one's version, curve count, texts (the first few) and warnings, or the reason it was refused; it fails only on a panic.
 #[test]
 fn scan_dwg_folders() {
     let Ok(dirs) = std::env::var("GCKERNEL_DWG_SCAN") else { return };
@@ -633,8 +633,12 @@ fn scan_dwg_folders() {
                 read_ok += 1;
                 let mut skipped = d.skipped.clone();
                 skipped.sort();
-                println!("{}: {version} {} curves, {} layers, skipped {skipped:?}, warnings {:?}", path.display(),
-                    d.curves.len(), d.layers.len(), d.warnings);
+                println!("{}: {version} {} curves, {} layers, {} texts, skipped {skipped:?}, warnings {:?}", path.display(),
+                    d.curves.len(), d.layers.len(), d.texts.len(), d.warnings);
+                for t in d.texts.iter().take(8) {
+                    println!("    {:?} {:?} at ({:.4}, {:.4}) h {:.4} rot {:.2} deg align {}/{} style {} font {}", t.kind, t.text,
+                        t.at[0], t.at[1], t.height, t.rotation.to_degrees(), t.halign, t.valign, t.style, t.font);
+                }
             }
             Ok(Err(e)) => {
                 refused += 1;
@@ -644,4 +648,48 @@ fn scan_dwg_folders() {
         }
     }
     println!("{} DWGs: {read_ok} read, {refused} refused", files.len());
+}
+
+/// Each sample's one TEXT ("not a curve", at (0, -20), 5 high, style "Default" in Tahoma) is read as text in every
+/// file organisation.
+#[test]
+fn the_sample_text_reads_in_every_version() {
+    for (name, bytes) in samples() {
+        let d = dwg::read(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(d.texts.len(), 1, "{name}: {:?}", d.texts);
+        let t = &d.texts[0];
+        assert_eq!((t.kind, t.text.as_str()), (TextKind::Text, "not a curve"), "{name}");
+        assert!(t.style.eq_ignore_ascii_case("Default"), "{name}: style '{}' (names ignore case; R14 stores DEFAULT)", t.style);
+        assert!(near_all(&[t.at[0], t.at[1], t.height, t.rotation, t.width], &[0.0, -20.0, 5.0, 0.0, 1.0], 20.0),
+            "{name}: {t:?}");
+        assert_eq!((t.halign, t.valign, t.mirrored), (0, 0, false), "{name}");
+        assert!(t.font.eq_ignore_ascii_case("Tahoma"), "{name}: font '{}', styles {:?}", t.font, d.styles);
+    }
+}
+
+/// GCKERNEL_DWG_FIXTURES: every DWG's texts equal its DXF twin's (strings, places, heights, turns, alignment,
+/// style and font), in order.
+#[test]
+fn every_dwg_text_equals_its_dxf_twin() {
+    let Some(pairs) = fixtures() else { return };
+    let mut failed = Vec::new();
+    for (dwg_path, dxf_path) in &pairs {
+        let from_dxf = read(&std::fs::read(dxf_path).unwrap()).unwrap();
+        let Ok(from_dwg) = dwg::read(&std::fs::read(dwg_path).unwrap()) else { continue };
+        let scale = size(&from_dxf).max(1.0);
+        let same = from_dwg.texts.len() == from_dxf.texts.len() && from_dwg.texts.iter().zip(&from_dxf.texts).all(|(a, b)| {
+            a.kind == b.kind && a.text == b.text && a.style.eq_ignore_ascii_case(&b.style) && a.font.eq_ignore_ascii_case(&b.font)
+                && (a.halign, a.valign, a.mirrored) == (b.halign, b.valign, b.mirrored)
+                && near_all(&[a.at[0], a.at[1], a.end[0], a.end[1], a.height, a.box_width],
+                    &[b.at[0], b.at[1], b.end[0], b.end[1], b.height, b.box_width], scale)
+                && angle_near(a.rotation, b.rotation) && near(a.width, b.width, 1.0)
+        });
+        println!("{}: {} texts from the DWG, {} from the DXF: {}", name(dwg_path), from_dwg.texts.len(), from_dxf.texts.len(),
+            if same { "same" } else { "DIFFERENT" });
+        if !same {
+            println!("    DWG {:?}\n    DXF {:?}", from_dwg.texts, from_dxf.texts);
+            failed.push(name(dwg_path));
+        }
+    }
+    assert!(failed.is_empty(), "texts differ: {failed:?}");
 }

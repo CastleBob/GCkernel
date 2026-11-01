@@ -1,17 +1,23 @@
 //! Ops 14 READ DXF (also SVG, DWG and PDF/Illustrator, told apart by content) and 15 WRITE DXF on the numeric wire. Text (a path, a layer name, a message) travels as its UTF-8
 //! byte count followed by one value per byte.
 //!
-//! Op 14 request: [1, mode (0 exact, 1 lines and arcs, 2 header and layers only), fit tolerance (drawing units), path].
+//! Op 14 request: [1, mode (0 exact, 1 lines and arcs, 2 header and layers only, 3 lines and arcs plus texts), fit
+//!        tolerance (drawing units), path].
 //! Reply: [1, $INSUNITS or -1, $MEASUREMENT or -1, $ACADVER text, layer count, per layer (colour, flags 1 frozen
 //!        2 off 4 locked, name), curve count, per curve (kind, layer, colour, group, geometry), skipped count, per
 //!        entry (type name, count), warning count, per warning (text)].
+//!        Mode 3 then adds [text count, per text (source 0 TEXT 1 MTEXT 2 ATTRIB, layer, colour, group, x, y, end x,
+//!        end y, height, rotation (radians, counter-clockwise), width factor, horizontal alignment (0 left 1 centre
+//!        2 right 3 aligned 5 fit), vertical alignment (0 baseline 1 bottom 2 middle 3 top), box width, mirrored
+//!        (0 or 1), text ('\n' between lines), style name, font)], and its skipped list leaves out the TEXT and
+//!        MTEXT entities given as texts. `Text` says what each field means. Modes 0 to 2 are unchanged.
 //! Op 15 request: [1, $INSUNITS or -1, fit tolerance, path, layer count, per layer (colour, flags, name), curve count,
 //!        per curve (kind, layer, colour, geometry)]. Reply: [bytes written]. The file is replaced only once written.
 //! Geometry by kind: 0 line (ax ay bx by), 1 arc (cx cy r start sweep), 2 circle (cx cy r), 3 ellipse (cx cy ux uy
 //! vx vy t0 t1), 4 spline (degree, knot count, knots, point count, x y per point, weight count, weights),
 //! 5 polyline (closed, count, x y bulge per vertex; written only).
 
-use super::{fit, read, read_header, write_r12, Curve, Drawing, Geometry, Layer};
+use super::{fit, read, read_header, write_r12, Curve, Drawing, Geometry, Layer, TextKind};
 use crate::KernelError;
 
 struct Cursor<'a> {
@@ -88,7 +94,18 @@ pub fn read_op(data: &[f64]) -> Result<Vec<f64>, KernelError> {
     } else {
         read(&bytes)?
     };
-    if mode == 1.0 {
+    let texts = mode == 3.0;
+    if texts {
+        // Texts given are not skipped.
+        for t in &drawing.texts {
+            let name = match t.kind { TextKind::Text => "TEXT", TextKind::MText => "MTEXT", TextKind::Attrib => continue };
+            if let Some(entry) = drawing.skipped.iter_mut().find(|(k, _)| k == name) {
+                entry.1 = entry.1.saturating_sub(1);
+            }
+        }
+        drawing.skipped.retain(|(_, n)| *n > 0);
+    }
+    if mode == 1.0 || texts {
         let mut fitted = Vec::with_capacity(drawing.curves.len());
         for curve in &drawing.curves {
             for g in fit::lines_and_arcs(&curve.geometry, tol)? {
@@ -134,9 +151,25 @@ pub fn read_op(data: &[f64]) -> Result<Vec<f64>, KernelError> {
         put_text(&mut out, kind);
         out.push(*n as f64);
     }
+    if texts {
+        let notes = std::mem::take(&mut drawing.text_warnings);
+        drawing.warnings.extend(notes);
+    }
     out.push(drawing.warnings.len() as f64);
     for w in &drawing.warnings {
         put_text(&mut out, w);
+    }
+    if texts {
+        out.push(drawing.texts.len() as f64);
+        for t in &drawing.texts {
+            let source = match t.kind { TextKind::Text => 0.0, TextKind::MText => 1.0, TextKind::Attrib => 2.0 };
+            out.extend([source, t.layer as f64, t.color as f64, t.group as f64, t.at[0], t.at[1], t.end[0], t.end[1],
+                t.height, t.rotation, t.width, t.halign as f64, t.valign as f64, t.box_width,
+                f64::from(u8::from(t.mirrored))]);
+            put_text(&mut out, &t.text);
+            put_text(&mut out, &t.style);
+            put_text(&mut out, &t.font);
+        }
     }
     Ok(out)
 }
