@@ -7,6 +7,55 @@ use gc_kernel::{
     step, tessellate, topology,
 };
 const TOL: f64 = 1e-6;
+
+#[test]
+fn curved_multispan_trims_keep_mass_shared_mesh_and_step_geometry() {
+    for (name, mut body) in [
+        ("CurvedMultispanRoof.step", curved_roof()),
+        ("CircularMultispanHole.step", circular_hole()),
+    ] {
+        let expected = mass::measure(&body, TOL).unwrap();
+        for face in &mut body.faces {
+            if let Surface::Spline { data } = &mut face.surface {
+                let original = data.patches[0].clone();
+                data.u = vec![0., 0.35, 0.5, 0.8, 1.];
+                data.v = vec![0., 0.05, 0.4, 0.5, 0.6, 1.];
+                data.patches = data
+                    .u
+                    .windows(2)
+                    .flat_map(|u| {
+                        data.v
+                            .windows(2)
+                            .map(|v| original.piece(u[0], u[1], v[0], v[1]))
+                    })
+                    .collect();
+            }
+        }
+        topology::check(&body, TOL).unwrap();
+        let measured = mass::measure(&body, TOL).unwrap();
+        assert!((measured.volume - expected.volume).abs() < 1e-9);
+        assert!((measured.area - expected.area).abs() < 1e-8);
+        let mesh = tessellate::tessellate(&body, 0.01).unwrap();
+        assert!(!mesh.triangles.is_empty());
+        let bytes = step::write(&[(name, &body)], TOL).unwrap();
+        let round = step::read(bytes.as_bytes(), TOL).unwrap();
+        assert!((round.bodies[0].volume - expected.volume).abs() < 1e-9);
+        if let Ok(dir) = std::env::var("GC_STEP_EXPORT_FIXTURES") {
+            std::fs::write(std::path::Path::new(&dir).join(name), bytes).unwrap();
+        }
+        // A defective interior patch must not escape whole-edge checks just
+        // because the trim's endpoints lie on other patches.
+        let face = body
+            .faces
+            .iter_mut()
+            .find(|f| matches!(f.surface, Surface::Spline { .. }))
+            .unwrap();
+        if let Surface::Spline { data } = &mut face.surface {
+            data.patches[6].p[5].z += 0.01;
+        }
+        assert!(topology::check(&body, TOL).is_err());
+    }
+}
 fn graph() -> SplineSurface {
     SplineSurface {
         u: vec![0., 1.],

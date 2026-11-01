@@ -348,3 +348,14 @@ geometry evidence, not just a conversion residual. This does not prove absence o
 all importer defects or give a continuous maximum. Inputs and admission tolerance
 are unchanged. Verification: diagnostic 2/2 and STEP regression 20/20 with the
 original corpus enabled.
+
+## Curved trims across tensor knots
+
+Curved graph trims now cross multiple patches. Coordinate-plane cubic root
+isolation splits the exact UV/physical curves at every U/V knot, including tangency
+and repeated crossings. Support bounds cover every patch touched by each UV hull;
+numerical root uncertainty cannot silently select the wrong patch. Green integration
+also splits its inner integral at U knots. Existing topology/display budgets and
+strict admission remain. A 4-by-5 patch roof and circular-hole face retain analytic
+mass, bounded display and STEP round trips; an interior support defect is refused.
+Focused curved/polygonal trim checks: 7/7. General non-graph pcurves remain in progress.

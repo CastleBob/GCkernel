@@ -506,6 +506,34 @@ fn split(c: &Curve) -> Result<[Curve; 2]> {
         crate::spline_curve::piece(c, 0.5, 1.)?,
     ])
 }
+/// Coordinate-plane roots split exact curves at every tensor knot. Derivative
+/// critical points isolate all cubic roots, including tangencies and returns.
+fn knot_breaks(s: &SplineSurface, uv: &Curve) -> Result<Vec<f64>> {
+    let (p, w) = crate::spline_curve::controls(uv)?;
+    let mut cuts = vec![0., 1.];
+    for (axis, knots) in [&s.u, &s.v].iter().enumerate() {
+        let q = p.map(|p| Vec3::new([p.x, p.y][axis], 0., 0.));
+        let lo = q.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        let hi = q.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+        if hi - lo <= 1e-14 {
+            continue;
+        }
+        let scalar = Curve::RationalBezier { p: q, w };
+        for &k in &knots[1..knots.len() - 1] {
+            if k < lo || k > hi {
+                continue;
+            }
+            cuts.extend(crate::spline_curve::parameters(
+                &scalar,
+                Vec3::new(k, 0., 0.),
+                1e-13,
+            )?);
+        }
+    }
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    Ok(cuts)
+}
 fn support(
     s: &SplineSurface,
     c: &Chart,
@@ -520,10 +548,38 @@ fn support(
     }
     let (p, w) = crate::spline_curve::controls(curve)?;
     crate::rational::validate(p, w)?;
-    let inside = p
-        .iter()
-        .all(|&p| c.point(p).iter().all(|&x| x >= -1e-12 && x <= 1. + 1e-12));
-    let bound = residual(s, c, curve, 0, 0)?;
+    let uv = p.map(|p| c.point(p));
+    let inside = uv.iter().flatten().all(|&x| x >= -1e-12 && x <= 1. + 1e-12);
+    let lo: [f64; 2] =
+        std::array::from_fn(|k| uv.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min));
+    let hi: [f64; 2] =
+        std::array::from_fn(|k| uv.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max));
+    // Bound every patch touched by the positive-weight UV hull. Even numerical
+    // knot-root error cannot hide a neighboring patch's geometry.
+    let mut bound: f64 = 0.;
+    let mut touched = 0;
+    for i in 0..s.u.len() - 1 {
+        if s.u[i] > hi[0] + 1e-13 || s.u[i + 1] < lo[0] - 1e-13 {
+            continue;
+        }
+        for j in 0..s.v.len() - 1 {
+            if s.v[j] > hi[1] + 1e-13 || s.v[j + 1] < lo[1] - 1e-13 {
+                continue;
+            }
+            touched += 1;
+            if touched > 4 {
+                bound = f64::INFINITY;
+                break;
+            }
+            bound = bound.max(residual(s, c, curve, i, j)?);
+        }
+        if touched > 4 {
+            break;
+        }
+    }
+    if touched == 0 {
+        bound = f64::INFINITY;
+    }
     if inside && bound <= tol {
         return Ok(());
     }
@@ -689,9 +745,6 @@ pub(crate) fn domain(
     {
         return polygon_domain(s, c, body, face, tol).map(Domain::Polygon);
     }
-    if s.patches.len() != 1 {
-        return reject("curved UV trims currently require one tensor patch");
-    }
     if face.loops.is_empty() || face.loops.iter().map(Vec::len).sum::<usize>() > 2048 {
         return reject("invalid curved spline trim loop count");
     }
@@ -708,12 +761,17 @@ pub(crate) fn domain(
                 body.edges[e].curve.reversed()
             };
             for span in spans(&edge)? {
-                support(s, c, &span, tol, 0, &mut support_visits).map_err(|error| {
-                    KernelError::Unsupported(format!("spline trim edge {e}: {error}"))
-                })?;
                 let uv = project(c, &span)?;
-                flatten(&uv, &mut leaves, 0)?;
-                loop_curves.push(uv);
+                let cuts = knot_breaks(s, &uv)?;
+                for interval in cuts.windows(2) {
+                    let span = crate::spline_curve::piece(&span, interval[0], interval[1])?;
+                    support(s, c, &span, tol, 0, &mut support_visits).map_err(|error| {
+                        KernelError::Unsupported(format!("spline trim edge {e}: {error}"))
+                    })?;
+                    let uv = project(c, &span)?;
+                    flatten(&uv, &mut leaves, 0)?;
+                    loop_curves.push(uv);
+                }
             }
         }
         if leaves.len() < 3 {
@@ -844,13 +902,21 @@ pub(crate) fn measure(
                         n.length() * sign
                     }
                 };
-                match crate::mass::quadrature(&inner, 0., uv.x, budget) {
-                    Ok(v) => v * derivative.y,
-                    Err(e) => {
-                        *failure.borrow_mut() = Some(e);
-                        0.
+                let mut total = 0.;
+                for span in s.u.windows(2) {
+                    let hi = uv.x.min(span[1]);
+                    if hi <= span[0] {
+                        continue;
+                    }
+                    match crate::mass::quadrature(&inner, span[0], hi, budget) {
+                        Ok(v) => total += v,
+                        Err(e) => {
+                            *failure.borrow_mut() = Some(e);
+                            return 0.;
+                        }
                     }
                 }
+                total * derivative.y
             };
             result[which] += crate::mass::quadrature(&integrand, 0., 1., budget)
                 .map_err(KernelError::Unsupported)?;
