@@ -358,7 +358,7 @@ fn check_rim_cylinder(body: &Body, eb: &EdgeBlend, is_new: &[bool], tol: f64) ->
             Curve::Arc { c, n, x, r, .. } => h(c) - r * (x.dot(ah).abs() + n.cross(x).dot(ah).abs()),
             Curve::Conic { c, u, v, .. } => h(c) - u.dot(ah).abs() - v.dot(ah).abs(),
             Curve::Bezier { p } | Curve::RationalBezier { p, .. } => p.iter().map(|&q| h(q)).fold(f64::INFINITY, f64::min),
-            Curve::CylinderPair { .. } => return unsupported(format!("edge {}: the rim blend's cylinder face {cylinder} also holds an intersection curve (edge {e}); a clearance proof for it is not available", eb.edge)),
+            Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } => return unsupported(format!("edge {}: the rim blend's cylinder face {cylinder} also holds an intersection curve (edge {e}); a clearance proof for it is not available", eb.edge)),
         };
         if least <= sc + tol {
             return unsupported(format!("edge {}: the blend reaches {sc} along the cylinder face {cylinder}, into its other boundary (input edge near {least})", eb.edge));

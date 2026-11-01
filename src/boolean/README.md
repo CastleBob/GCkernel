@@ -461,7 +461,7 @@ Not done in that round: native normalized ends (closed below) and NC1 rolled-roo
 Bob's "short pipe test" (7 x 0.5 pipe, Normalize End over a 13 diameter Preserve Length cope). GCmaker's rule
 (PipeCopeNormalizer, EndConditionSideCompositeBuilder): a radial torch cuts one boundary per angle, so at each angle
 the end keeps the deeper of the two walls' crossings with the mating cylinder and carries it radially across the
-wall. The exact face is a right conoid with radial rulings, `Surface::Conoid` (wire surface 9):
+wall. The exact face is a right conoid with radial rulings, `Surface::Conoid` (wire surface 10; 8 and 9 are spline patches):
 S(t, s) = c + s rho(t) + h(t) a, h the deeper wall's CylinderPair height; its rims are `Curve::RadialPair` (wire
 curve 7: a CylinderPair's height carried to radius s). Construction (`normalize.rs`, worker op 23) proves the deeper
 wall: both walls' discriminants positive all the way round (else "does not cross both pipe walls all the way round")

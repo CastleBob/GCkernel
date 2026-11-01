@@ -104,7 +104,7 @@ pub fn recognize(body: &Body, tol: f64) -> Result<Revolved, KernelError> {
             Surface::Sphere { c, .. } => on_axis(c),
             Surface::Revolution { .. } => return unsupported(format!(
                 "not offset here: face {f} is a general surface of revolution (an ellipse or Bezier meridian), whose offset is not one")),
-            Surface::EllipticCylinder { .. } | Surface::Spline { .. } => return unsupported(format!("not a solid of revolution: face {f} is not turned about an axis")),
+            Surface::EllipticCylinder { .. } | Surface::Spline { .. } | Surface::Conoid { .. } => return unsupported(format!("not a solid of revolution: face {f} is not turned about an axis")),
         };
         if !ok { return unsupported(format!("not a solid of revolution: face {f} does not turn about the body's axis")); }
         let mut levels: Vec<P2> = Vec::new();

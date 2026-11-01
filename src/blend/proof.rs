@@ -28,7 +28,7 @@ impl<'a> Sampler<'a> {
             Curve::Conic { u, v, t0, t1, .. } => (u.length() + v.length(), Piece::Span { t0, t1 }),
             Curve::Bezier { p } => (0.0, Piece::Hull { p, w: [1.0; 4] }),
             Curve::RationalBezier { p, w } => (0.0, Piece::Hull { p, w }),
-            Curve::CylinderPair { .. } => return Err("an intersection-curve edge has no clearance bound here".into()),
+            Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } => return Err("an intersection-curve edge has no clearance bound here".into()),
         };
         Ok((Self { curve, speed }, piece))
     }

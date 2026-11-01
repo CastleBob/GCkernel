@@ -332,7 +332,7 @@ impl<'a> Reader<'a> {
                 Ok(Surface::Spline { data: Box::new(data),
                 })
             }
-            t if t == 9.0 => {
+            t if t == 10.0 => {
                 let c = self.point()?;
                 let (a, x) = self.frame()?;
                 let rho = self.next()?;
@@ -467,7 +467,7 @@ pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
         Surface::Sphere { c, a, x, r } => { out.push(5.0); put(out, *c); put(out, *a); put(out, *x); out.push(*r); }
         Surface::Torus { c, a, x, big, r } => { out.push(6.0); put(out, *c); put(out, *a); put(out, *x); out.extend_from_slice(&[*big, *r]); }
         Surface::Conoid { c, a, x, rho, p, b, r, branch } => {
-            out.push(9.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho); put(out, *p); put(out, *b);
+            out.push(10.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho); put(out, *p); put(out, *b);
             out.extend_from_slice(&[*r, *branch]);
         }
         Surface::Revolution { p, a, x, m } => {
