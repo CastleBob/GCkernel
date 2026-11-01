@@ -228,3 +228,58 @@ fn oblique_copes_outside_the_domain_are_refused_by_name() {
         other => panic!("expected a named refusal, got {other:?}"),
     }
 }
+
+// Bob's aa5 (Steel Structures Inc, NC1): an L4X4X5/16 (heel at x 0, z 0; horizontal leg z in [-t, 0] to its toe at
+// x 4, vertical leg x in [0, t] down to z -4; root fillet R1 about (t + R1, -t - R1); toe radius 0.1875 on the outer
+// corner of each toe), 44.0035 long. Its left end is two NC1 cutters on the 45 degree miter plane y = L + z: the
+// vertical leg's waste triangle, drilled through the leg and the root fillet (x from -0.001 to t + R1 + 0.001), then
+// the horizontal leg's welding-preparation wedge built on the same plane (GCmaker aligns it with the adjoining
+// leg's miter), which meets the first cut's face exactly. Together they remove every point with y > L + z: column x
+// of the section loses bottom(x)^2 / 2, bottom the lowest material z in that column.
+const ANGLE_T: f64 = 0.3125984251968504;
+const ANGLE_R1: f64 = 0.3751968503937008;
+const ANGLE_TOE: f64 = 0.1875;
+const ANGLE_LEG: f64 = 3.9999999999999996;
+
+fn angle_bottom(x: f64) -> f64 {
+    let (t, r1, r2, w) = (ANGLE_T, ANGLE_R1, ANGLE_TOE, ANGLE_LEG);
+    if x <= t - r2 {
+        w
+    } else if x <= t {
+        w - r2 + (r2 * r2 - (x - t + r2).powi(2)).max(0.).sqrt()
+    } else if x <= t + r1 {
+        t + r1 - (r1 * r1 - (x - t - r1).powi(2)).max(0.).sqrt()
+    } else if x <= w - r2 {
+        t
+    } else {
+        t - r2 + (r2 * r2 - (x - w + r2).powi(2)).max(0.).sqrt()
+    }
+}
+
+/// The section's first moment below the top face over columns x in [a, b], split at every knee.
+fn angle_moment(a: f64, b: f64) -> f64 {
+    let (t, r1, r2, w) = (ANGLE_T, ANGLE_R1, ANGLE_TOE, ANGLE_LEG);
+    let mut knees = vec![a, b];
+    knees.extend([t - r2, t, t + r1, w - r2].into_iter().filter(|k| *k > a && *k < b));
+    knees.sort_by(f64::total_cmp);
+    knees.windows(2).map(|k| simpson(&|x| angle_bottom(x).powi(2) / 2., k[0], k[1], 1e-15)).sum()
+}
+
+#[test]
+fn angle_nc1_miter_triangle_drilled_through_the_root_fillet() {
+    // F: the vertical leg's waste triangle, its depth carried past the root fillet (ResolveProfileJunctionExtensions).
+    let (got, _) = removed("angle_nc1_miter");
+    let exact = angle_moment(0., ANGLE_T + ANGLE_R1 + 0.001);
+    assert!((got - exact).abs() < 1e-10, "removed {got}, section moment {exact}");
+}
+
+#[test]
+fn angle_nc1_preparation_wedge_on_the_miter_plane_it_shares() {
+    // F: the wedge's bevel face and the triangle's face are one plane stored two ways (1e-13 apart): one graph.
+    let (got, result) = removed("angle_nc1_prep");
+    let exact = angle_moment(ANGLE_T + ANGLE_R1 + 0.001, ANGLE_LEG);
+    assert!((got - exact).abs() < 1e-10, "removed {got}, section moment {exact}");
+    // The whole end is now the miter: no material beyond y = L + z (every vertex on or below it).
+    let length = 44.003543307086616;
+    assert!(result.vertices.iter().all(|v| v.y - v.z <= length + 1e-9));
+}

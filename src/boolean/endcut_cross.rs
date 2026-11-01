@@ -164,6 +164,29 @@ fn intersection_stations(
     Ok(refined)
 }
 
+/// Two stored graphs of ONE supporting surface (Claude 2026-10-31, Bob's aa5: an NC1 angle preparation is built on
+/// the adjoining leg's exact miter plane, and its tool face and the earlier cut's face are that plane stored through
+/// different points and normals, 1e-13 apart): they are the same graph when they agree within evaluation roundoff,
+/// 64 machine epsilons of the terms before cancellation, at both ends of the band (two lines: their difference is
+/// linear, so the ends bound it) or have the same circle to that roundoff. The first is kept. Distinct graphs closer
+/// than the tolerance but beyond roundoff are still refused.
+fn same_graph(a: Graph, b: Graph, lo: f64, hi: f64) -> bool {
+    let size = |g: Graph, x: f64| match g {
+        Graph::Line { m, b } => (m * x).abs() + b.abs(),
+        Graph::Circle { cv, r, .. } => cv.abs() + r,
+    };
+    match (a, b) {
+        (Graph::Line { .. }, Graph::Line { .. }) => [lo, hi]
+            .into_iter()
+            .all(|x| (a.value(x) - b.value(x)).abs() <= 64. * f64::EPSILON * (size(a, x) + size(b, x))),
+        (Graph::Circle { cx, cv, r, branch }, Graph::Circle { cx: dx, cv: dv, r: dr, branch: db }) => {
+            let ulps = 64. * f64::EPSILON * (cx.abs() + dx.abs() + cv.abs() + dv.abs() + r + dr);
+            branch == db && (cx - dx).abs() <= ulps && (cv - dv).abs() <= ulps && (r - dr).abs() <= ulps
+        }
+        _ => false,
+    }
+}
+
 fn ordered_graphs(mut graphs: Vec<Graph>, lo: f64, hi: f64, tol: f64) -> Result<Vec<Graph>> {
     let mid = (lo + hi) * 0.5;
     graphs.sort_by(|a, b| a.value(mid).total_cmp(&b.value(mid)));
@@ -171,7 +194,7 @@ fn ordered_graphs(mut graphs: Vec<Graph>, lo: f64, hi: f64, tol: f64) -> Result<
     for g in graphs {
         if let Some(&last) = out.last() {
             if (g.value(mid) - last.value(mid)).abs() <= tol {
-                if g == last {
+                if g == last || same_graph(last, g, lo, hi) {
                     continue;
                 }
                 return Err(unsupported("transverse graph coincidence is unresolved"));
@@ -920,12 +943,17 @@ mod tests {
         assert!(
             (crate::mass::measure(&result, 1e-6).unwrap().volume - 112.845646699).abs() < 0.001
         );
-        // Two genuinely different stored lines remain explicitly unresolved;
-        // success of step one must not imply completion of this real part.
-        assert!(matches!(
-            crate::boolean::cut(&result, &part("str1", "step02"), 1e-6),
-            Err(KernelError::Unsupported(_))
-        ));
+        // Its next wedges were refused as "two different stored lines"; they are one plane stored twice, 1 to 2 ulps
+        // apart (Claude 2026-10-31, same_graph), so all six steps now replay, each within the reference's mesh
+        // allowance (tests/fixtures/parts/str1/reference.md: Eyeshot's step-by-step mesh volumes).
+        let mut body = result;
+        for (step, native_volume) in [(2, 110.414764497), (3, 106.701206509), (4, 101.28852158), (5, 101.231382506), (6, 98.800405878)] {
+            let result = operation(&body, &part("str1", &format!("step{step:02}")), 1e-6);
+            crate::topology::check(&result, 1e-6).unwrap();
+            let volume = crate::mass::measure(&result, 1e-6).unwrap().volume;
+            assert!((volume - native_volume).abs() < 0.001, "STR-1 step {step}: {volume} vs {native_volume}");
+            body = result;
+        }
     }
     #[test]
     fn rectangular_tube_multiple_walls_preserve_the_unaffected_stock() {
@@ -1200,6 +1228,12 @@ mod tests {
             ordered_graphs(vec![line, Graph::Line { m: 0., b: 5e-7 }], 0., 1., 1e-6),
             Err(KernelError::Unsupported(_))
         ));
+        // One plane stored two ways (aa5's miter: the cut's face and the preparation wedge's), apart only by the
+        // roundoff of their normals and points: one graph. 1e-9 apart is beyond roundoff and still refused.
+        let (miter, wedge) = (Graph::Line { m: 0.99999999999999986, b: -44.003543307086616 },
+            Graph::Line { m: 1.0000000000000048, b: -44.00354330708683 });
+        assert_eq!(ordered_graphs(vec![miter, wedge], 43.3, 44.01, 1e-6).unwrap().len(), 1);
+        assert!(ordered_graphs(vec![miter, Graph::Line { m: 1., b: -44.003543307086616 + 1e-9 }], 43.3, 44.01, 1e-6).is_err());
         let arc = Graph::Circle {
             cx: 0.,
             cv: 0.,

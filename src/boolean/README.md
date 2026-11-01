@@ -350,7 +350,13 @@ min(input tolerance, 16*machine epsilon*sum of evaluation term magnitudes).
 Interior critical points still require positive separation greater than the
 input tolerance. This is a bounded endpoint arithmetic allowance, not outward-
 rounded interval certification. Distinct near-coincident graphs are still
-refused; no supporting surfaces are snapped or merged.
+refused; no supporting surfaces are snapped or merged. One surface stored twice
+is not two (Claude 2026-10-31, `same_graph`): two line graphs agreeing within 64
+machine epsilons of their terms at both band ends (their difference is linear),
+or two circles equal to that roundoff, are one coordinate, the first kept. This
+is evaluation roundoff of a single plane (aa5's preparation wedge on the
+adjoining leg's miter plane, STR-1's wedges: 1 to 2 ulps), never the tolerance:
+5e-7 or 1e-9 apart is still refused.
 
 The captured Rect Tube now replays its first four tools; STR-1 replays its first
 partial-depth cope. The actual tube miter has an independent dimensional
@@ -358,7 +364,9 @@ area/first-moment integral and 47,027 material probes. Later captured steps are
 checked against Claude's independent Eyeshot mesh references (absolute allowance
 0.001 in^3 for tessellation; see tests/fixtures/parts/*/reference.md). Native
 returned-body acceptance is recorded separately by the GCmaker owner.
-STR-1's next wedge retains an explicit near-coincident-line refusal. Rect Tube's
+STR-1's wedges, once refused as two stored lines, are one plane each (see
+`same_graph`): all six captured steps now replay within 0.001 in^3 of the Eyeshot
+references (final 98.79992 vs 98.80041). Rect Tube's
 fifth, arbitrary side-profile cut uses the local passage below; the whole-body
 chart still cannot represent all three cylinder axes together.
 A pipe hole whose finite bottom crosses the inner wall is independently checked
@@ -471,3 +479,16 @@ in (t, s); area from the closed-form antiderivative of sqrt(s^2 + h'^2) in s (qu
 (tests/normal_end.rs): Bob's end against (Ro^2 - Ri^2) / 2 times the integral of y0 + sqrt(Rc^2 - Ri^2 sin^2 t)
 (1e-9), its face area, the tool's own volume, his top hole after it (one-wall integral, 1e-10), the far end, a turned
 cope, the display mesh within area x chord, op 19 and the neutral round trip, and the named refusals.
+
+## NC1 angle cutters (Claude, 2026-10-31)
+
+Bob's aa5 (L4X4X5/16, NC1): GCmaker's EndCondition_NC1VM rules for Angle stock are reproduced by the GC Kernel
+view's recipe (C#): an As Imported AK region crossing the root fillet's band (Through Fillet, automatic or set) is
+drilled the fillet's radius past the leg, with the fixed 0.001 in overshoot; an edge-only preparation is its
+welding wedge (cross-section between the waste overlap and the bevel, DSTV land from the back of the plate, or the
+adjoining leg's source miter plane, swept along the edge). The wedge's bevel and the earlier triangle's face are the
+same plane stored two ways, which the transverse chart now takes as one graph (above). tests/survey_gaps.rs checks
+both cuts against the section's first moment below its top face (every point with y > L + z removed). C-Channel
+NC1 cutters stay refused by name: GCmaker's channel rules (source-aligned end planes, straight-stock extension,
+junction inflation, prepared flanges) are not reproduced, and the transverse chart refuses the first web cut of a
+tapered-flange channel ("an end-cut surface patch is below the admitted partition resolution").
