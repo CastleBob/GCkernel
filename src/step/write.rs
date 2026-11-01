@@ -180,7 +180,7 @@ impl Writer {
                     .join(",")
             )
         };
-        self.add(format!("(BOUNDED_SURFACE() B_SPLINE_SURFACE(3,3,({}),.UNSPECIFIED.,.F.,.F.,.U.) B_SPLINE_SURFACE_WITH_KNOTS({},{},{},{},.PIECEWISE_BEZIER_KNOTS.) GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_SURFACE(({})) REPRESENTATION_ITEM('') SURFACE())",points.join(","),mult(nu),mult(nv),reals(&s.u),reals(&s.v),weights.join(",")))
+        self.add(format!("(BOUNDED_SURFACE() B_SPLINE_SURFACE(3,3,({}),.UNSPECIFIED.,.U.,.U.,.U.) B_SPLINE_SURFACE_WITH_KNOTS({},{},{},{},.PIECEWISE_BEZIER_KNOTS.) GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_SURFACE(({})) REPRESENTATION_ITEM('') SURFACE())",points.join(","),mult(nu),mult(nv),reals(&s.u),reals(&s.v),weights.join(",")))
     }
     fn surface(&mut self, s: &Surface) -> Result<usize> {
         let (kind, p, a, x, values) = match *s {
@@ -215,21 +215,81 @@ impl Writer {
         self.add(format!("{kind}('',#{axis}{tail})"))
     }
     fn body(&mut self, name: &str, body: &Body) -> Result<usize> {
+        let surfaces = body
+            .faces
+            .iter()
+            .map(|f| self.surface(&f.surface))
+            .collect::<Result<Vec<_>>>()?;
+        let mut associations: Vec<Vec<usize>> = vec![Vec::new(); body.edges.len()];
+        let mut owners: Vec<Vec<usize>> = vec![Vec::new(); body.edges.len()];
+        let mut explicit = vec![false; body.edges.len()];
+        for (fi, face) in body.faces.iter().enumerate() {
+            for (li, lp) in face.loops.iter().enumerate() {
+                for (ei, &(edge, forward)) in lp.iter().enumerate() {
+                    let pcurves = match &face.surface {
+                        Surface::Spline { data } => data.pcurves.as_ref(),
+                        _ => None,
+                    };
+                    let association = if let Some(uv) = pcurves {
+                        explicit[edge] = true;
+                        let c = if forward {
+                            uv[li][ei].clone()
+                        } else {
+                            uv[li][ei].reversed()
+                        };
+                        let (p, w) = crate::spline_curve::controls(&c)?;
+                        let points = p
+                            .iter()
+                            .map(|p| {
+                                self.add(format!("CARTESIAN_POINT('',{})", reals(&[p.x, p.y])))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        let curve=self.add(format!("(BOUNDED_CURVE() B_SPLINE_CURVE(3,{},.UNSPECIFIED.,.F.,.U.) B_SPLINE_CURVE_WITH_KNOTS((4,4),(0.,1.),.PIECEWISE_BEZIER_KNOTS.) CURVE() GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE({}) REPRESENTATION_ITEM(''))",refs(&points),reals(&w)))?;
+                        let context = self.add(
+                            "(GEOMETRIC_REPRESENTATION_CONTEXT(2) REPRESENTATION_CONTEXT('',''))"
+                                .into(),
+                        )?;
+                        let rep = self.add(format!(
+                            "DEFINITIONAL_REPRESENTATION('',(#{curve}),#{context})"
+                        ))?;
+                        self.add(format!("PCURVE('',#{},#{rep})", surfaces[fi]))?
+                    } else {
+                        surfaces[fi]
+                    };
+                    associations[edge].push(association);
+                    owners[edge].push(fi);
+                }
+            }
+        }
         let mut vertices = vec![];
         for &p in &body.vertices {
             let p = self.point(p)?;
             vertices.push(self.add(format!("VERTEX_POINT('',#{p})"))?);
         }
         let mut edges = vec![];
-        for e in &body.edges {
-            let c = self.curve(&e.curve)?;
+        for (i, e) in body.edges.iter().enumerate() {
+            let mut c = self.curve(&e.curve)?;
+            if explicit[i] {
+                if associations[i].len() != 2 {
+                    return invalid("pcurve edge must have two incident occurrences");
+                }
+                let kind = if owners[i][0] == owners[i][1] {
+                    "SEAM_CURVE"
+                } else {
+                    "SURFACE_CURVE"
+                };
+                c = self.add(format!(
+                    "{kind}('',#{c},{},.CURVE_3D.)",
+                    refs(&associations[i])
+                ))?;
+            }
             edges.push(self.add(format!(
                 "EDGE_CURVE('',#{},#{},#{c},.T.)",
                 vertices[e.start], vertices[e.end]
             ))?);
         }
         let mut faces = vec![];
-        for f in &body.faces {
+        for (fi, f) in body.faces.iter().enumerate() {
             let mut bounds = vec![];
             for (i, lp) in f.loops.iter().enumerate() {
                 let mut oriented = vec![];
@@ -250,7 +310,7 @@ impl Writer {
                     }
                 ))?);
             }
-            let surface = self.surface(&f.surface)?;
+            let surface = surfaces[fi];
             faces.push(self.add(format!(
                 "ADVANCED_FACE('',{},#{surface},{})",
                 refs(&bounds),

@@ -358,4 +358,40 @@ numerical root uncertainty cannot silently select the wrong patch. Green integra
 also splits its inner integral at U knots. Existing topology/display budgets and
 strict admission remain. A 4-by-5 patch roof and circular-hole face retain analytic
 mass, bounded display and STEP round trips; an interior support defect is refused.
-Focused curved/polygonal trim checks: 7/7. General non-graph pcurves remain in progress.
+Focused curved/polygonal trim checks: 7/7. The supported explicit non-graph pcurve domain is documented below.
+
+## Explicit pcurves, periodic supports and occurrences
+
+Surface tag 9 extends tag 8 with oriented UV loops (2048 total curves). Each
+line/cubic physical edge has one bounded degree-1..3 polynomial/rational pcurve.
+Independent denominators are retained in degree-21 composition bounds. UV topology,
+mass, transforms, display and STEP export use the same domain. Missing, contradictory
+or ambiguous correspondence fails. SURFACE_CURVE/SEAM_CURVE and 2D definitional
+representations are reconciled; analytic pcurves, differing span partitions and
+unbounded pcurve lines remain unsupported. No nearest-point recovery occurs.
+
+Unclamped degree-1..3 tensor nets are clamped exactly over U[degree]..U[controlCount]
+and similarly in V, preserving original pcurve coordinates. Declared closed seams
+require whole-boundary agreement. Distinct seam occurrences select a unique closed
+UV chain within 1024 candidates. Tests include source basis, exact volume and display.
+Display bounds actual UV triangles with degree-seven triangular Bernstein
+coefficients after patch clipping, and checks normals before accepting triangles.
+Straight natural boundaries with nonlinear spline speed add canonical shared
+display samples; exact source edges remain unchanged.
+
+`step::assembly::read` and op-16 schema 2 explicitly request occurrences, each with
+root/relationship path, representation ID, rigid placement and detached world body
+in inches. Definition IDs may repeat across paths. NEXT_ASSEMBLY_USAGE_OCCURRENCE,
+context-dependent relationships, item-defined axis placements and explicit identity
+shape relationships are supported. Units apply per representation before placements
+compose. Cycles, orphan usages, contradictory graphs, missing frames, mapped items,
+scale/shear/mirror operators and unknown geometry fail atomically. Limits: 64 path
+levels, 10000 representation visits, 1024 solid occurrences. Schema 1 remains an
+explicit standalone-only request, without mode-changing retries.
+Schema-2 reply: `[2,count,(pathCount,pathIds...,representationId,rotation9,
+translation3,recordLength,schema1BodyRecord)...]`.
+
+Unlabelled FACE_BOUND supports require one bound or one positive planar loop under
+the face sense; holes retain negative winding. Ambiguous outer-loop domains refuse.
+The original multipart sample now reaches face #12064 and refuses its ambiguous
+outer-loop domain. Placement support alone does not establish that file's admission.

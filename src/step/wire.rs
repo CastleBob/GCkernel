@@ -43,7 +43,7 @@ pub fn write_op(data: &[f64], tolerance: f64) -> Result<Vec<f64>> {
     Ok(out)
 }
 pub fn read_op(data: &[f64], tolerance: f64) -> Result<Vec<f64>> {
-    if data.len() < 2 || data[0] != 1.0 {
+    if data.len() < 2 || (data[0] != 1.0 && data[0] != 2.0) {
         return invalid("invalid STEP request version/envelope");
     }
     let n = data[1];
@@ -60,6 +60,28 @@ pub fn read_op(data: &[f64], tolerance: f64) -> Result<Vec<f64>> {
     }
     let path = String::from_utf8(bytes)
         .map_err(|_| KernelError::InvalidInput("STEP path is not UTF-8".into()))?;
+    if data[0] == 2. {
+        let instances = super::assembly::read_file(std::path::Path::new(&path), tolerance)?;
+        let mut out = vec![2., instances.len() as f64];
+        for instance in instances {
+            out.push(instance.path.len() as f64);
+            out.extend(instance.path.iter().map(|&id| id as f64));
+            out.push(instance.representation as f64);
+            let (matrix, t) = instance.placement.rows();
+            out.extend(matrix.into_iter().flatten());
+            out.extend([t.x, t.y, t.z]);
+            let item = instance.item;
+            let mut record = vec![item.entity_id as f64, item.name.len() as f64];
+            record.extend(item.name.bytes().map(f64::from));
+            record.extend([item.source_length_to_inches, item.volume]);
+            let body = neutral::write_body(&item.body);
+            record.push(body.len() as f64);
+            record.extend(body);
+            out.push(record.len() as f64);
+            out.extend(record);
+        }
+        return Ok(out);
+    }
     let imported = super::read_file(std::path::Path::new(&path), tolerance)?;
     let mut out = vec![1.0, imported.bodies.len() as f64];
     for item in imported.bodies {

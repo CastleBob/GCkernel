@@ -51,13 +51,16 @@ pub struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     /// Strict: every CylinderPair trim must have a proved positive discriminant.
-    pub fn new(data: &'a [f64]) -> Self { Self { data, at: 0, tolerance: 0.0 } }
+    pub fn new(data: &'a [f64]) -> Self { Self { data, at: 0, tolerance: 0.0,
+        } }
     /// The request's tolerance also admits a CylinderPair trim that ends where its cylinders touch
     /// (`geom::pair_trim_touches`, Bob 2026-10-28).
-    pub fn with_tolerance(data: &'a [f64], tolerance: f64) -> Self { Self { data, at: 0, tolerance } }
+    pub fn with_tolerance(data: &'a [f64], tolerance: f64) -> Self { Self { data, at: 0, tolerance,
+        } }
 
     pub fn next(&mut self) -> Result<f64, KernelError> {
-        let Some(&v) = self.data.get(self.at) else { return invalid("neutral data ended early") };
+        let Some(&v) = self.data.get(self.at) else { return invalid("neutral data ended early");
+        };
         if !v.is_finite() { return invalid(format!("non-finite value at position {}", self.at)); }
         self.at += 1;
         Ok(v)
@@ -120,7 +123,8 @@ impl<'a> Reader<'a> {
                 }
                 Ok(Curve::Arc { c, n, x, r, t0, t1 })
             }
-            t if t == 2.0 => Err(KernelError::Unsupported("B-spline curves are not supported by the GC Kernel yet".into())),
+            t if t == 2.0 => Err(KernelError::Unsupported("B-spline curves are not supported by the GC Kernel yet".into(),
+            )),
             t if t == 3.0 => {
                 let (c, u, v) = (self.point()?, self.point()?, self.point()?);
                 let (t0, t1) = (self.next()?, self.next()?);
@@ -149,9 +153,11 @@ impl<'a> Reader<'a> {
                 // The curve exists, and its two branches stay apart, only where the discriminant is positive (or, within
                 // the tolerance, where the trim ends at a touch).
                 if pair_trim_touches(c, a, x, rho, p, b, r, t0, t1, self.tolerance).is_none() {
-                    return invalid("a cylinder pair's discriminant is not proved positive over its interval");
+                    return invalid("a cylinder pair's discriminant is not proved positive over its interval",
+                    );
                 }
-                Ok(Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 })
+                Ok(Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1,
+                })
             }
             t if t == 5.0 => {
                 let p = [self.point()?, self.point()?, self.point()?, self.point()?];
@@ -188,7 +194,8 @@ impl<'a> Reader<'a> {
                 if r <= 0.0 { return invalid("a cylinder needs a positive radius"); }
                 Ok(Surface::Cylinder { p, a, x, r })
             }
-            t if t == 2.0 => Err(KernelError::Unsupported("extruded (tabulated) surfaces are not supported by the GC Kernel yet".into())),
+            t if t == 2.0 => Err(KernelError::Unsupported("extruded (tabulated) surfaces are not supported by the GC Kernel yet".into(),
+            )),
             t if t == 3.0 => {
                 let p = self.point()?;
                 let (a, u, v) = (self.point()?, self.point()?, self.point()?);
@@ -200,7 +207,8 @@ impl<'a> Reader<'a> {
                     return invalid("an elliptic cylinder's semi-diameters must be finite");
                 }
                 if !(lu > 1e-14 && lv > 1e-14) || u.dot(a).abs() > 1e-9 * lu || v.dot(a).abs() > 1e-9 * lv {
-                    return invalid("an elliptic cylinder needs two semi-diameters across its axis");
+                    return invalid("an elliptic cylinder needs two semi-diameters across its axis",
+                    );
                 }
                 if u.cross(v).dot(a) <= 1e-9 * lu * lv {
                     return invalid("an elliptic cylinder's semi-diameters must be independent and turn about its axis");
@@ -211,7 +219,8 @@ impl<'a> Reader<'a> {
                 let p = self.point()?;
                 let (a, x) = self.frame()?;
                 let (r, k) = (self.next()?, self.next()?);
-                if !(r.is_finite() && k.is_finite()) || r <= 0.0 { return invalid("a cone needs a positive radius at its point and a finite slope"); }
+                if !(r.is_finite() && k.is_finite()) || r <= 0.0 { return invalid("a cone needs a positive radius at its point and a finite slope",
+                    ); }
                 Ok(Surface::Cone { p, a, x, r, k })
             }
             t if t == 5.0 => {
@@ -226,7 +235,8 @@ impl<'a> Reader<'a> {
                 let (a, x) = self.frame()?;
                 let (big, r) = (self.next()?, self.next()?);
                 // Ring, horn or spindle: a face on it is admitted only where its radius from the axis stays positive.
-                if !(r > 0.0 && big > 0.0) { return invalid("a torus needs a positive centre-circle radius and tube radius"); }
+                if !(r > 0.0 && big > 0.0) { return invalid("a torus needs a positive centre-circle radius and tube radius",
+                    ); }
                 Ok(Surface::Torus { c, a, x, big, r })
             }
             t if t == 7.0 => {
@@ -239,16 +249,18 @@ impl<'a> Reader<'a> {
                     if !det.is_finite() || det.abs() <= 1e-12 * (v[2].hypot(v[3]) * v[4].hypot(v[5])).max(1e-300) {
                         return invalid("a revolved ellipse needs independent semi-diameters");
                     }
-                    crate::meridian::Meridian::Ellipse { c: (v[0], v[1]), u: (v[2], v[3]), v: (v[4], v[5]) }
+                    crate::meridian::Meridian::Ellipse { c: (v[0], v[1]), u: (v[2], v[3]), v: (v[4], v[5]),
+                    }
                 } else if kind == 3.0 {
                     let v: Vec<f64> = (0..8).map(|_| self.next()).collect::<Result<_, _>>()?;
-                    crate::meridian::Meridian::Bezier([(v[0], v[1]), (v[2], v[3]), (v[4], v[5]), (v[6], v[7])])
+                    crate::meridian::Meridian::Bezier([(v[0], v[1]), (v[2], v[3]), (v[4], v[5]), (v[6], v[7]),
+                    ])
                 } else {
                     return invalid(format!("unknown meridian kind {kind}"));
                 };
                 Ok(Surface::Revolution { p, a, x, m })
             }
-            t if t == 8.0 => {
+            t if t == 8.0 || t == 9.0 => {
                 let (nu, nv) = (self.count()?, self.count()?);
                 if nu == 0 || nv == 0 || nu > 4096 || nv > 4096 || nu * nv > 4096 {
                     return invalid("invalid spline patch counts");
@@ -263,9 +275,35 @@ impl<'a> Reader<'a> {
                     for x in &mut w { *x = self.next()?; }
                     patches.push(crate::spline_surface::Patch { p, w });
                 }
-                let data = crate::spline_surface::SplineSurface { u, v, patches };
+                let pcurves = if t == 9. {
+                    let n = self.count()?;
+                    if n == 0 || n > 2048 {
+                        return invalid("invalid pcurve loop count");
+                    }
+                    let mut loops = Vec::new();
+                    let mut total = 0;
+                    for _ in 0..n {
+                        let count = self.count()?;
+                        total += count;
+                        if count == 0 || total > 2048 {
+                            return invalid("invalid pcurve edge count");
+                        }
+                        loops.push(
+                            (0..count)
+                                .map(|_| self.curve())
+                                .collect::<Result<Vec<_>, _>>()?,
+                        );
+                    }
+                    Some(loops)
+                } else {
+                    None
+                };
+                let data = crate::spline_surface::SplineSurface { u, v, patches,
+                    pcurves,
+                };
                 data.validate()?;
-                Ok(Surface::Spline { data: Box::new(data) })
+                Ok(Surface::Spline { data: Box::new(data),
+                })
             }
             t => invalid(format!("unknown surface type {t}")),
         }
@@ -286,7 +324,8 @@ impl<'a> Reader<'a> {
         let n = self.direction()?;
         let (low, high) = (self.next()?, self.next()?);
         if high <= low { return invalid("a profile sweep needs low < high"); }
-        Ok(Profile { loops, n, low, high })
+        Ok(Profile { loops, n, low, high,
+        })
     }
 
     pub fn body(&mut self) -> Result<Body, KernelError> {
@@ -313,7 +352,8 @@ impl<'a> Reader<'a> {
                 for _ in 0..segments { lp.push((self.index(edge_count, "edge")?, self.flag()?)); }
                 loops.push(lp);
             }
-            body.faces.push(Face { surface, sense, loops });
+            body.faces.push(Face { surface, sense, loops,
+            });
         }
         Ok(body)
     }
@@ -336,7 +376,8 @@ pub fn put_curve(out: &mut Vec<f64>, c: &Curve) {
         Curve::Conic { c, u, v, t0, t1 } => {
             out.push(3.0); put(out, *c); put(out, *u); put(out, *v); out.extend_from_slice(&[*t0, *t1]);
         }
-        Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1 } => {
+        Curve::CylinderPair { c, a, x, rho, p, b, r, branch, t0, t1,
+        } => {
             out.push(4.0); put(out, *c); put(out, *a); put(out, *x); out.push(*rho);
             put(out, *p); put(out, *b); out.extend_from_slice(&[*r, *branch, *t0, *t1]);
         }
@@ -348,12 +389,23 @@ pub fn put_curve(out: &mut Vec<f64>, c: &Curve) {
 pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
     match s {
         Surface::Spline { data } => {
-            out.extend([8., (data.u.len() - 1) as f64, (data.v.len() - 1) as f64]);
+            out.extend([
+                if data.pcurves.is_some() { 9. } else { 8. }, (data.u.len() - 1) as f64, (data.v.len() - 1) as f64,
+            ]);
             out.extend(&data.u);
             out.extend(&data.v);
             for p in &data.patches {
                 for q in p.p { out.extend([q.x, q.y, q.z]); }
                 out.extend(p.w);
+            }
+            if let Some(loops) = &data.pcurves {
+                out.push(loops.len() as f64);
+                for lp in loops {
+                    out.push(lp.len() as f64);
+                    for c in lp {
+                        put_curve(out, c);
+                    }
+                }
             }
         }
         Surface::Plane { p, n, x } => { out.push(0.0); put(out, *p); put(out, *n); put(out, *x); }
@@ -365,7 +417,9 @@ pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
         Surface::Revolution { p, a, x, m } => {
             out.push(7.0); put(out, *p); put(out, *a); put(out, *x);
             match m {
-                crate::meridian::Meridian::Ellipse { c, u, v } => out.extend_from_slice(&[2.0, c.0, c.1, u.0, u.1, v.0, v.1]),
+                crate::meridian::Meridian::Ellipse { c, u, v } => {
+                    out.extend_from_slice(&[2.0, c.0, c.1, u.0, u.1, v.0, v.1])
+                }
                 crate::meridian::Meridian::Bezier(b) => { out.push(3.0); for q in b { out.extend_from_slice(&[q.0, q.1]); } }
             }
         }
@@ -373,7 +427,8 @@ pub fn put_surface(out: &mut Vec<f64>, s: &Surface) {
 }
 
 pub fn write_body(body: &Body) -> Vec<f64> {
-    let mut out = vec![1.0, body.vertices.len() as f64, body.edges.len() as f64, body.faces.len() as f64];
+    let mut out = vec![1.0, body.vertices.len() as f64, body.edges.len() as f64, body.faces.len() as f64,
+    ];
     for v in &body.vertices { put(&mut out, *v); }
     for e in &body.edges {
         put_curve(&mut out, &e.curve);

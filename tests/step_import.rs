@@ -2,6 +2,104 @@ use gc_kernel::{mass, neutral, protocol, step, tessellate, topology, KernelError
 use std::path::Path;
 const TOL: f64 = 1e-6;
 
+fn assembly_data() -> String {
+    let mut data = box_data(true).replace("('',(#401),#502)", "('',(#401,#700),#502)");
+    let mut inches = units(false, "#700,#701,#702").replace("ADVANCED_BREP_SHAPE_REPRESENTATION", "SHAPE_REPRESENTATION");
+    for id in (500..=506).rev() {
+        inches = inches.replace(&format!("#{id}"), &format!("#{}", id + 1000));
+    }
+    data += &inches;
+    data+="#710=CARTESIAN_POINT('',(0.,0.,0.));#711=CARTESIAN_POINT('',(10.,0.,0.));#712=CARTESIAN_POINT('',(0.,20.,0.));#713=CARTESIAN_POINT('',(0.,0.,30.));#714=DIRECTION('',(0.,1.,0.));#700=AXIS2_PLACEMENT_3D('',#710,$,$);#701=AXIS2_PLACEMENT_3D('',#711,$,$);#702=AXIS2_PLACEMENT_3D('',#712,$,#714);#703=AXIS2_PLACEMENT_3D('',#713,$,$);#1600=SHAPE_REPRESENTATION('Root',(#700,#703),#1502);";
+    data+="#900=APPLICATION_CONTEXT('configuration controlled 3d designs of mechanical parts and assemblies');#901=PRODUCT_CONTEXT('',#900,'mechanical');#902=PRODUCT_DEFINITION_CONTEXT('part definition',#900,'design');";
+    for i in 0..3 {
+        data+=&format!("#{}=PRODUCT('p{i}','p{i}','',(#901));#{}=PRODUCT_DEFINITION_FORMATION('','',#{});#{}=PRODUCT_DEFINITION('design','',#{},#902);#{}=PRODUCT_DEFINITION_SHAPE('','',#{});#{}=SHAPE_DEFINITION_REPRESENTATION(#{},#{});",910+i,920+i,910+i,600+i,920+i,610+i,600+i,620+i,610+i,[506,1506,1600][i as usize]);
+    }
+    for (i, parent, child, rep1, rep2, a, b) in [
+        (0, 601, 600, 506, 1506, 700, 701),
+        (1, 601, 600, 506, 1506, 700, 702),
+        (2, 602, 601, 1506, 1600, 700, 703),
+    ] {
+        data+=&format!("#{}=NEXT_ASSEMBLY_USAGE_OCCURRENCE('i{i}','i{i}','',#{parent},#{child},$);#{}=PRODUCT_DEFINITION_SHAPE('','',#{});#{}=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{},#{});#{}=(REPRESENTATION_RELATIONSHIP('','',#{rep1},#{rep2})REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{})SHAPE_REPRESENTATION_RELATIONSHIP());#{}=ITEM_DEFINED_TRANSFORMATION('','',#{a},#{b});",800+i,830+i,800+i,840+i,810+i,830+i,810+i,820+i,820+i);
+    }
+    data += "#903=APPLICATION_PROTOCOL_DEFINITION('international standard','config_control_design',1994,#900);#1700=(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT());#1701=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.000001),#500,'distance_accuracy_value','');#1702=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.000001),#1500,'distance_accuracy_value','');#715=DIRECTION('',(0.,0.,1.));#716=DIRECTION('',(1.,0.,0.));";
+    data = data.replace("GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNIT_ASSIGNED_CONTEXT((#500,#501))", "GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#1701))GLOBAL_UNIT_ASSIGNED_CONTEXT((#500,#501,#1700))")
+        .replace("GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNIT_ASSIGNED_CONTEXT((#1500,#1501))", "GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#1702))GLOBAL_UNIT_ASSIGNED_CONTEXT((#1500,#1501,#1700))")
+        .replace("#710,$,$", "#710,#715,#716").replace("#711,$,$", "#711,#715,#716")
+        .replace("#712,$,#714", "#712,#715,#714").replace("#713,$,$", "#713,#715,#716");
+    for i in 0..3 { data = data.replace(&format!("PRODUCT_DEFINITION_FORMATION('','',#{})",910+i), &format!("PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE('','',#{},.NOT_KNOWN.)",910+i)); }
+    data
+}
+#[test]
+fn nested_assembly_instances_preserve_units_placement_and_source_identity() {
+    let text = file(&assembly_data()).replace(";#", ";\n#").replace(";ENDSEC", ";\nENDSEC");
+    let instances = step::assembly::read(text.as_bytes(), TOL).unwrap();
+    assert_eq!(instances.len(), 2);
+    for (item, expected, path) in [
+        (&instances[0], (10., 0., 30.), vec![1600, 802, 800]),
+        (&instances[1], (0., 20., 30.), vec![1600, 802, 801]),
+    ] {
+        assert_eq!(item.path, path);
+        assert_eq!(item.item.entity_id, 401);
+        assert_eq!(item.representation, 506);
+        assert!((item.item.volume - 24.).abs() < 1e-9);
+        assert!((item.item.source_length_to_inches - 1. / 25.4).abs() < 1e-14);
+        assert!(item
+            .item
+            .body
+            .vertices
+            .iter()
+            .any(|p| p.distance(gc_kernel::geom::Vec3::new(
+                expected.0, expected.1, expected.2
+            )) < 1e-12));
+        let origin = item
+            .placement
+            .point(gc_kernel::frame::Point3::new(0., 0., 0.))
+            .to_vec3();
+        assert!(
+            origin.distance(gc_kernel::geom::Vec3::new(
+                expected.0, expected.1, expected.2
+            )) < 1e-12
+        );
+        topology::check(&item.item.body, TOL).unwrap();
+    }
+    // Schema-1 callers still explicitly request standalone solids.
+    assert!(step::read(text.as_bytes(), TOL).is_err());
+    if let Ok(dir) = std::env::var("GC_STEP_EXPORT_FIXTURES") {
+        std::fs::write(
+            std::path::Path::new(&dir).join("NestedMixedUnitAssembly.step"),
+            text,
+        )
+        .unwrap();
+    }
+}
+#[test]
+fn assembly_refuses_cycles_missing_placements_and_contradictory_relationships() {
+    let data = assembly_data();
+    for (from, to) in [
+        ("#602,#601,$", "#600,#601,$"),
+        ("#700,#703)", "#700,#999999)"),
+        ("#506,#1506)", "#506,#1600)"),
+        ("#600);#620", "#999999);#620"),
+    ] {
+        let broken = data.replace(from, to);
+        assert_ne!(broken, data);
+        assert!(step::assembly::read(file(&broken).as_bytes(), TOL).is_err());
+    }
+}
+
+#[test]
+fn unlabelled_single_planar_bounds_are_unambiguous_and_still_checked() {
+    let data = box_data(false).replace("FACE_OUTER_BOUND", "FACE_BOUND");
+    let imported = step::read(file(&data).as_bytes(), TOL).unwrap();
+    assert!((imported.bodies[0].volume - 24.).abs() < 1e-12);
+    let broken = data.replace(
+        "#205=FACE_BOUND('',#204,.T.)",
+        "#205=FACE_BOUND('',#204,.F.)",
+    );
+    assert_ne!(broken, data);
+    assert!(step::read(file(&broken).as_bytes(), TOL).is_err());
+}
+
 // Independently authored 2 x 3 x 4 box; source graph is intentionally unrelated
 // to the importer implementation. Dimensions/volume are an analytic oracle.
 fn box_data(mm: bool) -> String {

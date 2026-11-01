@@ -114,6 +114,7 @@ fn solid(hole: bool, multispan: bool) -> Body {
     };
     let data = if multispan {
         SplineSurface {
+            pcurves: None,
             u: vec![0., 0.5, 1.],
             v: vec![0., 0.4, 1.],
             patches: vec![
@@ -125,6 +126,7 @@ fn solid(hole: bool, multispan: bool) -> Body {
         }
     } else {
         SplineSurface {
+            pcurves: None,
             u: vec![0., 1.],
             v: vec![0., 1.],
             patches: vec![patch],

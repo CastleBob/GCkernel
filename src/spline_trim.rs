@@ -153,17 +153,28 @@ fn inside(p: [f64; 2], lp: &[[f64; 2]]) -> bool {
 /// coordinates. The numerator of the difference has degree 21. Its convex hull
 /// bounds the WHOLE edge, including excursions between evaluation points.
 fn residual(s: &SplineSurface, c: &Chart, curve: &Curve, i: usize, j: usize) -> Result<f64> {
+    residual_uv(s, curve, &project(c, curve)?, i, j)
+}
+fn residual_uv(
+    s: &SplineSurface,
+    curve: &Curve,
+    uv_curve: &Curve,
+    i: usize,
+    j: usize,
+) -> Result<f64> {
     let (p, mut w) = crate::spline_curve::controls(curve)?;
     let max = w.iter().copied().fold(0., f64::max);
     w = w.map(|x| x / max);
-    let uv = p.map(|p| c.point(p));
+    let (uv, mut h) = crate::spline_curve::controls(uv_curve)?;
+    let hm = h.iter().copied().fold(0., f64::max);
+    h = h.map(|x| x / hm);
     let u: Vec<_> = (0..4)
-        .map(|k| w[k] * (uv[k][0] - s.u[i]) / (s.u[i + 1] - s.u[i]))
+        .map(|k| h[k] * (uv[k].x - s.u[i]) / (s.u[i + 1] - s.u[i]))
         .collect();
     let v: Vec<_> = (0..4)
-        .map(|k| w[k] * (uv[k][1] - s.v[j]) / (s.v[j + 1] - s.v[j]))
+        .map(|k| h[k] * (uv[k].y - s.v[j]) / (s.v[j + 1] - s.v[j]))
         .collect();
-    let (bu, bv) = (cubic_basis(&u, &w), cubic_basis(&v, &w));
+    let (bu, bv) = (cubic_basis(&u, &h), cubic_basis(&v, &h));
     let patch = &s.patches[i * (s.v.len() - 1) + j];
     let pwmax = patch.w.iter().copied().fold(0., f64::max);
     let mut d = vec![0.; 19];
@@ -536,7 +547,7 @@ fn knot_breaks(s: &SplineSurface, uv: &Curve) -> Result<Vec<f64>> {
 }
 fn support(
     s: &SplineSurface,
-    c: &Chart,
+    uv_curve: &Curve,
     curve: &Curve,
     tol: f64,
     depth: usize,
@@ -548,7 +559,9 @@ fn support(
     }
     let (p, w) = crate::spline_curve::controls(curve)?;
     crate::rational::validate(p, w)?;
-    let uv = p.map(|p| c.point(p));
+    let (uvp, uvw) = crate::spline_curve::controls(uv_curve)?;
+    crate::rational::validate(uvp, uvw)?;
+    let uv = uvp.map(|p| [p.x, p.y]);
     let inside = uv.iter().flatten().all(|&x| x >= -1e-12 && x <= 1. + 1e-12);
     let lo: [f64; 2] =
         std::array::from_fn(|k| uv.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min));
@@ -571,7 +584,7 @@ fn support(
                 bound = f64::INFINITY;
                 break;
             }
-            bound = bound.max(residual(s, c, curve, i, j)?);
+            bound = bound.max(residual_uv(s, curve, uv_curve, i, j)?);
         }
         if touched > 4 {
             break;
@@ -586,8 +599,8 @@ fn support(
     if depth >= 24 {
         return Err(KernelError::Unsupported(format!("curved spline support remains uncertified at depth 24: bound {bound:.9} inches, limit {tol:.9}, UV hull inside domain: {inside}")));
     }
-    for part in split(curve)? {
-        support(s, c, &part, tol, depth + 1, visits)?;
+    for (part, uv) in split(curve)?.iter().zip(split(uv_curve)?) {
+        support(s, &uv, part, tol, depth + 1, visits)?;
     }
     Ok(())
 }
@@ -732,18 +745,20 @@ fn contains_curve_loop(p: Vec3, leaves: &[Leaf]) -> Result<bool> {
 }
 pub(crate) fn domain(
     s: &SplineSurface,
-    c: &Chart,
+    c: Option<&Chart>,
     body: &Body,
     face: &Face,
     tol: f64,
 ) -> Result<Domain> {
-    if face
-        .loops
-        .iter()
-        .flatten()
-        .all(|&(e, _)| polygonal(c, &body.edges[e].curve))
+    if s.pcurves.is_none()
+        && c.is_some()
+        && face
+            .loops
+            .iter()
+            .flatten()
+            .all(|&(e, _)| polygonal(c.unwrap(), &body.edges[e].curve))
     {
-        return polygon_domain(s, c, body, face, tol).map(Domain::Polygon);
+        return polygon_domain(s, c.unwrap(), body, face, tol).map(Domain::Polygon);
     }
     if face.loops.is_empty() || face.loops.iter().map(Vec::len).sum::<usize>() > 2048 {
         return reject("invalid curved spline trim loop count");
@@ -751,24 +766,42 @@ pub(crate) fn domain(
     let mut curves = vec![];
     let mut flat: Vec<Vec<Leaf>> = vec![];
     let mut support_visits = 0;
-    for lp in &face.loops {
+    if let Some(uv) = &s.pcurves {
+        if uv.len() != face.loops.len()
+            || uv.iter().zip(&face.loops).any(|(a, b)| a.len() != b.len())
+        {
+            return reject("pcurves do not correspond to the face loops");
+        }
+    }
+    for (li, lp) in face.loops.iter().enumerate() {
         let mut loop_curves = vec![];
         let mut leaves = vec![];
-        for &(e, fwd) in lp {
+        for (ei, &(e, fwd)) in lp.iter().enumerate() {
             let edge = if fwd {
                 body.edges[e].curve.clone()
             } else {
                 body.edges[e].curve.reversed()
             };
-            for span in spans(&edge)? {
-                let uv = project(c, &span)?;
+            let paired = if let Some(uv) = &s.pcurves {
+                crate::spline_curve::controls(&edge)?;
+                vec![(edge, uv[li][ei].clone())]
+            } else {
+                let Some(c) = c else {
+                    return reject("spline trim has no UV representation");
+                };
+                spans(&edge)?
+                    .into_iter()
+                    .map(|span| Ok((span.clone(), project(c, &span)?)))
+                    .collect::<Result<Vec<_>>>()?
+            };
+            for (span, uv) in paired {
                 let cuts = knot_breaks(s, &uv)?;
                 for interval in cuts.windows(2) {
                     let span = crate::spline_curve::piece(&span, interval[0], interval[1])?;
-                    support(s, c, &span, tol, 0, &mut support_visits).map_err(|error| {
+                    let uv = crate::spline_curve::piece(&uv, interval[0], interval[1])?;
+                    support(s, &uv, &span, tol, 0, &mut support_visits).map_err(|error| {
                         KernelError::Unsupported(format!("spline trim edge {e}: {error}"))
                     })?;
-                    let uv = project(c, &span)?;
                     flatten(&uv, &mut leaves, 0)?;
                     loop_curves.push(uv);
                 }

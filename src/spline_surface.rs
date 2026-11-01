@@ -19,6 +19,9 @@ pub struct SplineSurface {
     pub u: Vec<f64>,
     pub v: Vec<f64>,
     pub patches: Vec<Patch>,
+    /// Oriented normalized UV curves, one per oriented face-loop edge.
+    /// None uses the separately certified chart/natural-domain representation.
+    pub pcurves: Option<Vec<Vec<Curve>>>,
 }
 fn basis(t: f64) -> [f64; 4] {
     let s = 1. - t;
@@ -172,6 +175,22 @@ impl I {
 }
 impl SplineSurface {
     pub fn validate(&self) -> Result<()> {
+        if let Some(loops) = &self.pcurves {
+            if loops.is_empty()
+                || loops.len() > 2048
+                || loops.iter().any(Vec::is_empty)
+                || loops.iter().map(Vec::len).sum::<usize>() > 2048
+            {
+                return refuse("invalid explicit spline pcurve counts");
+            }
+            for curve in loops.iter().flatten() {
+                let (p, w) = crate::spline_curve::controls(curve)?;
+                crate::rational::validate(p, w)?;
+                if p.iter().any(|p| p.z != 0.) {
+                    return refuse("pcurve must be two dimensional");
+                }
+            }
+        }
         for k in [&self.u, &self.v] {
             if k.len() < 2
                 || k.len() > 4097
@@ -260,6 +279,7 @@ impl SplineSurface {
         Self {
             u: self.u.clone(),
             v: self.v.clone(),
+            pcurves: self.pcurves.clone(),
             patches: self
                 .patches
                 .iter()
@@ -299,6 +319,58 @@ impl SplineSurface {
         }
         out
     }
+    /// A geometrically straight boundary can have nonlinear spline speed.
+    /// Shared display samples must also resolve that parameterization, because
+    /// triangle certificates compare corresponding UV/physical positions.
+    pub(crate) fn straight_boundary_samples(
+        &self,
+        a: Vec3,
+        b: Vec3,
+        chord: f64,
+    ) -> Result<Vec<f64>> {
+        let d = b.sub(a);
+        let len = d.dot(d);
+        let mut out = Vec::new();
+        let mut visits = 0;
+        for (curve, _, _) in self.boundary() {
+            let (p, _) = crate::spline_curve::controls(&curve)?;
+            if p.iter()
+                .any(|p| p.distance(a.add(d.scale(p.sub(a).dot(d) / len))) > 1e-9)
+            {
+                continue;
+            }
+            let mut pending = vec![(curve, 0usize)];
+            while let Some((curve, depth)) = pending.pop() {
+                visits += 1;
+                if visits > 32768 {
+                    return refuse("straight spline display boundary exceeds its budget");
+                }
+                let line = Curve::Line {
+                    a: curve.start(),
+                    b: curve.end(),
+                };
+                if crate::spline_curve::difference(&curve, &line)? <= chord / 4. {
+                    for q in [curve.start(), curve.end()] {
+                        let t = q.sub(a).dot(d) / len;
+                        // Preserve the canonical endpoints rather than inserting
+                        // their rounded projections as almost-coincident points.
+                        if t > 64. * f64::EPSILON && t < 1. - 64. * f64::EPSILON {
+                            out.push(t);
+                        }
+                    }
+                } else {
+                    if depth >= 24 {
+                        return refuse(
+                            "straight spline boundary parameterization remains uncertified",
+                        );
+                    }
+                    pending.push((crate::spline_curve::piece(&curve, 0., 0.5)?, depth + 1));
+                    pending.push((crate::spline_curve::piece(&curve, 0.5, 1.)?, depth + 1));
+                }
+            }
+        }
+        Ok(out)
+    }
     pub fn boundary_uv(&self, q: Vec3, tol: f64) -> Result<[f64; 2]> {
         let mut values = vec![];
         for (c, a, b) in self.boundary() {
@@ -318,8 +390,12 @@ impl SplineSurface {
         Ok(values[0])
     }
     pub fn check_face(&self, body: &Body, face: &Face, tol: f64) -> Result<()> {
+        if self.pcurves.is_some() {
+            crate::spline_trim::domain(self, None, body, face, tol)?;
+            return Ok(());
+        }
         if let Some(chart) = crate::spline_trim::chart(self) {
-            crate::spline_trim::domain(self, &chart, body, face, tol)?;
+            crate::spline_trim::domain(self, Some(&chart), body, face, tol)?;
             return Ok(());
         }
         if face.loops.len() != 1 {
@@ -476,8 +552,9 @@ impl SplineSurface {
         sign: f64,
         size: f64,
     ) -> Result<(f64, f64)> {
-        if let Some(chart) = crate::spline_trim::chart(self) {
-            let loops = crate::spline_trim::domain(self, &chart, body, face, tol)?;
+        if self.pcurves.is_some() || crate::spline_trim::chart(self).is_some() {
+            let chart = crate::spline_trim::chart(self);
+            let loops = crate::spline_trim::domain(self, chart.as_ref(), body, face, tol)?;
             crate::spline_trim::measure(self, &loops, shift, sign, size)
         } else {
             self.measure(shift, sign, size)
@@ -487,70 +564,136 @@ impl SplineSurface {
     /// entire UV bounding rectangle. Q - W L has tensor Bernstein degree (4,4).
     /// Its positive denominator is at least the least restricted weight.
     fn triangle_bound(&self, t: [[f64; 2]; 3], p: [Vec3; 3]) -> f64 {
+        // Restrict each tensor patch to its intersection with the triangle.
+        // Triangular Bernstein coefficients bound the actual triangle, avoiding
+        // the unbounded affine extrapolation of a skinny triangle's rectangle.
+        fn indices(n: usize) -> Vec<[usize; 3]> {
+            (0..=n)
+                .flat_map(|i| (0..=n - i).map(move |j| [i, j, n - i - j]))
+                .collect()
+        }
+        fn multinomial(a: [usize; 3]) -> f64 {
+            let factorial = |n: usize| (1..=n).product::<usize>() as f64;
+            factorial(a.iter().sum()) / (factorial(a[0]) * factorial(a[1]) * factorial(a[2]))
+        }
+        fn multiply(a: &[f64], n: usize, b: &[f64], m: usize) -> Vec<f64> {
+            let ids = indices(n + m);
+            let mut out = vec![0.; ids.len()];
+            for (i, x) in indices(n).into_iter().enumerate() {
+                for (j, y) in indices(m).into_iter().enumerate() {
+                    let z = [x[0] + y[0], x[1] + y[1], x[2] + y[2]];
+                    let k = z[0] * (n + m + 1) - z[0] * z[0].saturating_sub(1) / 2 + z[1];
+                    out[k] += a[i] * b[j] * multinomial(x) * multinomial(y) / multinomial(z);
+                }
+            }
+            out
+        }
+        fn cubic(a: [f64; 3]) -> [Vec<f64>; 4] {
+            let b = a.map(|x| 1. - x);
+            std::array::from_fn(|i| {
+                let mut p = vec![[1., 3., 3., 1.][i]];
+                for k in 0..3 {
+                    p = multiply(&p, k, if k < i { &a } else { &b }, 1);
+                }
+                p
+            })
+        }
         let [a, b, c] = t;
         let det = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-        if det == 0. {
+        if det.abs() < 1e-30 {
             return f64::INFINITY;
         }
-        let linear = |u: f64, v: f64| {
-            let s = ((u - a[0]) * (c[1] - a[1]) - (v - a[1]) * (c[0] - a[0])) / det;
-            let t = ((b[0] - a[0]) * (v - a[1]) - (b[1] - a[1]) * (u - a[0])) / det;
-            p[1].sub(p[0]).scale(s).add(p[2].sub(p[0]).scale(t))
+        let linear = |q: [f64; 2]| {
+            let x = ((q[0] - a[0]) * (c[1] - a[1]) - (q[1] - a[1]) * (c[0] - a[0])) / det;
+            let y = ((b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0])) / det;
+            p[1].sub(p[0]).scale(x).add(p[2].sub(p[0]).scale(y))
         };
-        let lo = [
-            t.iter().map(|p| p[0]).fold(1., f64::min),
-            t.iter().map(|p| p[1]).fold(1., f64::min),
-        ];
-        let hi = [
-            t.iter().map(|p| p[0]).fold(0., f64::max),
-            t.iter().map(|p| p[1]).fold(0., f64::max),
-        ];
         let mut bound: f64 = 0.;
-        let bin3 = [1., 3., 3., 1.];
-        let bin4 = [1., 4., 6., 4., 1.];
         for (i, u) in self.u.windows(2).enumerate() {
             for (j, v) in self.v.windows(2).enumerate() {
-                let (a, b, c, d) = (
-                    lo[0].max(u[0]),
-                    hi[0].min(u[1]),
-                    lo[1].max(v[0]),
-                    hi[1].min(v[1]),
-                );
-                if a >= b || c >= d {
+                let mut polygon = t.to_vec();
+                for (axis, value, lower) in [
+                    (0, u[0], true),
+                    (0, u[1], false),
+                    (1, v[0], true),
+                    (1, v[1], false),
+                ] {
+                    let mut out = Vec::new();
+                    for k in 0..polygon.len() {
+                        let a = polygon[k];
+                        let b = polygon[(k + 1) % polygon.len()];
+                        let inside = |p: [f64; 2]| {
+                            if lower {
+                                p[axis] >= value
+                            } else {
+                                p[axis] <= value
+                            }
+                        };
+                        if inside(a) {
+                            out.push(a);
+                        }
+                        if inside(a) != inside(b) {
+                            let f = (value - a[axis]) / (b[axis] - a[axis]);
+                            let mut q = [a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1])];
+                            q[axis] = value;
+                            out.push(q);
+                        }
+                    }
+                    polygon = out;
+                }
+                if polygon.len() < 3 {
                     continue;
                 }
-                let patch = self.patches[i * (self.v.len() - 1) + j].piece(
-                    (a - u[0]) / (u[1] - u[0]),
-                    (b - u[0]) / (u[1] - u[0]),
-                    (c - v[0]) / (v[1] - v[0]),
-                    (d - v[0]) / (v[1] - v[0]),
-                );
-                let l = [linear(a, c), linear(a, d), linear(b, c), linear(b, d)];
-                let max = patch.w.iter().copied().fold(0., f64::max);
-                let w = patch.w.map(|w| w / max);
-                let mut local: f64 = 0.;
-                for k in 0usize..5 {
-                    for n in 0usize..5 {
-                        let mut q = Vec3::new(0., 0., 0.);
-                        for x in k.saturating_sub(1)..=k.min(3) {
-                            for y in n.saturating_sub(1)..=n.min(3) {
-                                let factor = bin3[x] * bin3[y] / (bin4[k] * bin4[n]);
-                                q = q.add(
-                                    patch.p[x * 4 + y]
-                                        .sub(p[0])
-                                        .sub(l[(k - x) * 2 + n - y])
-                                        .scale(w[x * 4 + y] * factor),
-                                );
+                let patch = &self.patches[i * (self.v.len() - 1) + j];
+                let wm = patch.w.iter().copied().fold(0., f64::max);
+                for k in 1..polygon.len() - 1 {
+                    let tri = [polygon[0], polygon[k], polygon[k + 1]];
+                    // Degree-one order is barycentric vertex 2, 1, 0.
+                    let bu = cubic([tri[2], tri[1], tri[0]].map(|p| (p[0] - u[0]) / (u[1] - u[0])));
+                    let bv = cubic([tri[2], tri[1], tri[0]].map(|p| (p[1] - v[0]) / (v[1] - v[0])));
+                    let mut weight = vec![0.; 28];
+                    let mut q = [vec![0.; 28], vec![0.; 28], vec![0.; 28]];
+                    for x in 0..4 {
+                        for y in 0..4 {
+                            let coeff = multiply(&bu[x], 3, &bv[y], 3);
+                            let d = patch.p[x * 4 + y].sub(p[0]);
+                            for n in 0..28 {
+                                let h = coeff[n] * patch.w[x * 4 + y] / wm;
+                                weight[n] += h;
+                                for axis in 0..3 {
+                                    q[axis][n] += [d.x, d.y, d.z][axis] * h;
+                                }
                             }
                         }
-                        local = local.max(q.length());
                     }
+                    let least = weight.iter().copied().fold(f64::INFINITY, f64::min);
+                    if least <= 0. {
+                        return f64::INFINITY;
+                    }
+                    let l = [linear(tri[2]), linear(tri[1]), linear(tri[0])];
+                    let mut residual = vec![[0.; 3]; 36];
+                    for axis in 0..3 {
+                        let qs = multiply(&q[axis], 6, &[1.; 3], 1);
+                        let ls = multiply(&weight, 6, &l.map(|p| [p.x, p.y, p.z][axis]), 1);
+                        for n in 0..36 {
+                            residual[n][axis] = qs[n] - ls[n];
+                        }
+                    }
+                    let round = 8192.
+                        * f64::EPSILON
+                        * patch.p.iter().map(|q| q.distance(p[0])).fold(1., f64::max);
+                    bound = bound.max(
+                        (residual
+                            .iter()
+                            .map(|q| q[0].hypot(q[1]).hypot(q[2]))
+                            .fold(0., f64::max)
+                            + round)
+                            / least,
+                    );
                 }
-                bound = bound.max(local / w.iter().copied().fold(1., f64::min));
             }
         }
-        let round = 512. * f64::EPSILON * p.iter().map(|q| q.length()).fold(1., f64::max);
-        bound + round
+        bound
     }
     /// Refine only internal edges, splitting both incident triangles together.
     /// Canonical body-edge points are retained verbatim, so adjacent faces share
@@ -561,9 +704,22 @@ impl SplineSurface {
         loops: &[Vec<usize>],
         sign: f64,
         chord: f64,
+        explicit_uv: Option<Vec<[f64; 2]>>,
     ) -> Result<(Vec<Vec3>, Vec<[usize; 3]>, Vec<Vec3>)> {
         let n = points.len();
-        let (mut uv, mut tris) = if let Some(chart) = crate::spline_trim::chart(self) {
+        let (mut uv, mut tris) = if let Some(uv) = explicit_uv {
+            if uv.len() != points.len() {
+                return refuse("pcurve display point count mismatch");
+            }
+            let polygons = loops
+                .iter()
+                .map(|lp| lp.iter().map(|&i| uv[i]).collect())
+                .collect::<Vec<_>>();
+            crate::spline_trim::polygon_checks(&polygons, sign)?;
+            let chart_points = uv.iter().map(|p| [p[0], p[1] * sign]).collect::<Vec<_>>();
+            let tris = crate::tessellate::triangulate(&chart_points, loops, true)?;
+            (uv, tris)
+        } else if let Some(chart) = crate::spline_trim::chart(self) {
             let mut uv: Vec<_> = points.iter().map(|&p| chart.point(p)).collect();
             if loops.len() == 1
                 && uv
@@ -610,12 +766,23 @@ impl SplineSurface {
             let tri = tris[at];
             let param = tri.map(|i| uv[i]);
             let world = tri.map(|i| points[i]);
-            if self.triangle_bound(param, world) <= chord {
+            let normal_ok = param.iter().all(|p| {
+                let (_, a, b) = self.eval(p[0], p[1]);
+                world[1]
+                    .sub(world[0])
+                    .cross(world[2].sub(world[0]))
+                    .dot(a.cross(b).scale(sign))
+                    > 0.
+            });
+            if normal_ok && self.triangle_bound(param, world) <= chord {
                 at += 1;
                 continue;
             }
             if tris.len() > 50000 {
-                return refuse("spline display bound exceeds 50000 triangles");
+                return refuse(&format!(
+                    "spline display bound exceeds 50000 triangles; UV {param:?}, bound {}",
+                    self.triangle_bound(param, world)
+                ));
             }
             let edge = (0..3)
                 .map(|i| (tri[i], tri[(i + 1) % 3]))
@@ -629,7 +796,7 @@ impl SplineSurface {
             };
             let t = [(uv[a][0] + uv[b][0]) / 2., (uv[a][1] + uv[b][1]) / 2.];
             if t == uv[a] || t == uv[b] {
-                return refuse("spline display refinement loses parameter resolution");
+                return refuse(&format!("spline display refinement loses parameter resolution; UV {param:?}, world {world:?}, normal {normal_ok}, bound {}", self.triangle_bound(param, world)));
             }
             let m = points.len();
             uv.push(t);
@@ -659,7 +826,11 @@ impl SplineSurface {
         for t in &tris {
             let [a, b, c] = t.map(|i| points[i]);
             if b.sub(a).cross(c.sub(a)).dot(normals[t[0]]) <= 0. {
-                return refuse("spline display triangle reverses the surface normal");
+                return refuse(&format!(
+                    "spline display triangle reverses the surface normal; UV {:?}, world {:?}",
+                    t.map(|i| uv[i]),
+                    [a, b, c]
+                ));
             }
         }
         Ok((points, tris, normals))
@@ -727,6 +898,7 @@ mod tests {
             }
         }
         let data = SplineSurface {
+            pcurves: None,
             u: vec![0., 1.],
             v: vec![0., 1.],
             patches: vec![p],

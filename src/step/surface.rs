@@ -25,7 +25,7 @@ fn integer(v: &Value) -> Result<usize> {
     }
     Ok(n as usize)
 }
-fn knots(m: &Value, k: &Value, d: usize, n: usize) -> Result<(Vec<usize>, Vec<f64>)> {
+fn knots(m: &Value, k: &Value, d: usize, n: usize) -> Result<(Vec<usize>, Vec<f64>, Vec<f64>)> {
     let m = m.list()?.iter().map(integer).collect::<Result<Vec<_>>>()?;
     let k = k
         .list()?
@@ -39,21 +39,28 @@ fn knots(m: &Value, k: &Value, d: usize, n: usize) -> Result<(Vec<usize>, Vec<f6
     {
         return invalid("inconsistent surface knot vector");
     }
-    if m[0] != d + 1 || *m.last().unwrap() != d + 1 {
-        return unsupported("unclamped/periodic STEP spline surface");
+    if m.iter().any(|&m| m > d + 1) {
+        return invalid("surface knot multiplicity exceeds degree+1");
     }
     if m[1..m.len() - 1].iter().any(|&m| m > d) {
         return invalid("discontinuous spline surface");
     }
-    let span = k.last().unwrap() - k[0];
+    let expanded = k
+        .iter()
+        .zip(&m)
+        .flat_map(|(&k, &m)| std::iter::repeat_n(k, m))
+        .collect::<Vec<_>>();
+    let origin = expanded[d];
+    let span = expanded[n] - origin;
     if !span.is_finite() || span <= 0. {
         return invalid("unusable surface parameter domain");
     }
-    let k: Vec<_> = k.iter().map(|v| (v - k[0]) / span).collect();
+    let k: Vec<_> = k.iter().map(|v| (v - origin) / span).collect();
     if k.windows(2).any(|x| x[0] >= x[1]) {
         return invalid("surface knots lose resolution");
     }
-    Ok((m, k))
+    let active = k.iter().copied().filter(|x| *x >= 0. && *x <= 1.).collect();
+    Ok((m, k, active))
 }
 fn decompose(mut p: Vec<H>, d: usize, m: &[usize], k: &[f64]) -> Vec<[H; 4]> {
     let mut u: Vec<_> = k
@@ -61,9 +68,37 @@ fn decompose(mut p: Vec<H>, d: usize, m: &[usize], k: &[f64]) -> Vec<[H; 4]> {
         .zip(m)
         .flat_map(|(&k, &m)| std::iter::repeat_n(k, m))
         .collect();
-    for j in 1..k.len() - 1 {
-        for _ in m[j]..d {
-            let x = k[j];
+    // Clamp both ends of the ACTIVE domain by exact Boehm insertion, then
+    // discard controls outside that domain. This also handles periodic nets.
+    for x in [0., 1.] {
+        while u.iter().filter(|&&v| v == x).count() < d + 1 {
+            let end = u.partition_point(|&v| v <= x) - 1;
+            let count = u.iter().filter(|&&v| v == x).count();
+            p = (0..=p.len())
+                .map(|i| {
+                    if i <= end - d {
+                        p[i]
+                    } else if i > end - count {
+                        p[i - 1]
+                    } else {
+                        p[i - 1].mix(p[i], (x - u[i]) / (u[i + d] - u[i]))
+                    }
+                })
+                .collect();
+            u.insert(end + 1, x);
+        }
+    }
+    let first = u.iter().position(|&x| x == 0.).unwrap();
+    let last = u.iter().rposition(|&x| x == 1.).unwrap();
+    p = p[first..first + last - first - d].to_vec();
+    u = u[first..=last].to_vec();
+    let k = k
+        .iter()
+        .copied()
+        .filter(|x| *x >= 0. && *x <= 1.)
+        .collect::<Vec<_>>();
+    for &x in &k[1..k.len() - 1] {
+        while u.iter().filter(|&&v| v == x).count() < d {
             let end = u.partition_point(|&v| v <= x) - 1;
             let count = u.iter().filter(|&&v| v == x).count();
             let mut next = Vec::with_capacity(p.len() + 1);
@@ -129,9 +164,9 @@ impl Document {
             if !matches!(v.enumeration()?, "T" | "F" | "U") {
                 return invalid("invalid surface logical attribute");
             }
-            if v.enumeration()? == "T" {
-                return unsupported("closed or self-intersecting spline surface");
-            }
+        }
+        if base[6].enumeration()? == "T" {
+            return unsupported("self-intersecting spline surface");
         }
         if !matches!(
             k[4].enumeration()?,
@@ -183,18 +218,18 @@ impl Document {
             }
             h.q = h.q.scale(h.w);
         }
-        let (um, u) = knots(&k[0], &k[2], du, nu)?;
-        let (vm, v) = knots(&k[1], &k[3], dv, nv)?;
+        let (um, uk, u) = knots(&k[0], &k[2], du, nu)?;
+        let (vm, vk, v) = knots(&k[1], &k[3], dv, nv)?;
         if (u.len() - 1) * (v.len() - 1) > 4096 {
             return unsupported("surface exceeds 4096 patches");
         }
         let columns: Vec<_> = (0..nv)
-            .map(|j| decompose((0..nu).map(|i| grid[i * nv + j]).collect(), du, &um, &u))
+            .map(|j| decompose((0..nu).map(|i| grid[i * nv + j]).collect(), du, &um, &uk))
             .collect();
         let mut patches = Vec::new();
         for a in 0..u.len() - 1 {
             let strips: Vec<_> = (0..4)
-                .map(|i| decompose((0..nv).map(|j| columns[j][a][i]).collect(), dv, &vm, &v))
+                .map(|i| decompose((0..nv).map(|j| columns[j][a][i]).collect(), dv, &vm, &vk))
                 .collect();
             for b in 0..v.len() - 1 {
                 let h: [H; 16] = std::array::from_fn(|n| strips[n / 4][b][n % 4]);
@@ -204,8 +239,59 @@ impl Document {
                 });
             }
         }
-        let data = SplineSurface { u, v, patches };
+        let data = SplineSurface {
+            u,
+            v,
+            patches,
+            pcurves: None,
+        };
         data.validate()?;
+        for axis in 0..2 {
+            if base[4 + axis].enumeration()? != "T" {
+                continue;
+            }
+            let nu = data.u.len() - 1;
+            let nv = data.v.len() - 1;
+            for i in 0..if axis == 0 { nv } else { nu } {
+                let a = &data.patches[if axis == 0 { i } else { i * nv }];
+                let b = &data.patches[if axis == 0 {
+                    (nu - 1) * nv + i
+                } else {
+                    i * nv + nv - 1
+                }];
+                let edge = |p: &Patch, end: bool| crate::geom::Curve::RationalBezier {
+                    p: std::array::from_fn(|k| {
+                        p.p[if axis == 0 {
+                            if end {
+                                12 + k
+                            } else {
+                                k
+                            }
+                        } else {
+                            4 * k + if end { 3 } else { 0 }
+                        }]
+                    }),
+                    w: std::array::from_fn(|k| {
+                        p.w[if axis == 0 {
+                            if end {
+                                12 + k
+                            } else {
+                                k
+                            }
+                        } else {
+                            4 * k + if end { 3 } else { 0 }
+                        }]
+                    }),
+                };
+                if crate::spline_curve::difference(&edge(a, false), &edge(b, true))?
+                    > self.tolerance
+                {
+                    return invalid(
+                        "declared closed spline surface does not close within tolerance",
+                    );
+                }
+            }
+        }
         Ok(Surface::Spline {
             data: Box::new(data),
         })
@@ -215,6 +301,50 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unclamped_active_domain_matches_original_basis_including_endpoints() {
+        for degree in 1..=3 {
+            let n = degree + 5;
+            let full = (0..n + degree + 1)
+                .map(|i| (i as f64 - degree as f64) / 5.)
+                .collect::<Vec<_>>();
+            let original = (0..n)
+                .map(|i| {
+                    let w = 1. + 0.17 * (i % 3) as f64;
+                    H {
+                        q: Vec3::new(i as f64, 0.2 * (i * i) as f64, (i % 2) as f64).scale(w),
+                        w,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let patches = decompose(original.clone(), degree, &vec![1; full.len()], &full);
+            assert_eq!(patches.len(), 5);
+            for i in 0..=100 {
+                let t = i as f64 / 100.;
+                let at = t.min(1. - 1e-14);
+                let mut q = Vec3::new(0., 0., 0.);
+                let mut weight = 0.;
+                for (j, p) in original.iter().enumerate() {
+                    let value = basis(j, degree, at, &full);
+                    q = q.add(p.q.scale(value));
+                    weight += p.w * value;
+                }
+                let span = ((t * 5.).floor() as usize).min(4);
+                let h = patches[span];
+                let c = crate::geom::Curve::RationalBezier {
+                    p: h.map(|h| h.q.scale(1. / h.w)),
+                    w: h.map(|h| h.w),
+                };
+                assert!(
+                    c.eval(t * 5. - span as f64)
+                        .0
+                        .distance(q.scale(1. / weight))
+                        < 1e-10,
+                    "degree {degree}, t {t}"
+                );
+            }
+        }
+    }
     fn basis(i: usize, d: usize, t: f64, k: &[f64]) -> f64 {
         if d == 0 {
             return if k[i] <= t && t < k[i + 1] { 1. } else { 0. };

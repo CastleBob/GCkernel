@@ -8,6 +8,141 @@ use gc_kernel::{
 };
 const TOL: f64 = 1e-6;
 
+fn explicit_roof() -> Body {
+    // S(u,v)=(2u+.4u²,3v,4+u²+uv), which has no affine inverse chart.
+    // Its lower UV boundary is the parabola v=.1-.2t+.2t², u=.1+.8t.
+    let uv = [
+        (0.1, 0.8, 0.1, -0.2, 0.2),
+        (0.9, 0., 0.1, 0.8, 0.),
+        (0.9, -0.8, 0.9, 0., 0.),
+        (0.1, 0., 0.9, -0.8, 0.),
+    ];
+    let bernstein = |q: [f64; 4], i: usize| {
+        q[0] + q[1] * i as f64 / 3.
+            + q[2] * (i * i.saturating_sub(1)) as f64 / 6.
+            + if i == 3 { q[3] } else { 0. }
+    };
+    let mut b = curved_roof();
+    let mut pcurves = Vec::new();
+    for (edge, (a, d, bv, e, f)) in uv.into_iter().enumerate() {
+        let x = [2. * a + 0.4 * a * a, (2. + 0.8 * a) * d, 0.4 * d * d, 0.];
+        let y = [3. * bv, 3. * e, 3. * f, 0.];
+        let z = [
+            4. + a * a + a * bv,
+            2. * a * d + a * e + d * bv,
+            d * d + a * f + d * e,
+            d * f,
+        ];
+        let low = std::array::from_fn(|i| Vec3::new(bernstein(x, i), bernstein(y, i), 0.));
+        let high = std::array::from_fn(|i| Vec3::new(low[i].x, low[i].y, bernstein(z, i)));
+        b.vertices[edge] = low[0];
+        b.vertices[edge + 4] = high[0];
+        b.edges[edge].curve = Curve::Bezier { p: low };
+        b.edges[edge + 4].curve = Curve::Bezier { p: high };
+        b.edges[edge + 8].curve = Curve::Line {
+            a: low[0],
+            b: high[0],
+        };
+        if let Surface::Spline { data } = &mut b.faces[edge + 2].surface {
+            data.patches[0].p = std::array::from_fn(|i| {
+                low[i / 4].add(high[i / 4].sub(low[i / 4]).scale((i % 4) as f64 / 3.))
+            });
+        }
+        pcurves.push(Curve::Bezier {
+            p: std::array::from_fn(|i| {
+                Vec3::new(
+                    bernstein([a, d, 0., 0.], i),
+                    bernstein([bv, e, f, 0.], i),
+                    0.,
+                )
+            }),
+        });
+    }
+    let data = SplineSurface {
+        u: vec![0., 1.],
+        v: vec![0., 1.],
+        pcurves: Some(vec![pcurves]),
+        patches: vec![Patch {
+            p: std::array::from_fn(|k| {
+                let (i, j) = (k / 4, k % 4);
+                let u = i as f64 / 3.;
+                let v = j as f64 / 3.;
+                let u2 = (i * i.saturating_sub(1)) as f64 / 6.;
+                Vec3::new(2. * u + 0.4 * u2, 3. * v, 4. + u2 + u * v)
+            }),
+            w: [1.; 16],
+        }],
+    };
+    b.faces[1].surface = Surface::Spline {
+        data: Box::new(data),
+    };
+    b
+}
+
+#[test]
+fn explicit_non_graph_pcurves_retain_original_parametric_geometry() {
+    let b = explicit_roof();
+    topology::check(&b, TOL).unwrap();
+    let n = 16384;
+    let expected = (0..=n)
+        .map(|i| {
+            let t = i as f64 / n as f64;
+            let u = 0.1 + 0.8 * t;
+            let low = 0.1 - 0.2 * t + 0.2 * t * t;
+            let f = 0.8
+                * 3.
+                * (2. + 0.8 * u)
+                * ((4. + u * u) * (0.9 - low) + 0.5 * u * (0.81 - low * low));
+            f * if i == 0 || i == n {
+                1.
+            } else if i % 2 == 0 {
+                2.
+            } else {
+                4.
+            }
+        })
+        .sum::<f64>()
+        / (3. * n as f64);
+    let measured = mass::measure(&b, TOL).unwrap();
+    assert!(
+        (measured.volume - expected).abs() < 1e-9,
+        "{} vs {expected}",
+        measured.volume
+    );
+    let mesh = tessellate::tessellate(&b, 0.01).unwrap();
+    assert!(!mesh.triangles.is_empty());
+    let packet = neutral::write_body(&b);
+    let mut reader = neutral::Reader::new(&packet);
+    let round = reader.body().unwrap();
+    reader.finish().unwrap();
+    assert_eq!(packet, neutral::write_body(&round));
+    let text = step::write(&[("ExplicitPcurveRoof", &b)], TOL).unwrap();
+    assert!(text.contains("PCURVE("));
+    let restored = step::read(text.as_bytes(), TOL).unwrap();
+    assert!((restored.bodies[0].volume - expected).abs() < 1e-9);
+    if let Ok(dir) = std::env::var("GC_STEP_EXPORT_FIXTURES") {
+        std::fs::write(
+            std::path::Path::new(&dir).join("ExplicitPcurveRoof.step"),
+            text,
+        )
+        .unwrap();
+    }
+    let mut invalid = b.clone();
+    if let Surface::Spline { data } = &mut invalid.faces[1].surface {
+        if let Curve::Bezier { p } = &mut data.pcurves.as_mut().unwrap()[0][0] {
+            p[1].y += 0.01;
+        }
+    }
+    assert!(topology::check(&invalid, TOL).is_err());
+    if let Surface::Spline { data } = &mut invalid.faces[1].surface {
+        data.pcurves = None;
+    }
+    assert!(
+        topology::check(&invalid, TOL).is_err(),
+        "this fixture must require its explicit non-graph domain"
+    );
+}
+
 #[test]
 fn curved_multispan_trims_keep_mass_shared_mesh_and_step_geometry() {
     for (name, mut body) in [
@@ -58,6 +193,7 @@ fn curved_multispan_trims_keep_mass_shared_mesh_and_step_geometry() {
 }
 fn graph() -> SplineSurface {
     SplineSurface {
+        pcurves: None,
         u: vec![0., 1.],
         v: vec![0., 1.],
         patches: vec![Patch {
@@ -161,6 +297,7 @@ fn curved_roof() -> Body {
             unreachable!()
         };
         let data = SplineSurface {
+            pcurves: None,
             u: vec![0., 1.],
             v: vec![0., 1.],
             patches: vec![Patch {

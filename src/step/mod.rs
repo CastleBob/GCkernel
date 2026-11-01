@@ -1,12 +1,13 @@
 //! STEP import owns syntax-to-body conversion, never repair, modeling or document
 //! publication. All solids must succeed before any result is returned. See README.
+pub mod assembly;
+pub mod diagnostic;
+mod pcurve;
 mod spline;
 mod surface;
 mod syntax;
-pub mod diagnostic;
 pub mod wire;
 mod write;
-pub use write::write;
 use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::{Body, Edge, Face};
 use crate::{mass, neutral, topology, KernelError};
@@ -15,6 +16,7 @@ use std::f64::consts::{PI, TAU};
 use std::io::Read;
 use std::path::Path;
 use syntax::{Entity, Exchange, Value};
+pub use write::write;
 type Result<T> = std::result::Result<T, KernelError>;
 fn invalid<T>(s: impl Into<String>) -> Result<T> {
     Err(KernelError::InvalidInput(s.into()))
@@ -58,6 +60,10 @@ pub fn read_file(path: &Path, tolerance: f64) -> Result<StepImport> {
 /// representations, analytic supports and exact line/circle/ellipse boundaries.
 /// No assembly flattening, spline fitting, topology sewing or unit guessing.
 pub fn read(bytes: &[u8], tolerance: f64) -> Result<StepImport> {
+    let doc = document(bytes, tolerance)?;
+    read_standalone(&doc)
+}
+fn document(bytes: &[u8], tolerance: f64) -> Result<Document> {
     if !tolerance.is_finite() || tolerance <= 0.0 {
         return invalid("STEP tolerance must be finite and positive");
     }
@@ -77,10 +83,12 @@ pub fn read(bytes: &[u8], tolerance: f64) -> Result<StepImport> {
             return unsupported(format!("STEP schema {schema}"));
         }
     }
-    let doc = Document {
+    Ok(Document {
         exchange,
         tolerance,
-    };
+    })
+}
+fn read_standalone(doc: &Document) -> Result<StepImport> {
     // These records can change placement, multiplicity or the material domain.
     // Refuse before selecting any body: no silently omitted assembly member.
     for (id, e) in &doc.exchange.entities {
@@ -584,9 +592,15 @@ impl Document {
         unsupported(format!("STEP surface #{id} {}", e.kind()))
     }
     fn body(&self, id: u64, scale: f64, angle: f64) -> Result<ImportedBody> {
-        self.body_diagnostic(id,scale,angle,None)
+        self.body_diagnostic(id, scale, angle, None)
     }
-    fn body_diagnostic(&self, id:u64, scale:f64, angle:f64, report:Option<&mut Vec<diagnostic::Mismatch>>) -> Result<ImportedBody> {
+    fn body_diagnostic(
+        &self,
+        id: u64,
+        scale: f64,
+        angle: f64,
+        report: Option<&mut Vec<diagnostic::Mismatch>>,
+    ) -> Result<ImportedBody> {
         let a = self.args(id, "MANIFOLD_SOLID_BREP", 2)?;
         let name = a[0].text()?.to_owned();
         let shell_id = a[1].reference()?;
@@ -598,6 +612,7 @@ impl Document {
         let mut vertices = BTreeMap::new();
         let mut edges: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
         let mut seen_faces = BTreeSet::new();
+        let mut edge_supports: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
         for v in face_ids {
             let face_id = v.reference()?;
             if !seen_faces.insert(face_id) {
@@ -639,6 +654,10 @@ impl Document {
                         return invalid("ORIENTED_EDGE endpoints must be derived");
                     }
                     let edge_id = a[3].reference()?;
+                    edge_supports
+                        .entry(edge_id)
+                        .or_default()
+                        .insert(self.args(face_id, "ADVANCED_FACE", 4)?[2].reference()?);
                     let orientation = a[4].flag()?;
                     if !edges.contains_key(&edge_id) {
                         let a = self.args(edge_id, "EDGE_CURVE", 5)?;
@@ -656,7 +675,7 @@ impl Document {
                                 index
                             };
                         }
-                        let support_id = a[3].reference()?;
+                        let support_id = self.curve_3d(a[3].reference()?)?;
                         let support = self.entity(support_id)?;
                         let curves = if support.has("B_SPLINE_CURVE_WITH_KNOTS")
                             || support.has("TRIMMED_CURVE")
@@ -671,7 +690,7 @@ impl Document {
                             .map_err(|e| context(e, support_id))?
                         } else {
                             vec![self.edge_curve(
-                                a[3].reference()?,
+                                support_id,
                                 body.vertices[end[0]],
                                 body.vertices[end[1]],
                                 end[0] == end[1],
@@ -722,21 +741,76 @@ impl Document {
                     face.loops.push(lp);
                 }
             }
+            if outer == 0 {
+                // FACE_BOUND does not itself label the outer wire. A single
+                // bound is unambiguous; planar multiple bounds have one positive
+                // oriented area and negative hole areas. No geometry is changed.
+                let candidate = if face.loops.len() == 1 {
+                    Some(0)
+                } else if let Surface::Plane { n, .. } = face.surface {
+                    let candidates = face
+                        .loops
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, lp)| {
+                            let curves = lp
+                                .iter()
+                                .map(|&(e, fwd)| {
+                                    if fwd {
+                                        body.edges[e].curve.clone()
+                                    } else {
+                                        body.edges[e].curve.reversed()
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+                            (crate::extrude::signed_area(&curves, n)
+                                * if face.sense { 1. } else { -1. }
+                                > 0.)
+                                .then_some(i)
+                        })
+                        .collect::<Vec<_>>();
+                    if candidates.len() == 1 {
+                        Some(candidates[0])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(index) = candidate {
+                    let lp = face.loops.remove(index);
+                    face.loops.insert(0, lp);
+                    outer = 1;
+                }
+            }
             if outer != 1 {
                 return unsupported(format!(
-                    "STEP face #{face_id} requires exactly one explicit FACE_OUTER_BOUND"
+                    "STEP face #{face_id} requires one unambiguous outer bound"
                 ));
             }
+            self.attach_pcurves(&mut face, a[2].reference()?, &edges, scale)?;
             body.faces.push(face);
         }
+        self.check_associated_supports(&edge_supports)?;
         // Existing strict neutral admission checks finite dimensions, radii, frames
         // and references before the topology validator accesses any indices.
         let data = neutral::write_body(&body);
         let mut reader = neutral::Reader::with_tolerance(&data, self.tolerance);
         let body = reader.body()?;
         reader.finish()?;
-        if let Some(report)=report {
-            report.extend(self.geometry_report(id,scale,&body,&edges,&face_ids.iter().map(Value::reference).collect::<Result<Vec<_>>>()?)?);
+        if let Some(report) = report {
+            report.extend(
+                self.geometry_report(
+                    id,
+                    scale,
+                    &body,
+                    &edges,
+                    &face_ids
+                        .iter()
+                        .map(Value::reference)
+                        .collect::<Result<Vec<_>>>()?,
+                )?,
+            );
         }
         topology::check(&body, self.tolerance)?;
         // A CLOSED_SHELL is connected, even if disconnected shells share one file.

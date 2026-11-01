@@ -54,6 +54,12 @@ impl Document {
     }
 
     fn spline_data(&self, id: u64, scale: f64) -> Result<SplineData> {
+        self.spline_data_dimension(id, scale, false)
+    }
+    pub(super) fn pcurve_spans(&self, id: u64) -> Result<Vec<Curve>> {
+        Ok(self.spline_data_dimension(id, 1., true)?.curves)
+    }
+    fn spline_data_dimension(&self, id: u64, scale: f64, uv: bool) -> Result<SplineData> {
         let e = self.entity(id)?;
         if !e.has("B_SPLINE_CURVE_WITH_KNOTS") {
             return unsupported(format!(
@@ -103,7 +109,13 @@ impl Document {
         }
         let mut points: Vec<Vec3> = refs
             .iter()
-            .map(|v| self.point(v.reference()?).map(|p| p.scale(scale)))
+            .map(|v| {
+                if uv {
+                    self.point2(v.reference()?)
+                } else {
+                    self.point(v.reference()?).map(|p| p.scale(scale))
+                }
+            })
             .collect::<Result<_>>()?;
         if points.iter().any(|p| !p.is_finite()) {
             return invalid("nonfinite scaled spline control point");
