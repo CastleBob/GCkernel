@@ -27,7 +27,13 @@
 //!        loops on the one cap facing d; refused by name when the body is not a straight-through plate; rebuild.rs),
 //!     14 read DXF (a path -> the drawing's layers and curves as seen from above, exact or as lines and arcs;
 //!        dxf::wire), 15 write DXF (layers and curves -> an R12 DXF at the path; dxf::wire),
-//!     16 read STEP (UTF-8 path -> all supported standalone solid bodies; step::wire).
+//!     16 read STEP (UTF-8 path -> all supported standalone solid bodies; step::wire),
+//!     20 shell (thickness (positive inward, negative outward), k, then k indices of faces to remove, then a body ->
+//!        the shelled body, its exact volume, F, then per result face [kind, index]: 0 the source face it was offset
+//!        from or kept, 1 the source edge or 2 the source vertex a rounding face rolls about; k = 0 leaves the cavity a
+//!        closed void (an inner shell of the same body); offset::shell_op),
+//!     21 offset (signed distance (positive outward), mode (0 rounded: the exact offset, rounding faces about convex
+//!        edges and corners; 1 sharp: moved faces extended to meet), then a body -> op 20's reply; offset::offset_op).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
@@ -55,6 +61,8 @@ pub const OP_DXF_WRITE: u32 = 15;
 pub const OP_STEP_READ: u32 = 16;
 pub const OP_STEP_WRITE: u32 = 17;
 pub const OP_STL_READ: u32 = 18;
+pub const OP_SHELL: u32 = 20;
+pub const OP_OFFSET: u32 = 21;
 
 pub struct Request {
     pub op: u32,
@@ -107,6 +115,8 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
         OP_STEP_READ => return crate::step::wire::read_op(&request.data, tol),
         OP_STEP_WRITE => return crate::step::wire::write_op(&request.data, tol),
         OP_STL_READ => return crate::stl::read_op(&request.data, tol),
+        OP_SHELL => return crate::offset::shell_op(&request.data, tol),
+        OP_OFFSET => return crate::offset::offset_op(&request.data, tol),
         _ => {}
     }
     let mut reader = Reader::with_tolerance(&request.data, tol);
