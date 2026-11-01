@@ -55,6 +55,7 @@ pub const OP_DXF_WRITE: u32 = 15;
 pub const OP_STEP_READ: u32 = 16;
 pub const OP_STEP_WRITE: u32 = 17;
 pub const OP_STL_READ: u32 = 18;
+pub const OP_IGES_READ: u32 = 22;
 
 pub struct Request {
     pub op: u32,
@@ -107,6 +108,7 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
         OP_STEP_READ => return crate::step::wire::read_op(&request.data, tol),
         OP_STEP_WRITE => return crate::step::wire::write_op(&request.data, tol),
         OP_STL_READ => return crate::stl::read_op(&request.data, tol),
+        OP_IGES_READ => return crate::iges::wire::read_op(&request.data, tol),
         _ => {}
     }
     let mut reader = Reader::with_tolerance(&request.data, tol);

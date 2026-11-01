@@ -10,6 +10,7 @@ pub mod dxf;
 pub mod extrude;
 pub mod frame;
 pub mod geom;
+pub mod iges;
 pub mod mass;
 pub mod meridian;
 pub mod neutral;
