@@ -122,8 +122,11 @@ impl Writer {
             Curve::CylinderPair { .. } => {
                 unsupported("STEP export of cylinder-intersection curves is not implemented")
             }
-            Curve::RadialPair { .. } | Curve::ConePair { .. } => {
+            Curve::RadialPair { .. } => {
                 unsupported("STEP export of radial cylinder-pair curves (normalized pipe ends) is not implemented")
+            }
+            Curve::ConePair { .. } => {
+                unsupported("STEP export of cylinder/cone intersection curves (holes through tapered walls) is not implemented")
             }
         }
     }
