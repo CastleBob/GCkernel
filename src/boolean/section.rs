@@ -31,6 +31,8 @@ mod pocket;
 pub(super) mod unite_face;
 #[path = "unite_stack.rs"]
 pub(super) mod unite_stack;
+#[path = "unite_overhang.rs"]
+pub(super) mod unite_overhang;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct P {

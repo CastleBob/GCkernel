@@ -7,8 +7,10 @@
 //! 2. Stack (`section::unite_stack`): both operands right prisms along one cardinal axis (a boss overhanging or flush
 //!    with a plate's edge, a bar through a plate, overlapping blocks). Rebuilt from the arrangement of both sections,
 //!    coplanar walls and caps joined. History not recorded yet: op 25 refuses by name, op 24 succeeds.
+//! 3. Overhang (`section::unite_overhang`): a boss on one planar face of a body that is not a layered stack, its base
+//!    crossing the face's edge (a round boss over an I-beam flange tip). History not recorded yet.
 //! A boss that does not reach the body (two solids) is refused by name.
-use super::section::{unite_face, unite_stack};
+use super::section::{unite_face, unite_overhang, unite_stack};
 use crate::neutral::Body;
 use crate::provenance::{outcomes, Outcome, Provenance};
 use crate::KernelError;
@@ -16,6 +18,7 @@ use crate::KernelError;
 enum Domain {
     Face(unite_face::Plan),
     Stack,
+    Overhang(unite_overhang::Plan),
 }
 
 fn unsupported(message: &str) -> KernelError {
@@ -63,6 +66,11 @@ fn select(body: &Body, tool: &Body, tol: f64) -> Result<Domain, KernelError> {
     if unite_stack::selects(body, tool, tol) {
         return Ok(Domain::Stack);
     }
+    match unite_overhang::admit(body, tool, tol) {
+        Ok(Some(plan)) => return Ok(Domain::Overhang(plan)),
+        Err(reason) => return Err(reason),
+        Ok(None) => {}
+    }
     match face {
         Err(reason) => Err(reason),
         _ if apart(body, tool, tol) => Err(unsupported("the boss does not reach the body: their union would be two separate solids (one solid only)")),
@@ -77,6 +85,7 @@ pub fn union(body: &Body, tool: &Body, tol: f64) -> Result<Body, KernelError> {
     match select(body, tool, tol)? {
         Domain::Face(plan) => unite_face::unite(body, tool, &plan, tol).map(|(b, _)| b),
         Domain::Stack => unite_stack::union(body, tool, tol),
+        Domain::Overhang(plan) => unite_overhang::unite(body, tool, &plan, tol),
     }
 }
 
@@ -86,6 +95,7 @@ pub fn union_named(body: &Body, tool: &Body, tol: f64) -> Result<(Body, Provenan
     let (result, history) = match select(body, tool, tol)? {
         Domain::Face(plan) => unite_face::unite(body, tool, &plan, tol)?,
         Domain::Stack => return Err(unsupported("union history is not recorded for the prism stack union domain yet")),
+        Domain::Overhang(_) => return Err(unsupported("union history is not recorded for overhanging bosses yet")),
     };
     let counts = (history.faces.len(), history.edges.len(), history.vertices.len());
     if counts != (result.faces.len(), result.edges.len(), result.vertices.len()) {

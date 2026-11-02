@@ -275,7 +275,7 @@ fn facing(oriented: &Seg, reference: &Seg) -> i8 {
 
 /// Chains oriented pieces (material on the left) into loops by the least clockwise turn at each vertex; a vertex met
 /// twice on one level is a pinch (refused).
-fn chain(bits: &[(usize, usize, Seg)], vertices: usize) -> Result<Vec<Vec<usize>>> {
+pub(super) fn chain(bits: &[(usize, usize, Seg)], vertices: usize) -> Result<Vec<Vec<usize>>> {
     let mut used = vec![false; bits.len()];
     let mut visited = vec![false; vertices];
     let mut loops = vec![];

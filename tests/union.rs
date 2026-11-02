@@ -181,11 +181,10 @@ fn refusals_are_named() {
     let boss = up(vec![circle(0., 10., 0.5, 0.)], 6., 7.);
     let r = union(&beam, &boss, TOL).unwrap();
     check(&r, TOL).unwrap();
-    // A round boss over the flange's edge: the cylinder is no prism along the beam, so only the face domain could take
-    // it, and its base crosses the face's edge.
-    let over = up(vec![circle(3., 10., 0.5, 0.)], 6., 7.);
-    let m = refused(&beam, &over);
-    assert!(m.contains("touches or crosses the edge"), "{m}");
+    // A block resting on a round bar's top line touches it only along that line: refused by name.
+    let bar = prism(vec![vec![Curve::Arc { c: v(0., 0., 0.), n: v(0., 1., 0.), x: v(1., 0., 0.), r: 1., t0: 0., t1: TAU }]], v(0., 1., 0.), 0., 10.);
+    let m = refused(&bar, &up(vec![rect(-1., 2., 1., 4., 0.)], 1., 2.));
+    assert!(m.contains("non-manifold"), "{m}");
 }
 
 /// A filleted I-beam section in the xz plane (flanges 6 wide, 6 deep, 0.5 thick, web 0.3, root fillets 0.3), along y
@@ -418,4 +417,24 @@ fn op_25_records_name_their_sources_exactly() {
     let tool_faces = &outcomes[p.faces.len() + p.edges.len() + p.vertices.len()..][..ring.faces.len()];
     assert_eq!(tool_faces.iter().filter(|o| o.code == provenance::CONSUMED).count(), 1);
     assert!(tool_faces.iter().all(|o| o.code == provenance::CONSUMED || o.code == provenance::UNCHANGED));
+}
+
+#[test]
+fn round_bosses_over_an_ibeam_flange_tip_and_corner() {
+    let beam = ibeam();
+    let vb = volume(&beam);
+    // A round boss over the top flange's tip (x 3): the cylinder is no prism along the beam, so the overhang domain
+    // takes it. Union = beam + boss (they meet only in the base's half on the flange).
+    let tip = united(&beam, &up(vec![circle(3., 10., 0.5, 0.)], 6., 7.), vb + PI * 0.25);
+    assert_eq!(tip.faces.len(), beam.faces.len() + 1 + 2);
+    // Over the flange's corner at the beam's end (x 3, y 0): a quarter of the base rests on the flange.
+    united(&beam, &up(vec![circle(3., 0., 0.5, 0.)], 6., 7.), vb + PI * 0.25);
+    // Over the tip with a hole in the boss (a ring), and a square boss turned 30 degrees over the tip.
+    united(&beam, &up(vec![circle(3., 10., 0.6, 0.), circle(3., 10., 0.3, 0.)], 6., 6.5), vb + PI * (0.36 - 0.09) * 0.5);
+    let (c, s) = ((PI / 6.).cos(), (PI / 6.).sin());
+    let turned: Vec<(f64, f64)> = [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)].iter().map(|&(a, b)| (3. + a * c - b * s, 12. + a * s + b * c)).collect();
+    united(&beam, &up(vec![polygon(&turned, 0.)], 6., 6.75), vb + 0.75);
+    // A boss that also covers the bottom flange's tip from below is two separate contacts: refused.
+    // (On the bottom face of the bottom flange, z 0, looking down, a boss over the tip.)
+    united(&beam, &prism(vec![circle(-3., 5., 0.4, 0.)], v(0., 0., -1.), 0., 0.5), vb + PI * 0.16 * 0.5);
 }

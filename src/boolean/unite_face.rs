@@ -35,7 +35,7 @@ pub(in crate::boolean) struct Plan {
 }
 
 /// A planar face's anchor, outward normal and in-plane direction.
-fn plane(face: &Face) -> Option<(Vec3, Vec3, Vec3)> {
+pub(super) fn plane(face: &Face) -> Option<(Vec3, Vec3, Vec3)> {
     match face.surface {
         Surface::Plane { p, n, x } => Some((p, if face.sense { n } else { n.scale(-1.) }, x)),
         _ => None,
@@ -66,7 +66,7 @@ fn harmonic(c0: f64, a: f64, b: f64, t0: f64, t1: f64) -> (f64, f64, Vec<f64>) {
 
 /// The range of (q - o).d over a curve, and the values at interior extremes (exact for lines, arcs and ellipse arcs;
 /// None for other curves, which are bounded by `world_range`).
-fn exact_range(curve: &Curve, o: Vec3, d: Vec3) -> Option<(f64, f64, Vec<f64>)> {
+pub(super) fn exact_range(curve: &Curve, o: Vec3, d: Vec3) -> Option<(f64, f64, Vec<f64>)> {
     match *curve {
         Curve::Line { a, b } => {
             let (x, y) = (a.sub(o).dot(d), b.sub(o).dot(d));
@@ -82,7 +82,7 @@ fn exact_range(curve: &Curve, o: Vec3, d: Vec3) -> Option<(f64, f64, Vec<f64>)> 
 }
 
 /// A conservative range of (q - o).d over any curve: exact where `exact_range` is, else its world box's corners.
-fn world_range(curve: &Curve, o: Vec3, d: Vec3) -> (f64, f64) {
+pub(super) fn world_range(curve: &Curve, o: Vec3, d: Vec3) -> (f64, f64) {
     if let Some((lo, hi, _)) = exact_range(curve, o, d) {
         return (lo, hi);
     }
@@ -96,7 +96,7 @@ fn world_range(curve: &Curve, o: Vec3, d: Vec3) -> (f64, f64) {
     range
 }
 
-fn kind(s: &Surface) -> &'static str {
+pub(super) fn kind(s: &Surface) -> &'static str {
     match s {
         Surface::Plane { .. } => "planar",
         Surface::Cylinder { .. } => "cylindrical",
@@ -111,7 +111,7 @@ fn kind(s: &Surface) -> &'static str {
 }
 
 /// A conservative box of a face in the frame (o; x, y, n): per direction, the range of (q - o).d over the face.
-fn face_box(body: &Body, face: &Face, o: Vec3, frame: [Vec3; 3]) -> Result<[(f64, f64); 3]> {
+pub(super) fn face_box(body: &Body, face: &Face, o: Vec3, frame: [Vec3; 3]) -> Result<[(f64, f64); 3]> {
     let edges: Vec<&Curve> = face.loops.iter().flatten().map(|&(e, _)| &body.edges[e].curve).collect();
     let along = |p: Vec3, a: Vec3| edges.iter().map(|c| world_range(c, p, a)).fold((f64::INFINITY, f64::NEG_INFINITY), |r, x| (r.0.min(x.0), r.1.max(x.1)));
     // An axis segment p + s a, s in the face's axial range, widened by `reach(d)` across the axis.
@@ -145,7 +145,7 @@ fn face_box(body: &Body, face: &Face, o: Vec3, frame: [Vec3; 3]) -> Result<[(f64
 }
 
 /// A curve in F's plane frame as a section edge, run as the occurrence runs it.
-fn seg2(curve: &Curve, forward: bool, o: Vec3, x: Vec3, y: Vec3, n: Vec3) -> Result<Seg> {
+pub(super) fn seg2(curve: &Curve, forward: bool, o: Vec3, x: Vec3, y: Vec3, n: Vec3) -> Result<Seg> {
     let to2 = |q: Vec3| P::new(q.sub(o).dot(x), q.sub(o).dot(y));
     let seg = match *curve {
         Curve::Line { a, b } => Seg::Line { a: to2(a), b: to2(b) },
@@ -162,9 +162,15 @@ fn seg2(curve: &Curve, forward: bool, o: Vec3, x: Vec3, y: Vec3, n: Vec3) -> Res
     Ok(if forward { seg } else { seg.reversed() })
 }
 
-/// Admission (see the module notes). Ok(None): no tool face lies on a body face's plane facing it (not this domain).
-pub(in crate::boolean) fn admit(body: &Body, tool: &Body, tol: f64) -> Result<Option<Plan>> {
-    // 1. Base faces and the body faces they rest on.
+/// The base: the tool faces on a body face's plane facing it, the body faces they rest on (candidates for F), and the
+/// base's boundary loops (tool edge occurrences as the base faces run them). Ok(None): no such tool face.
+pub(super) struct Base {
+    pub(super) faces: Vec<usize>,
+    pub(super) candidates: Vec<usize>,
+    pub(super) loops: Vec<Vec<(usize, bool)>>,
+}
+
+pub(super) fn base_of(body: &Body, tool: &Body, tol: f64) -> Result<Option<Base>> {
     let mut pairs = vec![];
     for (i, f) in body.faces.iter().enumerate() {
         let Some((p, n, _)) = plane(f) else { continue };
@@ -220,9 +226,94 @@ pub(in crate::boolean) fn admit(body: &Body, tool: &Body, tol: f64) -> Result<Op
         }
         loops.push(lp);
     }
+    let mut candidates: Vec<usize> = pairs.iter().map(|p| p.0).collect();
+    candidates.sort();
+    candidates.dedup();
+    Ok(Some(Base { faces: base, candidates, loops }))
+}
+
+/// Step 3: the boss lies above the plane (o, n) and meets it only in its base.
+pub(super) fn above(tool: &Body, base: &[usize], o: Vec3, n: Vec3, tol: f64) -> Result<()> {
+    let mut base_vertices = std::collections::HashSet::new();
+    let mut base_edges = std::collections::HashSet::new();
+    for &j in base {
+        for &(e, _) in tool.faces[j].loops.iter().flatten() {
+            base_edges.insert(e);
+            base_vertices.insert(tool.edges[e].start);
+            base_vertices.insert(tool.edges[e].end);
+        }
+    }
+    let mut in_use = vec![false; tool.vertices.len()];
+    for e in &tool.edges {
+        in_use[e.start] = true;
+        in_use[e.end] = true;
+    }
+    for (vi, q) in tool.vertices.iter().enumerate() {
+        if !in_use[vi] {
+            continue; // e.g. a revolve's axis point under a disc
+        }
+        let h = q.sub(o).dot(n);
+        if h < -tol {
+            return Err(unsupported("union: the boss reaches below the face it stands on (a boss into the body is not this domain)"));
+        }
+        if h <= tol && !base_vertices.contains(&vi) {
+            return Err(unsupported("union: the boss touches the face's plane outside its base"));
+        }
+    }
+    for (ei, e) in tool.edges.iter().enumerate() {
+        if base_edges.contains(&ei) {
+            continue;
+        }
+        let (_, _, inner) = exact_range(&e.curve, o, n).ok_or_else(|| unsupported("union: the boss has an edge whose height above the face is not bounded yet"))?;
+        if inner.iter().any(|&h| h <= tol) {
+            return Err(unsupported("union: the boss dips to or below the face's plane along an edge"));
+        }
+    }
+    for (j, t) in tool.faces.iter().enumerate() {
+        if base.contains(&j) {
+            continue;
+        }
+        let square = |a: Vec3| a.cross(n).length() <= 1e-9;
+        let ok = match t.surface {
+            Surface::Plane { p, n: m, .. } => !(m.cross(n).length() <= 1e-9 && p.sub(o).dot(n).abs() <= tol),
+            Surface::Cylinder { a, .. } | Surface::EllipticCylinder { a, .. } | Surface::Cone { a, .. } | Surface::Sphere { a, .. } | Surface::Torus { a, .. } => square(a),
+            _ => false,
+        };
+        if !ok {
+            return Err(unsupported(&format!("union: the boss has a {} face whose height above the face it stands on is not bounded by its edges", kind(&t.surface))));
+        }
+    }
+    Ok(())
+}
+
+/// Step 4: no body face other than F reaches into the boss's room. Returns the boss's box in the frame (x, y, n).
+pub(super) fn room(body: &Body, tool: &Body, face: usize, o: Vec3, frame: [Vec3; 3], tol: f64) -> Result<[(f64, f64); 3]> {
+    let mut reach = [(f64::INFINITY, f64::NEG_INFINITY); 3];
+    for t in &tool.faces {
+        let b = face_box(tool, t, o, frame)?;
+        for d in 0..3 {
+            reach[d] = (reach[d].0.min(b[d].0), reach[d].1.max(b[d].1));
+        }
+    }
+    let top = reach[2].1;
+    for (gi, g) in body.faces.iter().enumerate() {
+        if gi == face {
+            continue;
+        }
+        let b = face_box(body, g, o, frame)?;
+        let clear = b[2].1 <= tol || b[2].0 >= top + tol || (0..2).any(|d| b[d].1 < reach[d].0 - tol || b[d].0 > reach[d].1 + tol);
+        if !clear {
+            return Err(unsupported("union: another part of the body comes within the boss's room above the face (the boss would run into it)"));
+        }
+    }
+    Ok(reach)
+}
+
+/// Admission (see the module notes). Ok(None): no tool face lies on a body face's plane facing it (not this domain).
+pub(in crate::boolean) fn admit(body: &Body, tool: &Body, tol: f64) -> Result<Option<Plan>> {
+    let Some(Base { faces: base, candidates, loops }) = base_of(body, tool, tol)? else { return Ok(None) };
     // 2. Strictly inside one face F on that plane. The frame: F's outward normal n, its x, y = n x x.
     let mut last_reason = None;
-    let candidates: Vec<usize> = { let mut c: Vec<usize> = pairs.iter().map(|p| p.0).collect(); c.sort(); c.dedup(); c };
     let mut chosen = None;
     for &fi in &candidates {
         let (o, n, x) = plane(&body.faces[fi]).unwrap();
@@ -264,77 +355,9 @@ pub(in crate::boolean) fn admit(body: &Body, tool: &Body, tol: f64) -> Result<Op
     }
     let plan = chosen.ok_or_else(|| unsupported(last_reason.unwrap_or("union: the boss's base is not inside one face of the body")))?;
     let (o, n, x) = plane(&body.faces[plan.face]).unwrap();
-    let y = n.cross(x);
-    // 3. The boss above the plane, meeting it only in its base.
-    let mut base_vertices = std::collections::HashSet::new();
-    let mut base_edges = std::collections::HashSet::new();
-    for &j in &plan.base {
-        for &(e, _) in tool.faces[j].loops.iter().flatten() {
-            base_edges.insert(e);
-            base_vertices.insert(tool.edges[e].start);
-            base_vertices.insert(tool.edges[e].end);
-        }
-    }
-    let mut in_use = vec![false; tool.vertices.len()];
-    for e in &tool.edges {
-        in_use[e.start] = true;
-        in_use[e.end] = true;
-    }
-    for (vi, q) in tool.vertices.iter().enumerate() {
-        if !in_use[vi] {
-            continue; // e.g. a revolve's axis point under a disc
-        }
-        let h = q.sub(o).dot(n);
-        if h < -tol {
-            return Err(unsupported("union: the boss reaches below the face it stands on (a boss into the body is not this domain)"));
-        }
-        if h <= tol && !base_vertices.contains(&vi) {
-            return Err(unsupported("union: the boss touches the face's plane outside its base"));
-        }
-    }
-    for (ei, e) in tool.edges.iter().enumerate() {
-        if base_edges.contains(&ei) {
-            continue;
-        }
-        let (_, _, inner) = exact_range(&e.curve, o, n).ok_or_else(|| unsupported("union: the boss has an edge whose height above the face is not bounded yet"))?;
-        if inner.iter().any(|&h| h <= tol) {
-            return Err(unsupported("union: the boss dips to or below the face's plane along an edge"));
-        }
-    }
-    for (j, t) in tool.faces.iter().enumerate() {
-        if plan.base.contains(&j) {
-            continue;
-        }
-        let square = |a: Vec3| a.cross(n).length() <= 1e-9;
-        let ok = match t.surface {
-            Surface::Plane { p, n: m, .. } => !(m.cross(n).length() <= 1e-9 && p.sub(o).dot(n).abs() <= tol),
-            Surface::Cylinder { a, .. } | Surface::EllipticCylinder { a, .. } | Surface::Cone { a, .. } | Surface::Sphere { a, .. } | Surface::Torus { a, .. } => square(a),
-            _ => false,
-        };
-        if !ok {
-            return Err(unsupported(&format!("union: the boss has a {} face whose height above the face it stands on is not bounded by its edges", kind(&t.surface))));
-        }
-    }
-    // 4. Body clearance in F's frame.
-    let frame = [x, y, n];
-    let mut reach = [(f64::INFINITY, f64::NEG_INFINITY); 3];
-    for t in &tool.faces {
-        let b = face_box(tool, t, o, frame)?;
-        for d in 0..3 {
-            reach[d] = (reach[d].0.min(b[d].0), reach[d].1.max(b[d].1));
-        }
-    }
-    let top = reach[2].1;
-    for (gi, g) in body.faces.iter().enumerate() {
-        if gi == plan.face {
-            continue;
-        }
-        let b = face_box(body, g, o, frame)?;
-        let clear = b[2].1 <= tol || b[2].0 >= top + tol || (0..2).any(|d| b[d].1 < reach[d].0 - tol || b[d].0 > reach[d].1 + tol);
-        if !clear {
-            return Err(unsupported("union: another part of the body comes within the boss's room above the face (the boss would run into it)"));
-        }
-    }
+    // 3. The boss above the plane, meeting it only in its base; 4. body clearance in F's frame.
+    above(tool, &plan.base, o, n, tol)?;
+    room(body, tool, plan.face, o, [x, n.cross(x), n], tol)?;
     Ok(Some(plan))
 }
 

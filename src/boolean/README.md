@@ -577,8 +577,24 @@ solid only)", "the bodies would touch only along an edge (non-manifold result)",
 point of its outline (non-manifold result)", "the union would leave separate solids or enclose a void (one solid
 without voids only)", the section domain's ellipse-meeting refusal.
 
-Not supported yet: unions where neither domain applies (e.g. a round boss overhanging a curved or non-layered body, a
-boss straddling two faces at different levels of a non-layered body, bosses on cylindrical faces), stack-domain
-history, spline/Bezier operands. Tests: `tests/union.rs` (closed-form volumes, topology check and tessellation of
+### Overhang on a non-layered body (`unite_overhang.rs`; history not recorded: op 25 refuses by name)
+
+Tried after the face and stack domains decline: a boss whose base (as the face domain's) rests on exactly one planar
+face F and crosses F's outline transversally, on any body (a round boss over an I-beam flange tip or corner). Both
+outlines are split in F's plane by the section arrangement; flush pieces (the base running along F's edge) are refused;
+the boss must lie above the plane with nothing of the body in its room (the face domain's checks), and under the
+overhang nothing of the body may reach the plane: no other face on the plane near the boss, and every other face
+reaching the plane near it a plane or cylinder whose edges reach the plane only at F's own vertices (closed-form
+extremes); no base corner on F's outline. Result: F less the base (a face per region), the overhang as the boss's
+underside on the base's plane, crossed edges split at the crossings (pieces lifted from the arrangement, lines between
+their vertices, arcs/ellipse arcs on their supports) and given to the faces beside them; everything else of both
+bodies unchanged. Volume checked (body + tool). Refusals: "the boss's edge runs along the face's edge (flush) on a body
+that is not a layered prism stack; not supported yet", "the boss rests on more than one face of the body", "a curved
+part of the body reaches the plane under the boss's overhang", "another part of the body reaches the plane under the
+boss's overhang", "a corner of the boss's base lies on the face's outline", plus the face domain's boss and room checks.
+
+Not supported yet: unions none of the domains take (bosses on cylindrical faces such as a pipe's; a boss sunk partly
+into a non-layered body; flush bosses on non-layered bodies), history for the stack and overhang domains, spline and
+Bezier operands. Tests: `tests/union.rs` (closed-form volumes, topology check and tessellation of
 every result, entity-for-entity preservation in the face domain, op 24/25 through the protocol, a hole cut after a
 boss).
