@@ -76,6 +76,9 @@ pub const FROM_TOOL_VERTEX: u32 = 39;
 pub const MEETING_END: u32 = 40;
 /// The end on body face c of the edge from tool edge j: [j, c].
 pub const TOOL_EDGE_END: u32 = 41;
+/// The one vertex of the closed meeting edge [i, j, n] (where the face made from tool face j starts its seam): [i, j, n].
+/// (Claude 2026-11-02: a round cutter crossing one curved wall twice, radial.rs and cone_bore.rs.)
+pub const MEETING_POINT: u32 = 42;
 
 // Op 12 outcome codes, one per input entity.
 pub const UNCHANGED: u32 = 1;

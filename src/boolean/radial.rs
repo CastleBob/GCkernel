@@ -481,12 +481,21 @@ pub(super) fn planar_faces_outward(body: &Body) -> Result<()> {
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    cut_traced(body, tool, tol).map(|(result, _)| result)
+}
+
+/// The radial bore and its history (trace::bored): the body kept, each wall crossed gaining its meeting loop, each wall
+/// passage a seam and the face from the cutter's cylinder. No history when the bore moved a wall's seam (the seam,
+/// rings and their vertices are then the same names on moved geometry; refused rather than called unchanged).
+pub(super) fn cut_traced(body: &Body, tool: &Body, tol: f64) -> Result<(Body, super::History)> {
     crate::topology::check(body, tol)?;
     crate::topology::check(tool, tol)?;
     planar_faces_outward(body)?;
     planar_faces_outward(tool)?;
     let (k, pipe) = admit(body, tool, tol).ok_or_else(|| unsupported("not a radial bore through a pipe wall"))?;
+    let original = body;
     let body = &reseamed(body, &k, &pipe, tol);
+    let moved = crate::neutral::write_body(body) != crate::neutral::write_body(original);
     crate::topology::check(body, tol)?;
     let (walls, loops) = clear(body, tool, &k, &pipe, tol)?;
     let b = pipe.b;
@@ -525,7 +534,15 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         });
     }
     crate::topology::check(&out, tol)?;
-    Ok(out)
+    let history = if moved {
+        Err("cut history is not recorded for a radial bore that moves the pipe wall's seam yet".to_string())
+    } else {
+        match tool.faces.iter().position(|f| matches!(f.surface, Surface::Cylinder { .. })) {
+            Some(j) => super::trace::bored(body, &walls.iter().map(|w| w.0).collect::<Vec<_>>(), j),
+            None => Err("cut history is not recorded for this cut: the cutter has no cylinder face".to_string()),
+        }
+    };
+    Ok((out, history))
 }
 
 #[cfg(test)]

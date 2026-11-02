@@ -312,6 +312,12 @@ fn cross_box(c: Vec3, a: Vec3, rho: f64, p: Vec3, b: Vec3, branch: f64, (rmin, r
 pub(super) fn admit(body: &Body, tool: &Body, tol: f64) -> Result<()> { plan(body, tool, tol).map(|_| ()) }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    cut_traced(body, tool, tol).map(|(result, _)| result)
+}
+
+/// The bore through conical walls and its history (trace::bored), for a cutter passing through; a blind bore's bottom
+/// disk records none yet.
+pub(super) fn cut_traced(body: &Body, tool: &Body, tol: f64) -> Result<(Body, super::History)> {
     crate::topology::check(body, tol)?;
     crate::topology::check(tool, tol)?;
     super::radial::planar_faces_outward(body)?;
@@ -366,5 +372,10 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     }
     let _ = plan.len;
     crate::topology::check(&out, tol)?;
-    Ok(out)
+    let history = match (plan.blind, tool.faces.iter().position(|f| matches!(f.surface, Surface::Cylinder { .. }))) {
+        (None, Some(j)) => super::trace::bored(body, &plan.crossings.iter().map(|c| c.0.face).collect::<Vec<_>>(), j),
+        (Some(_), _) => Err("cut history is not recorded for a blind bore in a conical wall yet".to_string()),
+        (None, None) => Err("cut history is not recorded for this cut: the cutter has no cylinder face".to_string()),
+    };
+    Ok((out, history))
 }

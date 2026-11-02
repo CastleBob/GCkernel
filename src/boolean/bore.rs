@@ -224,17 +224,17 @@ fn box_passage(body: &Body, cutter: &Cylinder, tolerance: f64) -> Result<(f64, f
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tolerance: f64) -> Result<Body> {
-    bore(body, tool, tolerance, false).map(|(result, _)| result)
+    bore(body, tool, tolerance).map(|(result, _)| result)
 }
 
 /// The bore and the recorded history of its every entity (provenance.rs op 12 roles): the body is kept as it is, its
 /// passage caps modified; each passage adds two meeting circles, a seam, two seam points and the wall from the tool's
-/// cylinder. A cutter crossing a cylindrical wall (the cross-cut route) records no history and refuses.
-pub(super) fn cut_named(body: &Body, tool: &Body, tolerance: f64) -> Result<(Body, Provenance)> {
-    bore(body, tool, tolerance, true)
+/// cylinder. A cutter crossing a cylindrical wall (the cross-cut route) records no history.
+pub(super) fn cut_traced(body: &Body, tool: &Body, tolerance: f64) -> Result<(Body, super::History)> {
+    bore(body, tool, tolerance)
 }
 
-fn bore(body: &Body, tool: &Body, tolerance: f64, named: bool) -> Result<(Body, Provenance)> {
+fn bore(body: &Body, tool: &Body, tolerance: f64) -> Result<(Body, super::History)> {
     if !tolerance.is_finite() || tolerance <= 0. {
         return Err(invalid("bore tolerance must be finite and positive"));
     }
@@ -251,10 +251,8 @@ fn bore(body: &Body, tool: &Body, tolerance: f64, named: bool) -> Result<(Body, 
         cutter.high,
         tolerance,
     ) {
-        if named {
-            return Err(unsupported("cut history is not recorded for a bore crossing a cylindrical wall yet"));
-        }
-        return super::endcut::cross_cut(body, tool, tolerance).map(|result| (result, Provenance::default()));
+        let result = super::endcut::cross_cut(body, tool, tolerance)?;
+        return Ok((result, Err("cut history is not recorded for a bore crossing a cylindrical wall yet".into())));
     }
     // Admission is selected by the operand representation before execution.
     // A failed box admission never retries against the general passage checker.
@@ -352,7 +350,7 @@ fn bore(body: &Body, tool: &Body, tolerance: f64, named: bool) -> Result<(Body, 
     }
     crate::topology::check(&result, tolerance)
         .map_err(|e| KernelError::Internal(format!("bore result failed topology checks: {e}")))?;
-    Ok((result, history))
+    Ok((result, Ok(history)))
 }
 
 #[cfg(test)]
