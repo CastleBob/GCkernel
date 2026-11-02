@@ -382,3 +382,40 @@ fn a_boss_on_the_whole_top_makes_a_thicker_plate_and_a_closed_ring_lid_is_refuse
     let m = refused(&ring, &up(vec![rect(2., 2., 8., 6., 0.)], 1., 1.5));
     assert!(m.contains("void"), "{m}");
 }
+
+#[test]
+fn op_25_records_name_their_sources_exactly() {
+    let p = plate();
+    // A ring boss: the plate's top is split into the top less the ring's outline and the island inside the ring.
+    let ring = up(vec![circle(5., 4., 1.5, 0.), circle(5., 4., 1., 0.)], 0., 2.);
+    let (r, h, outcomes) = union_named(&p, &ring, TOL).unwrap();
+    let same = |a: &dyn std::fmt::Debug, b: &dyn std::fmt::Debug| format!("{a:?}") == format!("{b:?}");
+    for (o, rec) in h.faces.iter().enumerate() {
+        match rec.role {
+            provenance::FROM_BODY_FACE => {
+                assert!(same(&r.faces[o].surface, &p.faces[rec.refs[0]].surface));
+                if rec.refs[1] == 0 {
+                    assert_eq!(r.faces[o].loops, p.faces[rec.refs[0]].loops, "an unchanged face keeps its loops");
+                }
+            }
+            provenance::FROM_TOOL_FACE => assert!(same(&r.faces[o].surface, &ring.faces[rec.refs[0]].surface)),
+            role => panic!("unexpected face role {role}"),
+        }
+    }
+    for (o, rec) in h.edges.iter().enumerate() {
+        let source = match rec.role { provenance::FROM_BODY_EDGE => &p.edges[rec.refs[0]], provenance::FROM_TOOL_EDGE => &ring.edges[rec.refs[0]], role => panic!("edge role {role}") };
+        assert!(same(&r.edges[o].curve, &source.curve));
+    }
+    for (o, rec) in h.vertices.iter().enumerate() {
+        let source = match rec.role { provenance::FROM_BODY_VERTEX => p.vertices[rec.refs[0]], provenance::FROM_TOOL_VERTEX => ring.vertices[rec.refs[0]], role => panic!("vertex role {role}") };
+        assert_eq!(r.vertices[o].distance(source), 0.);
+    }
+    // The plate's top: split in two (top less the ring, and the island).
+    let top = (0..p.faces.len()).find(|&i| matches!(p.faces[i].surface, Surface::Plane { n, .. } if n.z > 0.5) && p.faces[i].sense).unwrap();
+    assert_eq!(outcomes[top].code, provenance::SPLIT);
+    assert_eq!(outcomes[top].outputs.len(), 2);
+    // The ring's bottom (its base) is consumed; its walls and top are kept unchanged.
+    let tool_faces = &outcomes[p.faces.len() + p.edges.len() + p.vertices.len()..][..ring.faces.len()];
+    assert_eq!(tool_faces.iter().filter(|o| o.code == provenance::CONSUMED).count(), 1);
+    assert!(tool_faces.iter().all(|o| o.code == provenance::CONSUMED || o.code == provenance::UNCHANGED));
+}
