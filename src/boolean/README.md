@@ -528,3 +528,56 @@ G(s) g(theta) dtheta along the curve by quadrature. Tests (tests/cone_bore.rs) c
 centre and turned, solid through and blind, three holes in turn and one on the straight base against independent
 disk quadratures of the walls' depth (1e-9). Not done: a hole on the revolve's seam (the seam is shared with the
 adjoining section and not moved; refused by name), holes not square to the axis, holes ending inside a wall.
+
+## Union, ops 24 and 25 (Claude, 2026-11-02)
+
+The public entries are `union(body, tool, tolerance)` (op 24: two bodies back to back as op 3 -> the union, one solid)
+and `union_named` (op 25: op 24's reply, then op 12's provenance envelope with its outcome section; roles 30-41 with
+body = the first operand and tool = the second). Same philosophy as the cut (`unite.rs`): one exact domain chosen from
+the operands before anything is built, its failure returned, never retried; everything else refused by name.
+
+### Boss on a planar face (`unite_face.rs`; history recorded)
+
+The SolidWorks boss: the tool's faces lying on the plane of one body face F, facing it, form the base (shared seams
+cancelled: a revolved disc's halves). Admitted when (1) the base is one region (outline plus holes) strictly inside F:
+no closed-form meeting of any base edge with any edge of F within the tolerance, the outline inside F's region, no loop
+of F inside the outline; (2) the boss lies above F's plane and meets it only in the base: used vertices at height
+>= -tol, those within tol base vertices; other edges (lines, arcs, ellipse arcs) without interior height extremes at or
+below tol; other faces planes off F's plane, or cylinders, elliptic cylinders, cones, spheres or tori about an axis
+square to F (heights extreme on their edges); (3) every other body face's conservative analytic box in F's frame
+(planes: their edges; cylinders/cones: axis segment widened by the radius; spheres/tori: whole) is at or below the
+plane, above the boss's highest point or beside the boss's box. Any body: plates, webs, flanges, legs, sloping faces.
+The body is kept entity for entity; F gains the base outline as an inner loop (the base's own edges); base holes become
+new faces on F's surface; the tool's other faces/edges/vertices are added unchanged. Volume checked (body + tool).
+History: every body entity FROM_BODY_* [i, 0] except F [F, 1] (and its islands, F split); tool faces other than the
+base FROM_TOOL_FACE [j, 0]; every kept tool edge/vertex FROM_TOOL_*; base faces and seams consumed.
+Refusals: "the boss's base touches or crosses the edge of the face it stands on, or a hole in it", "the boss's base is
+not on the face it is sketched on", "a hole or edge of the face lies under the boss's base", "the boss reaches below
+the face it stands on (a boss into the body is not this domain)", "the boss touches the face's plane outside its base",
+"the boss dips to or below the face's plane along an edge", "the boss has a <kind> face whose height above the face it
+stands on is not bounded by its edges", "another part of the body comes within the boss's room above the face (the boss
+would run into it)", "the body has a <kind> face; its clearance from the boss cannot be proved yet", "the boss rests on
+more than one plane of the body", "the boss's base is not one region", "the boss's base meets itself at a point". The
+room test is conservative (boxes): it can refuse a boss that would fit.
+
+### Layered right prisms (`unite_stack.rs`; history not recorded: op 25 refuses by name)
+
+Both operands layered along one cardinal axis k: every face a cap (plane square to k) or a wall (plane, cylinder or
+elliptic cylinder parallel to k) whose edges run square to k or along it. Each layer's section is read exactly from the
+walls' vertical edges crossing its middle (paired along each wall's support, material left of k x outward), the stack
+proved by layer areas times thicknesses equal to the measured volume. The union arranges every slab of both operands
+(the section domain's split: closed-form meetings, points within tol one vertex, coincident pieces one span, other
+slabs classified by midpoint winding), stands walls where material lies on one side, builds up/down level faces from
+the material below and above, joins walls of one support and facing across shared edges (spikes removed, splits made
+holes, one seam kept on bands round a periodic support) and joins edges of one support through vertices only they use
+(`unite_tidy.rs`). Surfaces are the operands' own faces. Covers overhangs, flush bosses (one L-shaped side face), bars
+through plates, overlapping/stacked bosses, bosses over holes and pockets, I-beam blocks along the beam. Volume checked
+against the layer areas. Refusals: "the boss does not reach the body: their union would be two separate solids (one
+solid only)", "the bodies would touch only along an edge (non-manifold result)", "the union would touch itself at a
+point of its outline (non-manifold result)", the section domain's ellipse-meeting refusal.
+
+Not supported yet: unions where neither domain applies (e.g. a round boss overhanging a curved or non-layered body, a
+boss straddling two faces at different levels of a non-layered body, bosses on cylindrical faces), stack-domain
+history, spline/Bezier operands. Tests: `tests/union.rs` (closed-form volumes, topology check and tessellation of
+every result, entity-for-entity preservation in the face domain, op 24/25 through the protocol, a hole cut after a
+boss).
