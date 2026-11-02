@@ -27,36 +27,224 @@ use crate::boolean::unite_tidy;
 use crate::neutral::{Edge, Face};
 use std::collections::HashMap;
 
-/// One span of the arrangement: its vertices and curve, whether A and B lie on its left and right, and the section
-/// segment of each operand whose boundary it lies on.
+/// One prism of a layered operand: its section (material left of every loop), its extent along k, each segment's tag
+/// (for `split`) and the face it was read from.
+struct Slab {
+    loops: Vec<Vec<Seg>>,
+    tags: Vec<Vec<Tag>>,
+    lo: f64,
+    hi: f64,
+    faces: Vec<usize>,
+}
+
+/// A layered operand: its slabs and its caps (level, looking up, face).
+struct Layered {
+    slabs: Vec<Slab>,
+    caps: Vec<(f64, bool, usize)>,
+}
+
+/// One span of the arrangement: its vertices and curve, and per slab whether the slab lies on its left and right and,
+/// when the span lies on the slab's boundary, the slab's piece it came from.
 struct Span {
     v0: usize,
     v1: usize,
     seg: Seg,
-    a: [bool; 2],
-    b: [bool; 2],
-    from_a: Option<usize>,
-    from_b: Option<usize>,
+    member: Vec<[bool; 2]>,
+    from: Vec<Option<usize>>,
 }
 
 fn separate() -> KernelError {
     unsupported("the boss does not reach the body: their union would be two separate solids (one solid only)")
 }
 
-/// The first cardinal axis along which both are right prisms.
-fn chart(body: &Body, tool: &Body, tol: f64) -> Result<Option<(usize, Prism, Prism)>> {
-    for k in 0..3 {
-        if !(prism_along(body, k) && prism_along(tool, k)) {
-            continue;
+/// Pairs each downward crossing with the next upward one along a periodic support (gap in (0, 2 pi]).
+fn pair_round(downs: &[P], ups: &[P], param: &dyn Fn(P) -> f64, forward: bool) -> Result<Vec<(f64, f64)>> {
+    let mut used = vec![false; ups.len()];
+    let mut out = vec![];
+    for d in downs {
+        let a0 = param(*d);
+        let gap = |q: &P| {
+            let g = ((param(*q) - a0) * if forward { 1. } else { -1. }).rem_euclid(2. * PI);
+            if g <= 1e-12 { 2. * PI } else { g }
+        };
+        let j = (0..ups.len())
+            .filter(|&j| !used[j])
+            .min_by(|&i, &j| gap(&ups[i]).total_cmp(&gap(&ups[j])))
+            .ok_or_else(|| unsupported("layered union: a wall's crossings do not pair"))?;
+        used[j] = true;
+        let g = gap(&ups[j]);
+        out.push((a0, if forward { g } else { -g }));
+    }
+    Ok(out)
+}
+
+/// The body as a stack of right prisms along k (see the module notes), or None when it is not one.
+fn layered(body: &Body, k: usize, tool: bool, tol: f64) -> Result<Option<Layered>> {
+    let (u, v) = axes(k);
+    let kk = unit(k);
+    let square = |w: Vec3| coord(w, k).abs() >= 1. - 1e-12 && coord(w, u).abs() <= 1e-12 && coord(w, v).abs() <= 1e-12;
+    let mut caps = vec![];
+    let mut walls = vec![];
+    for (i, f) in body.faces.iter().enumerate() {
+        match f.surface {
+            Surface::Plane { p, n, .. } => {
+                if square(n) {
+                    let out = coord(n, k) * if f.sense { 1. } else { -1. };
+                    caps.push((coord(p, k), out > 0., i));
+                } else if coord(n, k).abs() <= 1e-12 {
+                    walls.push(i);
+                } else {
+                    return Ok(None);
+                }
+            }
+            Surface::Cylinder { a, .. } | Surface::EllipticCylinder { a, .. } if square(a) => walls.push(i),
+            _ => return Ok(None),
         }
-        if let (Some(a), Some(b)) = (prism(body, k, tol)?, prism(tool, k, tol)?) {
+    }
+    // Wall edges run square to k (at one level) or along it.
+    let level = |c: &Curve| -> bool {
+        match *c {
+            Curve::Line { a, b } => (coord(a, k) - coord(b, k)).abs() <= tol,
+            Curve::Arc { n, .. } => square(n),
+            Curve::Conic { u: cu, v: cv, .. } => coord(cu, k).abs() <= 1e-9 * cu.length() && coord(cv, k).abs() <= 1e-9 * cv.length(),
+            _ => false,
+        }
+    };
+    let vertical = |c: &Curve| matches!(*c, Curve::Line { a, b } if b.sub(a).cross(kk).length() <= 1e-12 * b.sub(a).length());
+    for &w in &walls {
+        for &(e, _) in body.faces[w].loops.iter().flatten() {
+            let c = &body.edges[e].curve;
+            if !level(c) && !vertical(c) {
+                return Ok(None);
+            }
+        }
+    }
+    let mut levels: Vec<f64> = vec![];
+    for &(z, _, _) in &caps {
+        if levels.iter().all(|l| (l - z).abs() > tol) {
+            levels.push(z);
+        }
+    }
+    levels.sort_by(f64::total_cmp);
+    if levels.len() < 2 || levels.len() > 64 {
+        return Ok(None);
+    }
+    let to2 = |q: Vec3| P::new(coord(q, u), coord(q, v));
+    let mut slabs = vec![];
+    let mut area_volume = 0.;
+    for l in 0..levels.len() - 1 {
+        let (lo, hi) = (levels[l], levels[l + 1]);
+        let mid = 0.5 * (lo + hi);
+        // Every wall's pieces at the middle: from each vertical edge crossing it downward to the next crossing it upward
+        // along the wall's travel (k x outward: material on the left).
+        let mut pieces: Vec<(Seg, usize)> = vec![];
+        for &w in &walls {
+            let face = &body.faces[w];
+            let mut crossings: Vec<(P, bool)> = vec![];
+            for &(e, fwd) in face.loops.iter().flatten() {
+                let edge = &body.edges[e];
+                if !vertical(&edge.curve) {
+                    continue;
+                }
+                let (s, t) = if fwd { (edge.start, edge.end) } else { (edge.end, edge.start) };
+                let (zs, zt) = (coord(body.vertices[s], k), coord(body.vertices[t], k));
+                if zs.min(zt) < mid && zs.max(zt) > mid {
+                    crossings.push((to2(body.vertices[s]), zt > zs));
+                }
+            }
+            if crossings.is_empty() {
+                continue;
+            }
+            let downs: Vec<P> = crossings.iter().filter(|c| !c.1).map(|c| c.0).collect();
+            let ups: Vec<P> = crossings.iter().filter(|c| c.1).map(|c| c.0).collect();
+            if downs.len() != ups.len() {
+                return Ok(None);
+            }
+            match face.surface {
+                Surface::Plane { p, n, .. } => {
+                    let out = if face.sense { n } else { n.scale(-1.) };
+                    let t = kk.cross(out);
+                    let (o, t2) = (to2(p), P::new(coord(t, u), coord(t, v)));
+                    let along = |q: P| q.sub(o).dot(t2);
+                    let mut all: Vec<(f64, bool, P)> = crossings.iter().map(|c| (along(c.0), c.1, c.0)).collect();
+                    all.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    for pair in all.chunks(2) {
+                        let [(_, false, a), (_, true, b)] = pair[..] else { return Ok(None) };
+                        pieces.push((Seg::Line { a, b }, w));
+                    }
+                }
+                Surface::Cylinder { p, r, .. } => {
+                    let c = to2(p);
+                    let angle = |q: P| (q.y - c.y).atan2(q.x - c.x);
+                    for (a0, sweep) in pair_round(&downs, &ups, &angle, face.sense)? {
+                        pieces.push((Seg::Arc { c, r, a0, sweep }, w));
+                    }
+                }
+                Surface::EllipticCylinder { p, u: eu, v: ev, .. } => {
+                    let c = to2(p);
+                    let (u2, v2) = (P::new(coord(eu, u), coord(eu, v)), P::new(coord(ev, u), coord(ev, v)));
+                    let forward = face.sense == (u2.cross(v2) > 0.);
+                    let param = |q: P| {
+                        let (cc, nn) = unit_coords(u2, v2, q.sub(c));
+                        nn.atan2(cc)
+                    };
+                    for (a0, sweep) in pair_round(&downs, &ups, &param, forward)? {
+                        pieces.push((Seg::Conic { c, u: u2, v: v2, a0, sweep }, w));
+                    }
+                }
+                _ => return Ok(None),
+            }
+        }
+        if pieces.len() > LIMIT {
+            return Err(unsupported("layered union: a section exceeds its work limit"));
+        }
+        // Chain the pieces into loops by their ends, then join pieces of one support.
+        let mut used = vec![false; pieces.len()];
+        let (mut loops, mut tags) = (vec![], vec![]);
+        let whole = |i: usize| Tag { tool, seg: i, s0: 0., s1: 1. };
+        for first in 0..pieces.len() {
+            if used[first] {
+                continue;
+            }
+            used[first] = true;
+            let (mut lp, mut tg) = (vec![pieces[first].0], vec![whole(first)]);
+            while lp.last().unwrap().end().dist(lp[0].start()) > tol {
+                let end = lp.last().unwrap().end();
+                let Some(next) = (0..pieces.len()).find(|&j| !used[j] && pieces[j].0.start().dist(end) <= tol) else { return Ok(None) };
+                used[next] = true;
+                lp.push(pieces[next].0);
+                tg.push(whole(next));
+            }
+            let (lp, tg) = merge(lp, tg, tol);
+            loops.push(lp);
+            tags.push(tg);
+        }
+        let area: f64 = loops.iter().map(|l| loop_area(l)).sum();
+        if loops.is_empty() || area <= 0. {
+            return Ok(None);
+        }
+        area_volume += area * (hi - lo);
+        slabs.push(Slab { loops, tags, lo, hi, faces: pieces.iter().map(|p| p.1).collect() });
+    }
+    // The stack proof: the layers' areas times their thicknesses are the body's measured volume.
+    let volume = crate::mass::measure(body, tol)?.volume;
+    if (area_volume - volume).abs() > 1e-9 * volume.abs().max(1.) {
+        return Ok(None);
+    }
+    Ok(Some(Layered { slabs, caps }))
+}
+
+/// The first cardinal axis along which both are layered.
+fn chart(body: &Body, tool: &Body, tol: f64) -> Result<Option<(usize, Layered, Layered)>> {
+    for k in 0..3 {
+        if let (Ok(Some(a)), Ok(Some(b))) = (layered(body, k, false, tol), layered(tool, k, true, tol)) {
             return Ok(Some((k, a, b)));
         }
     }
     Ok(None)
 }
 
-/// Whether this domain takes the pair (both right prisms along one cardinal axis).
+/// Whether this domain takes the pair (both layered along one cardinal axis).
 pub(in crate::boolean) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
     matches!(chart(body, tool, tol), Ok(Some(_)))
 }
@@ -189,66 +377,70 @@ impl Build<'_> {
 
 /// The union (see the module notes).
 pub(in crate::boolean) fn union(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
-    let (k, a, b) = chart(body, tool, tol)?.ok_or_else(|| unsupported("the prism union needs both bodies to be right prisms along one axis"))?;
-    let mut levels = vec![a.lo, a.hi];
-    for z in [b.lo, b.hi] {
-        if levels.iter().all(|l| (l - z).abs() > tol) {
-            levels.push(z);
+    let (k, a, b) = chart(body, tool, tol)?.ok_or_else(|| unsupported("the layered prism union needs both bodies to be stacks of right prisms along one axis"))?;
+    // Every slab, the body's first; levels within the tolerance are one (the body's value kept).
+    let slabs: Vec<(&Slab, &Body)> = a.slabs.iter().map(|s| (s, body)).chain(b.slabs.iter().map(|s| (s, tool))).collect();
+    let mut levels: Vec<f64> = vec![];
+    for (s, _) in &slabs {
+        for z in [s.lo, s.hi] {
+            if levels.iter().all(|l| (l - z).abs() > tol) {
+                levels.push(z);
+            }
         }
     }
     levels.sort_by(f64::total_cmp);
     let at = |z: f64| levels.iter().position(|l| (l - z).abs() <= tol).unwrap();
-    let (a0, a1, b0, b1) = (at(a.lo), at(a.hi), at(b.lo), at(b.hi));
+    let spans_of: Vec<(usize, usize)> = slabs.iter().map(|(s, _)| (at(s.lo), at(s.hi))).collect();
     let layers = levels.len() - 1;
-    let active = |l: usize| (a0 <= l && l < a1, b0 <= l && l < b1);
-    if (0..layers).any(|l| active(l) == (false, false)) {
+    let active = |slab: usize, l: usize| spans_of[slab].0 <= l && l < spans_of[slab].1;
+    if (0..layers).any(|l| (0..slabs.len()).all(|s| !active(s, l))) {
         return Err(separate());
     }
-    // The arrangement of both sections.
-    let mut b_tags = b.tags.clone();
-    b_tags.iter_mut().flatten().for_each(|t| t.tool = true);
+    // The arrangement of every slab's section against all the others'.
     let mut pool = vec![];
-    let pa = split(&a.loops, &a.tags, &b.loops, &mut pool, tol)?;
-    let pb = split(&b.loops, &b_tags, &a.loops, &mut pool, tol)?;
-    if pa.len() + pb.len() > 4 * LIMIT {
-        return Err(unsupported("prism union exceeds its work limit"));
+    let mut pieces = vec![];
+    for (i, (s, _)) in slabs.iter().enumerate() {
+        let others: Vec<Vec<Seg>> = slabs.iter().enumerate().filter(|(j, _)| *j != i).flat_map(|(_, (o, _))| o.loops.iter().cloned()).collect();
+        for p in split(&s.loops, &s.tags, &others, &mut pool, tol)? {
+            pieces.push((i, p));
+        }
+        if pieces.len() > 4 * LIMIT {
+            return Err(unsupported("layered prism union exceeds its work limit"));
+        }
     }
-    let mut spans = vec![];
-    let mut twinned = vec![false; pb.len()];
-    for p in &pa {
+    let mut spans: Vec<Span> = vec![];
+    for (i, p) in &pieces {
         let mid = p.seg.at(0.5);
-        let twin = pb.iter().position(|q| ((q.v0 == p.v0 && q.v1 == p.v1) || (q.v0 == p.v1 && q.v1 == p.v0)) && q.seg.at(0.5).dist(mid) <= tol);
-        let (inside_b, from_b) = match twin {
-            Some(j) => {
-                twinned[j] = true;
-                let same = pb[j].seg.tangent(0.5).dot(p.seg.tangent(0.5)) > 0.;
-                ([same, !same], Some(pb[j].tag.seg))
-            }
+        let found = spans.iter().position(|q| ((q.v0 == p.v0 && q.v1 == p.v1) || (q.v0 == p.v1 && q.v1 == p.v0)) && q.seg.at(0.5).dist(mid) <= tol);
+        let j = match found {
+            Some(j) => j,
             None => {
-                if b.loops.iter().flatten().any(|s| s.distance(mid) <= tol) {
-                    return Err(unsupported("prism union: section boundaries meet along an unmatched piece"));
-                }
-                let w = winding(&b.loops, mid)? != 0;
-                ([w, w], None)
+                spans.push(Span { v0: p.v0, v1: p.v1, seg: p.seg, member: vec![[false; 2]; slabs.len()], from: vec![None; slabs.len()] });
+                spans.len() - 1
             }
         };
-        spans.push(Span { v0: p.v0, v1: p.v1, seg: p.seg, a: [true, false], b: inside_b, from_a: Some(p.tag.seg), from_b });
-    }
-    for (j, q) in pb.iter().enumerate() {
-        if twinned[j] {
-            continue;
+        // The slab lies left of its own boundary pieces: on the span's left when they run the same way.
+        let same = spans[j].seg.tangent(0.5).dot(p.seg.tangent(0.5)) > 0.;
+        if spans[j].from[*i].is_some() {
+            return Err(unsupported("layered prism union: a section runs over itself"));
         }
-        let mid = q.seg.at(0.5);
-        if a.loops.iter().flatten().any(|s| s.distance(mid) <= tol) {
-            return Err(unsupported("prism union: section boundaries meet along an unmatched piece"));
-        }
-        let w = winding(&a.loops, mid)? != 0;
-        spans.push(Span { v0: q.v0, v1: q.v1, seg: q.seg, a: [w, w], b: [true, false], from_a: None, from_b: Some(q.tag.seg) });
+        spans[j].member[*i] = [same, !same];
+        spans[j].from[*i] = Some(p.tag.seg);
     }
-    let solid = |l: usize, s: &Span, side: usize| {
-        let (ia, ib) = active(l);
-        (ia && s.a[side]) || (ib && s.b[side])
-    };
+    for span in &mut spans {
+        let mid = span.seg.at(0.5);
+        for (i, (s, _)) in slabs.iter().enumerate() {
+            if span.from[i].is_some() {
+                continue;
+            }
+            if s.loops.iter().flatten().any(|g| g.distance(mid) <= tol) {
+                return Err(unsupported("layered prism union: section boundaries meet along an unmatched piece"));
+            }
+            let w = winding(&s.loops, mid)? != 0;
+            span.member[i] = [w, w];
+        }
+    }
+    let solid = |l: usize, s: &Span, side: usize| (0..slabs.len()).any(|i| active(i, l) && s.member[i][side]);
     // Supports, and wall groups (support, facing).
     let mut support = vec![0; spans.len()];
     let mut reps: Vec<usize> = vec![];
@@ -261,22 +453,16 @@ pub(in crate::boolean) fn union(body: &Body, tool: &Body, tol: f64) -> Result<Bo
             }
         };
     }
-    // A wall's surface: the side face of the operand whose boundary carries it (A first), else the span's own.
+    // A wall's surface: the face its span was read from, of a slab active there with material on the wall's side (the
+    // body's first), else the span's own.
     let side_face = |s: &Span, left: bool, l: usize| -> Option<(Surface, bool)> {
-        let (ia, ib) = active(l);
         let side = if left { 0 } else { 1 };
-        let from = |seg: Option<usize>, prism: &Prism, owner: &Body| {
-            seg.filter(|&g| g != MIXED).map(|g| prism.origins[g].face).filter(|&f| f != usize::MAX).map(|f| (owner.faces[f].surface.clone(), owner.faces[f].sense))
-        };
-        if ia && s.a[side] && s.a[0] != s.a[1] {
-            if let Some(found) = from(s.from_a, &a, body) {
-                return Some(found);
-            }
-        }
-        if ib && s.b[side] && s.b[0] != s.b[1] {
-            return from(s.from_b, &b, tool);
-        }
-        None
+        (0..slabs.len()).find_map(|i| {
+            let (slab, owner) = slabs[i];
+            let g = s.from[i].filter(|&g| g != MIXED && active(i, l) && s.member[i][side])?;
+            let f = &owner.faces[slab.faces[g]];
+            Some((f.surface.clone(), f.sense))
+        })
     };
     let mut build = Build { pool: &pool, spans: &spans, levels: &levels, k, body: Body::default(), vertex: HashMap::new(), level_edge: HashMap::new(), rise: HashMap::new() };
     let mut faces = vec![];
@@ -317,9 +503,11 @@ pub(in crate::boolean) fn union(body: &Body, tool: &Body, tol: f64) -> Result<Bo
         group.push(Some(g));
     }
     // The level faces, and each layer's area for the volume check.
-    let cap_face = |prism: &Prism, owner: &Body, top: bool| -> Option<(Surface, bool)> {
-        let list = if top { &prism.top } else { &prism.bottom };
-        list.first().map(|&f| (owner.faces[f].surface.clone(), owner.faces[f].sense))
+    // A cap of an operand at a level, looking the given way (the body's first).
+    let cap_face = |level: f64, up: bool| -> Option<(Surface, bool)> {
+        [(&a, body), (&b, tool)].iter().find_map(|(op, owner)| {
+            op.caps.iter().find(|c| (c.0 - level).abs() <= tol && c.1 == up).map(|c| (owner.faces[c.2].surface.clone(), owner.faces[c.2].sense))
+        })
     };
     for j in 0..=layers {
         for up in [true, false] {
@@ -356,15 +544,7 @@ pub(in crate::boolean) fn union(body: &Body, tool: &Body, tol: f64) -> Result<Bo
                 let (_, o) = best.ok_or_else(|| KernelError::Internal("prism union: a hole lies in no outline".into()))?;
                 owned[o].push(h);
             }
-            // The cap of an operand ending (up) or starting (down) at this level; A first.
-            let (surface, sense) = if up {
-                if j == a1 { cap_face(&a, body, true) } else { cap_face(&b, tool, true) }
-            } else if j == a0 {
-                cap_face(&a, body, false)
-            } else {
-                cap_face(&b, tool, false)
-            }
-            .ok_or_else(|| KernelError::Internal("prism union: a level face has no operand cap".into()))?;
+            let (surface, sense) = cap_face(levels[j], up).ok_or_else(|| KernelError::Internal("layered prism union: a level face has no operand cap".into()))?;
             for face_loops in owned {
                 let mut out = vec![];
                 for lp in face_loops {

@@ -320,3 +320,25 @@ fn a_hole_after_a_boss() {
         Err(e) => panic!("a hole beside a boss: {e}"),
     }
 }
+
+#[test]
+fn later_bosses_on_a_stacked_body_overlap_overhang_and_rise_above_earlier_ones() {
+    let p = plate();
+    let once = united(&p, &up(vec![rect(4., 2., 6., 5., 0.)], 0., 1.), 46.);
+    // A second boss across the first, as high: one plus-shaped top, its outline 8 walls.
+    let plus = united(&once, &up(vec![rect(5., 3., 8., 4., 0.)], 0., 1.), 46. + 3. - 1.);
+    assert_eq!(plus.faces.len(), 2 + 4 + 8 + 1);
+    // Taller than the first: it rises out of it.
+    united(&once, &up(vec![rect(5., 3., 8., 4., 0.)], 0., 2.), 46. + 6. - 1.);
+    // Over the plate's edge after the first boss.
+    let edge = united(&once, &up(vec![rect(9., 2., 11., 5., 0.)], 0., 1.), 52.);
+    // And a third, joining the two bosses (a bridge between them, 1 high, standing on the plate).
+    united(&edge, &up(vec![rect(5., 3., 10., 4., 0.)], 0., 1.), 52. + 5. - 1. - 1.);
+    // Two overlapping round bosses r 1, centres 1 apart: the union of the discs (2 pi less the lens) times 0.5.
+    let lens = 2. * (0.5f64).acos() - 0.5 * 3f64.sqrt();
+    let round = united(&p, &up(vec![circle(4., 4., 1., 0.)], 0., 0.5), 40. + PI * 0.5);
+    united(&round, &up(vec![circle(5., 4., 1., 0.)], 0., 0.5), 40. + (2. * PI - lens) * 0.5);
+    // A pocketed plate takes a boss over the pocket's edge (the body is a stack of two prisms).
+    let pocketed = cut(&p, &up(vec![rect(2., 2., 4., 4., 0.)], -0.2, 0.01), TOL).unwrap();
+    united(&pocketed, &up(vec![rect(3., 3., 5., 5., 0.)], 0., 1.), 40. - 4. * 0.2 + 4.);
+}
