@@ -13,6 +13,10 @@ mod passage;
 mod radial;
 mod rectilinear;
 mod section;
+mod unite;
+mod unite_tidy;
+
+pub use unite::{union, union_named};
 
 #[derive(Clone, Copy, Debug)]
 enum Domain {
