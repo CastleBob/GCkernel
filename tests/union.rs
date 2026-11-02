@@ -342,3 +342,31 @@ fn later_bosses_on_a_stacked_body_overlap_overhang_and_rise_above_earlier_ones()
     let pocketed = cut(&p, &up(vec![rect(2., 2., 4., 4., 0.)], -0.2, 0.01), TOL).unwrap();
     united(&pocketed, &up(vec![rect(3., 3., 5., 5., 0.)], 0., 1.), 40. - 4. * 0.2 + 4.);
 }
+
+#[test]
+fn a_boss_on_a_sloping_face_and_a_boss_over_a_hole() {
+    // A bar along y whose section has a 45-degree face from (0, 0) to (2, 2) (x, z): 6 x 10 = 60.
+    let section: Vec<Curve> = [(0., 0.), (4., 0.), (4., 2.), (2., 2.)]
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let pts = [(0., 0.), (4., 0.), (4., 2.), (2., 2.)];
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            Curve::Line { a: v(a.0, 0., a.1), b: v(b.0, 0., b.1) }
+        })
+        .collect();
+    let bar = prism(vec![section], v(0., 1., 0.), 0., 10.);
+    assert!((volume(&bar) - 60.).abs() < 1e-9);
+    // A 1 x 1 boss on the slope, centred at (1, 5, 1), 0.5 out along its outward normal.
+    let (s, n) = (v(1., 0., 1.).scale(0.5f64.sqrt()), v(-1., 0., 1.).scale(0.5f64.sqrt()));
+    let y = v(0., 1., 0.);
+    let c = v(1., 5., 1.);
+    let corner = |a: f64, b: f64| c.add(s.scale(a)).add(y.scale(b));
+    let pts = [corner(-0.5, -0.5), corner(0.5, -0.5), corner(0.5, 0.5), corner(-0.5, 0.5)];
+    let square: Vec<Curve> = (0..4).map(|i| Curve::Line { a: pts[i], b: pts[(i + 1) % 4] }).collect();
+    united(&bar, &prism(vec![square], n, 0., 0.5), 60.5);
+    // A boss over a plate's through hole: the hole becomes blind from below (the stack domain).
+    let holed = up(vec![rect(0., 0., 10., 8., 0.), circle(5., 4., 0.5, 0.)], -0.5, 0.);
+    let r = united(&holed, &up(vec![rect(4., 3., 6., 5., 0.)], 0., 1.), 40. - PI * 0.125 + 4.);
+    assert_eq!(r.faces.len(), 6 + 1 + 1 + 5);
+}
