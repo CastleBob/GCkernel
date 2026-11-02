@@ -588,8 +588,9 @@ pub(in crate::boolean) fn union(body: &Body, tool: &Body, tol: f64) -> Result<Bo
     unite_tidy::join_edges(&mut result, tol);
     unite_tidy::outer_first(&mut result);
     crate::topology::check(&result, tol).map_err(|e| KernelError::Internal(format!("prism union built an invalid solid: {e}")))?;
+    // One shell: separate pieces (or an enclosed void, whose inner shell this domain does not build as one) are refused.
     if !unite_tidy::connected(&result) {
-        return Err(separate());
+        return Err(unsupported("the union would leave separate solids or enclose a void (one solid without voids only)"));
     }
     // The stack's volume: each layer's union area times its thickness.
     let mut expected = 0.;

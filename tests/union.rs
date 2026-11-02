@@ -370,3 +370,15 @@ fn a_boss_on_a_sloping_face_and_a_boss_over_a_hole() {
     let r = united(&holed, &up(vec![rect(4., 3., 6., 5., 0.)], 0., 1.), 40. - PI * 0.125 + 4.);
     assert_eq!(r.faces.len(), 6 + 1 + 1 + 5);
 }
+
+#[test]
+fn a_boss_on_the_whole_top_makes_a_thicker_plate_and_a_closed_ring_lid_is_refused() {
+    // The boss's outline is the plate's: every side joins, six faces, 10 x 8 x 1.5.
+    let r = united(&plate(), &up(vec![rect(0., 0., 10., 8., 0.)], 0., 1.), 120.);
+    assert_eq!(r.faces.len(), 6);
+    assert_eq!(r.edges.len(), 12);
+    // A ring wall then a lid over it encloses a void: refused by name.
+    let ring = united(&plate(), &up(vec![rect(2., 2., 8., 6., 0.), rect(3., 3., 7., 5., 0.)], 0., 1.), 40. + 24. - 8.);
+    let m = refused(&ring, &up(vec![rect(2., 2., 8., 6., 0.)], 1., 1.5));
+    assert!(m.contains("void"), "{m}");
+}

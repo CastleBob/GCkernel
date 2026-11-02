@@ -574,7 +574,8 @@ holes, one seam kept on bands round a periodic support) and joins edges of one s
 through plates, overlapping/stacked bosses, bosses over holes and pockets, I-beam blocks along the beam. Volume checked
 against the layer areas. Refusals: "the boss does not reach the body: their union would be two separate solids (one
 solid only)", "the bodies would touch only along an edge (non-manifold result)", "the union would touch itself at a
-point of its outline (non-manifold result)", the section domain's ellipse-meeting refusal.
+point of its outline (non-manifold result)", "the union would leave separate solids or enclose a void (one solid
+without voids only)", the section domain's ellipse-meeting refusal.
 
 Not supported yet: unions where neither domain applies (e.g. a round boss overhanging a curved or non-layered body, a
 boss straddling two faces at different levels of a non-layered body, bosses on cylindrical faces), stack-domain
