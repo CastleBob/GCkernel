@@ -213,12 +213,13 @@ pub(super) fn join_edges(body: &mut Body, tol: f64) {
             break;
         }
         // Drop the placeholder before the next pass reads the incidences.
-        compact(body);
+        let _ = compact(body);
     }
 }
 
-/// Drops edges no face uses and vertices no edge uses, and renumbers.
-pub(super) fn compact(body: &mut Body) {
+/// Drops edges no face uses and vertices no edge uses, and renumbers. Returns the old -> new edge and vertex maps
+/// (usize::MAX: dropped).
+pub(super) fn compact(body: &mut Body) -> (Vec<usize>, Vec<usize>) {
     let mut used_e = vec![false; body.edges.len()];
     for &(e, _) in body.faces.iter().flat_map(|f| f.loops.iter().flatten()) {
         used_e[e] = true;
@@ -253,6 +254,7 @@ pub(super) fn compact(body: &mut Body) {
     }
     body.vertices = vertices;
     body.edges = edges;
+    (em, vm)
 }
 
 /// Twice the vector area of a closed planar loop of lines, arcs and ellipse arcs (exact: the integral of q x dq).

@@ -76,6 +76,9 @@ pub const FROM_TOOL_VERTEX: u32 = 39;
 pub const MEETING_END: u32 = 40;
 /// The end on body face c of the edge from tool edge j: [j, c].
 pub const TOOL_EDGE_END: u32 = 41;
+/// Op 25 (Claude 2026-11-02): a vertex generated where body edge i crosses tool edge j, the n-th such crossing along the
+/// tool edge (n = 0, 1, ... in the tool edge's own direction): [i, j, n].
+pub const EDGE_CROSSING: u32 = 42;
 
 // Op 12 outcome codes, one per input entity.
 pub const UNCHANGED: u32 = 1;

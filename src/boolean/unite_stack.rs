@@ -584,7 +584,7 @@ pub(in crate::boolean) fn union(body: &Body, tool: &Body, tol: f64) -> Result<Bo
         net.abs() > PI
     };
     unite_tidy::join_faces(&mut result, &group, &wraps)?;
-    unite_tidy::compact(&mut result);
+    let _ = unite_tidy::compact(&mut result);
     unite_tidy::join_edges(&mut result, tol);
     unite_tidy::outer_first(&mut result);
     crate::topology::check(&result, tol).map_err(|e| KernelError::Internal(format!("prism union built an invalid solid: {e}")))?;

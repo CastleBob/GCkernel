@@ -577,7 +577,7 @@ solid only)", "the bodies would touch only along an edge (non-manifold result)",
 point of its outline (non-manifold result)", "the union would leave separate solids or enclose a void (one solid
 without voids only)", the section domain's ellipse-meeting refusal.
 
-### Overhang on a non-layered body (`unite_overhang.rs`; history not recorded: op 25 refuses by name)
+### Overhang on a non-layered body (`unite_overhang.rs`; history recorded)
 
 Tried after the face and stack domains decline: a boss whose base (as the face domain's) rests on exactly one planar
 face F and crosses F's outline transversally, on any body (a round boss over an I-beam flange tip or corner). Both
@@ -592,9 +592,13 @@ bodies unchanged. Volume checked (body + tool). Refusals: "the boss's edge runs 
 that is not a layered prism stack; not supported yet", "the boss rests on more than one face of the body", "a curved
 part of the body reaches the plane under the boss's overhang", "another part of the body reaches the plane under the
 boss's overhang", "a corner of the boss's base lies on the face's outline", plus the face domain's boss and room checks.
+History (op 25): kept entities [i, 0]; F's regions [F, 1] (split when several); faces beside a split edge [i, 1]; the
+underside FROM_TOOL_FACE [base face, 1] (op 25 refuses when the base is several faces); split edges' pieces [e, 1]; each
+crossing vertex the new role 42 EDGE_CROSSING [body edge, tool edge, n], n counting crossings of that pair along the
+tool edge's own direction (generated names are checked unique).
 
 Not supported yet: unions none of the domains take (bosses on cylindrical faces such as a pipe's; a boss sunk partly
-into a non-layered body; flush bosses on non-layered bodies), history for the stack and overhang domains, spline and
+into a non-layered body; flush bosses on non-layered bodies), history for the stack domain, spline and
 Bezier operands. Tests: `tests/union.rs` (closed-form volumes, topology check and tessellation of
 every result, entity-for-entity preservation in the face domain, op 24/25 through the protocol, a hole cut after a
 boss).

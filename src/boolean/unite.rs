@@ -85,7 +85,7 @@ pub fn union(body: &Body, tool: &Body, tol: f64) -> Result<Body, KernelError> {
     match select(body, tool, tol)? {
         Domain::Face(plan) => unite_face::unite(body, tool, &plan, tol).map(|(b, _)| b),
         Domain::Stack => unite_stack::union(body, tool, tol),
-        Domain::Overhang(plan) => unite_overhang::unite(body, tool, &plan, tol),
+        Domain::Overhang(plan) => unite_overhang::unite(body, tool, &plan, tol).map(|(b, _)| b),
     }
 }
 
@@ -95,11 +95,25 @@ pub fn union_named(body: &Body, tool: &Body, tol: f64) -> Result<(Body, Provenan
     let (result, history) = match select(body, tool, tol)? {
         Domain::Face(plan) => unite_face::unite(body, tool, &plan, tol)?,
         Domain::Stack => return Err(unsupported("union history is not recorded for the prism stack union domain yet")),
-        Domain::Overhang(_) => return Err(unsupported("union history is not recorded for overhanging bosses yet")),
+        Domain::Overhang(plan) => {
+            let (result, history) = unite_overhang::unite(body, tool, &plan, tol)?;
+            if history.faces.is_empty() {
+                return Err(unsupported("union history is not recorded for an overhang under a base of several faces yet"));
+            }
+            (result, history)
+        }
     };
     let counts = (history.faces.len(), history.edges.len(), history.vertices.len());
     if counts != (result.faces.len(), result.edges.len(), result.vertices.len()) {
         return Err(KernelError::Internal(format!("union history names {counts:?} entities of another count")));
+    }
+    // Generated entities must be told apart by their records alone.
+    for list in [&history.faces, &history.edges, &history.vertices] {
+        for (i, r) in list.iter().enumerate() {
+            if r.role == crate::provenance::EDGE_CROSSING && list[i + 1..].contains(r) {
+                return Err(unsupported(&format!("union history would name two entities {r:?}")));
+            }
+        }
     }
     let inputs = [body.faces.len(), body.edges.len(), body.vertices.len(), tool.faces.len(), tool.edges.len(), tool.vertices.len()];
     let outcomes = outcomes(&history, inputs);

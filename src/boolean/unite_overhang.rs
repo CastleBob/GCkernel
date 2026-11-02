@@ -18,12 +18,16 @@
 //! becomes the boss's underside, on the base's own plane; F's edges and the base's edges that are crossed are split at
 //! the crossings (pieces lifted from the arrangement onto F's plane: lines between their vertices, arcs and ellipse
 //! arcs on their own supports), the faces beside them (F's neighbours, the boss's walls) take the pieces; every other
-//! entity of both bodies is kept unchanged. Volume checked: body plus tool. History is not recorded (op 25 refuses).
+//! entity of both bodies is kept unchanged. Volume checked: body plus tool.
+//! History (op 25, roles 30-42): every kept entity its source [i, 0]; F's regions [F, 1]; faces beside a split edge
+//! [i, 1]; the underside [base face, 1] (one base face only, else op 25 refuses); split edges' pieces [e, 1]; each
+//! crossing EDGE_CROSSING [body edge, tool edge, n] (n along the tool edge).
 use super::unite_face::{above, base_of, face_box, plane, room, seg2, Base};
 use super::unite_stack::chain;
 use super::*;
 use crate::boolean::unite_tidy;
 use crate::neutral::{Edge, Face};
+use crate::provenance::{Provenance, Record, EDGE_CROSSING, FROM_BODY_EDGE, FROM_BODY_FACE, FROM_BODY_VERTEX, FROM_TOOL_EDGE, FROM_TOOL_FACE, FROM_TOOL_VERTEX};
 
 /// The admitted overhang: F, the base faces, F's frame, the arrangement and its classification.
 pub(in crate::boolean) struct Plan {
@@ -213,20 +217,38 @@ pub(in crate::boolean) fn admit(body: &Body, tool: &Body, tol: f64) -> Result<Op
     Ok(Some(plan))
 }
 
-/// The admitted overhang union (see the module notes).
-pub(in crate::boolean) fn unite(body: &Body, tool: &Body, plan: &Plan, tol: f64) -> Result<Body> {
+/// The admitted overhang union and its history (see the module notes).
+pub(in crate::boolean) fn unite(body: &Body, tool: &Body, plan: &Plan, tol: f64) -> Result<(Body, Provenance)> {
     let (o, x, y, n) = (plan.o, plan.x, plan.y, plan.n);
     let mut r = body.clone();
     let (tv, te) = (r.vertices.len(), r.edges.len());
     r.vertices.extend(tool.vertices.iter().copied());
     r.edges.extend(tool.edges.iter().map(|e| Edge { curve: e.curve.clone(), start: e.start + tv, end: e.end + tv }));
     // Pool point -> result vertex.
+    let mut vrec: Vec<Record> = (0..body.vertices.len()).map(|i| Record::new(FROM_BODY_VERTEX, &[i]))
+        .chain((0..tool.vertices.len()).map(|j| Record::new(FROM_TOOL_VERTEX, &[j]))).collect();
+    let mut erec: Vec<Record> = (0..body.edges.len()).map(|i| Record::new(FROM_BODY_EDGE, &[i, 0]))
+        .chain((0..tool.edges.len()).map(|j| Record::new(FROM_TOOL_EDGE, &[j, 0]))).collect();
+    // A crossing's body edge and tool edge, and its parameter along the tool edge (B2 runs it backwards).
+    let crossing = |i: usize| -> Option<(usize, usize, f64)> {
+        let f = plan.f_pieces.iter().find(|(_, p, _)| p.v0 == i || p.v1 == i)?;
+        let (k, p, _) = plan.b_pieces.iter().find(|(_, p, _)| p.v0 == i || p.v1 == i)?;
+        let s = if p.v0 == i { p.tag.s0 } else { p.tag.s1 };
+        let (t, w) = plan.b_occ[*k];
+        // The parameter along the tool edge's own direction: B2's s runs the occurrence (t, w).
+        let along = if w { s } else { 1. - s };
+        Some((plan.f_occ[f.0].0, t, along))
+    };
+    let crossings: Vec<Option<(usize, usize, f64)>> = (0..plan.pool.len()).map(|i| if plan.known[i].is_none() { crossing(i) } else { None }).collect();
     let mut vmap = vec![usize::MAX; plan.pool.len()];
     for (i, k) in plan.known.iter().enumerate() {
         vmap[i] = match *k {
             Some((false, v)) => v,
             Some((true, v)) => tv + v,
             None => {
+                let (e, t, s) = crossings[i].ok_or_else(|| KernelError::Internal("overhang union: a new vertex is no crossing".into()))?;
+                let n = crossings.iter().flatten().filter(|c| c.0 == e && c.1 == t && c.2 < s).count();
+                vrec.push(Record::new(EDGE_CROSSING, &[e, t, n]));
                 r.vertices.push(o.add(x.scale(plan.pool[i].x)).add(y.scale(plan.pool[i].y)));
                 r.vertices.len() - 1
             }
@@ -259,6 +281,7 @@ pub(in crate::boolean) fn unite(body: &Body, tool: &Body, plan: &Plan, tol: f64)
                 let (s, t) = (vmap[p.v0], vmap[p.v1]);
                 let curve = lift(&p.seg, r.vertices[s], r.vertices[t], o, x, y, n);
                 r.edges.push(Edge { curve, start: s, end: t });
+                erec.push(if side { Record::new(FROM_TOOL_EDGE, &[e, 1]) } else { Record::new(FROM_BODY_EDGE, &[e, 1]) });
                 out[i] = (r.edges.len() - 1, true);
                 along.push((r.edges.len() - 1, true));
             }
@@ -311,22 +334,28 @@ pub(in crate::boolean) fn unite(body: &Body, tool: &Body, plan: &Plan, tol: f64)
     if kept.is_empty() || hanging.is_empty() {
         return Err(KernelError::Internal("overhang union: a region vanished".into()));
     }
+    let mut frec = vec![];
+    let changed = |lp: &[(usize, bool)]| lp.iter().any(|o| replace.contains_key(o));
     let (fs, fsense) = (body.faces[plan.face].surface.clone(), body.faces[plan.face].sense);
     for (i, g) in body.faces.iter().enumerate() {
         if i == plan.face {
             faces.push(Face { surface: fs.clone(), sense: fsense, loops: kept[0].clone() });
+            frec.push(Record::new(FROM_BODY_FACE, &[i, 1]));
         } else {
             faces.push(Face { surface: g.surface.clone(), sense: g.sense, loops: g.loops.iter().map(|l| swap(l)).collect() });
+            frec.push(Record::new(FROM_BODY_FACE, &[i, g.loops.iter().any(|l| changed(l)) as usize]));
         }
     }
     for extra in &kept[1..] {
         faces.push(Face { surface: fs.clone(), sense: fsense, loops: extra.clone() });
+        frec.push(Record::new(FROM_BODY_FACE, &[plan.face, 1]));
     }
     for (j, t) in tool.faces.iter().enumerate() {
         if plan.base.contains(&j) {
             continue;
         }
         let moved: Vec<Vec<(usize, bool)>> = t.loops.iter().map(|l| l.iter().map(|&(e, w)| (e + te, w)).collect::<Vec<_>>()).collect();
+        frec.push(Record::new(FROM_TOOL_FACE, &[j, moved.iter().any(|l| changed(l)) as usize]));
         faces.push(Face { surface: t.surface.clone(), sense: t.sense, loops: moved.iter().map(|l| swap(l)).collect() });
     }
     // The underside looks along -n: its loops run the other way round.
@@ -334,9 +363,25 @@ pub(in crate::boolean) fn unite(body: &Body, tool: &Body, plan: &Plan, tol: f64)
     for face in hanging {
         let loops = face.into_iter().map(|lp| lp.into_iter().rev().map(|(e, w)| (e, !w)).collect()).collect();
         faces.push(Face { surface: bs.clone(), sense: bsense, loops });
+        frec.push(Record::new(FROM_TOOL_FACE, &[plan.base[0], 1]));
     }
     r.faces = faces;
-    unite_tidy::compact(&mut r);
+    let (emap, vmap2) = unite_tidy::compact(&mut r);
+    let mut history = Provenance { faces: frec, edges: vec![Record::new(0, &[]); r.edges.len()], vertices: vec![Record::new(0, &[]); r.vertices.len()] };
+    for (old, &new) in emap.iter().enumerate() {
+        if new != usize::MAX {
+            history.edges[new] = erec[old].clone();
+        }
+    }
+    for (old, &new) in vmap2.iter().enumerate() {
+        if new != usize::MAX {
+            history.vertices[new] = vrec[old].clone();
+        }
+    }
+    // An underside made from several base faces (a revolved disc's halves) has more than one parent.
+    if plan.base.len() > 1 {
+        history = Provenance::default();
+    }
     unite_tidy::outer_first(&mut r);
     crate::topology::check(&r, tol).map_err(|e| KernelError::Internal(format!("overhang union built an invalid solid: {e}")))?;
     if !unite_tidy::connected(&r) {
@@ -347,5 +392,5 @@ pub(in crate::boolean) fn unite(body: &Body, tool: &Body, plan: &Plan, tol: f64)
     if (mr.volume - expected).abs() > tol * mr.area + 1e-9 * expected.abs().max(1.) {
         return Err(KernelError::Internal(format!("overhang union built {}, body and boss hold {expected}", mr.volume)));
     }
-    Ok(r)
+    Ok((r, history))
 }

@@ -438,3 +438,45 @@ fn round_bosses_over_an_ibeam_flange_tip_and_corner() {
     // (On the bottom face of the bottom flange, z 0, looking down, a boss over the tip.)
     united(&beam, &prism(vec![circle(-3., 5., 0.4, 0.)], v(0., 0., -1.), 0., 0.5), vb + PI * 0.16 * 0.5);
 }
+
+#[test]
+fn op_25_on_an_overhang_names_crossings_and_splits() {
+    let beam = ibeam();
+    let boss = up(vec![circle(3., 10., 0.5, 0.)], 6., 7.);
+    let (r, h, outcomes) = union_named(&beam, &boss, TOL).unwrap();
+    assert_eq!(write_body(&r), write_body(&union(&beam, &boss, TOL).unwrap()), "op 25's body is op 24's");
+    // Two crossings of the flange's tip edge by the boss's base circle: n 0 and 1.
+    let crossings: Vec<&Vec<usize>> = h.vertices.iter().filter(|r| r.role == provenance::EDGE_CROSSING).map(|r| &r.refs).collect();
+    assert_eq!(crossings.len(), 2);
+    assert_eq!(crossings[0][..2], crossings[1][..2]);
+    assert_ne!(crossings[0][2], crossings[1][2]);
+    let tip_edge = crossings[0][0];
+    // That body edge is split in three; the base circle in two; the base face gives the underside.
+    let (nf, ne, nv) = (beam.faces.len(), beam.edges.len(), beam.vertices.len());
+    assert_eq!(outcomes[nf + tip_edge].code, provenance::SPLIT);
+    assert_eq!(outcomes[nf + tip_edge].outputs.len(), 3);
+    let tool = &outcomes[nf + ne + nv..];
+    let base_edge = crossings[0][1];
+    assert_eq!(tool[boss.faces.len() + base_edge].code, provenance::SPLIT);
+    assert!(tool[..boss.faces.len()].iter().all(|o| o.code != provenance::CONSUMED), "the base becomes the underside");
+    // Every crossing vertex lies on both edges' curves.
+    for (o, rec) in h.vertices.iter().enumerate() {
+        if rec.role == provenance::EDGE_CROSSING {
+            let q = r.vertices[o];
+            let on = |c: &Curve| (0..=2000).map(|i| { let (a, b) = c.domain(); c.eval(a + (b - a) * i as f64 / 2000.).0.distance(q) }).fold(f64::INFINITY, f64::min) < 1e-3;
+            assert!(on(&beam.edges[rec.refs[0]].curve) && on(&boss.edges[rec.refs[1]].curve));
+        }
+    }
+    // A dome over the tip (its flat disc is one face): op 25 records it too.
+    let dome = gc_kernel::revolve::revolve_general(&Revolution {
+        p: v(3., 12., 6.), a: v(0., 0., 1.), x: v(1., 0., 0.), angle: TAU,
+        loops: vec![vec![
+            Segment { r: 0., z: 0., kind: Kind::Line },
+            Segment { r: 0.5, z: 0., kind: Kind::Arc { cr: 0., cz: 0., ccw: true } },
+            Segment { r: 0., z: 0.5, kind: Kind::Line },
+        ]],
+    }, TOL).unwrap();
+    united(&beam, &dome, volume(&beam) + 2. / 3. * PI * 0.125);
+    let (_, h, _) = union_named(&beam, &dome, TOL).unwrap();
+    assert_eq!(h.vertices.iter().filter(|r| r.role == provenance::EDGE_CROSSING).count(), 2);
+}

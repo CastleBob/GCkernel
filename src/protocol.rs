@@ -49,8 +49,9 @@
 //!     24 union (two bodies back to back, body then tool, as op 3 -> their union, one solid; refused by name outside
 //!        the union domains, and when the bodies do not touch; boolean::union, Claude 2026-11-02),
 //!     25 named union (op 24's request -> op 24's reply, then the provenance envelope with its outcome section exactly
-//!        as op 12, roles 30-41 with body = the first operand and tool = the second; refused by name in a union domain
-//!        that records no history; boolean::union_named).
+//!        as op 12, roles 30-41 with body = the first operand and tool = the second, plus role 42 EDGE_CROSSING [body
+//!        edge, tool edge, n] for vertices where the boss's base outline crosses the face's; refused by name in a union
+//!        domain that records no history; boolean::union_named).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
