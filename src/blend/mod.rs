@@ -157,7 +157,9 @@ pub fn blend(body: &Body, items: &[Item], tol: f64) -> Result<Blended, KernelErr
             let along = |p: Vec3| p.sub(a).dot(d) / (len * len);
             let (u0, u1) = (along(ps), along(pt));
             if u0 < -1e-12 || u1 > 1.0 + 1e-12 || (u1 - u0) * len <= tol {
-                return unsupported(format!("edge {e} would be consumed: the blends reaching it pass its end (it is {len} long)"));
+                // How far along this edge the blends reach in all; with the length it says what size would fit.
+                let reach = len * (1.0 - (u1 - u0));
+                return unsupported(format!("edge {e} would be consumed: the blends reaching it pass its end (it is {len} long; they reach {reach} along it)"));
             }
             Curve::Line { a: ps, b: pt }
         };
