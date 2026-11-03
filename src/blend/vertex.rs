@@ -2,7 +2,8 @@
 //! k of the three edges there are blended:
 //! - k = 1: the blend runs out on the third (end) face. Each rail stops where it meets the end face's edge on its face;
 //!   those edges are trimmed there and the end face gains the blend's section by its plane (a line for a chamfer, a
-//!   circle or ellipse arc for a fillet).
+//!   circle or ellipse arc for a fillet). A side whose rail passes the end face's edge runs on over the cylinder strip
+//!   beyond when `runout` classifies it so.
 //! - k = 2: the two blends meet each other. On the face they share their rails meet at T; on the other two faces they
 //!   must reach the unblended edge at one point Q (refused otherwise), which trims it. The joint T-Q is the line where
 //!   two chamfer planes meet, the ellipse where two equal fillet cylinders meet (they are mirror images in the plane
@@ -12,6 +13,7 @@
 //!   angles to the other two, so the arcs are its frame's equator and meridians).
 
 use super::edge::{arc_between, cylinder_section, plane_of, unsupported, EdgeBlend, Shape};
+use super::runout;
 use crate::geom::{Curve, Surface, Vec3};
 use crate::neutral::{Body, Edge};
 use crate::KernelError;
@@ -43,12 +45,16 @@ pub(crate) struct Plan {
     pub point: HashMap<End, usize>,
     /// Blended edge ends on each of their faces: the rail's vertex there.
     pub rail: HashMap<(End, usize), usize>,
-    /// Blended edge ends: the edge closing the blend face there.
-    pub chain: HashMap<End, usize>,
+    /// Blended edge ends: the edges closing the blend face there, from the rail on one face to the rail on the other
+    /// (one edge, or two where the blend runs out past its end face: `runout`).
+    pub chain: HashMap<End, Vec<usize>>,
     /// Edges inserted at a face corner (face, loop, segment), with their direction there.
     pub insert: HashMap<(usize, usize, usize), (usize, bool)>,
     /// A corner patch: its surface, sense and edges.
     pub corner: Option<(Surface, bool, Vec<usize>)>,
+    /// Input edges and vertices the blend consumes (a run-out's short end edge and its far vertex).
+    pub consumed_edges: Vec<usize>,
+    pub consumed_vertices: Vec<usize>,
 }
 
 fn meet(l1: (Vec3, Vec3), l2: (Vec3, Vec3), tol: f64, what: &str) -> Result<Vec3, KernelError> {
@@ -71,8 +77,8 @@ fn line_of(body: &Body, e: usize) -> Result<(Vec3, Vec3), KernelError> {
     }
 }
 
-pub(crate) fn plan(v: usize, corners: &[Corner], blends: &HashMap<usize, EdgeBlend>, body: &Body, built: &mut Built, tol: f64)
-    -> Result<Plan, KernelError> {
+pub(crate) fn plan(v: usize, corners: &[Corner], all: &HashMap<usize, Vec<Corner>>, blends: &HashMap<usize, EdgeBlend>, body: &Body,
+    built: &mut Built, tol: f64) -> Result<Plan, KernelError> {
     if corners.len() != 3 {
         return unsupported(format!("vertex {v} joins {} face corners; a blend may end only at a vertex where three faces meet", corners.len()));
     }
@@ -85,7 +91,7 @@ pub(crate) fn plan(v: usize, corners: &[Corner], blends: &HashMap<usize, EdgeBle
         }
         return rim(v, corners, &ends, &selected, blends, body, built, tol);
     }
-    planar(v, corners, &ends, &selected, blends, body, built, tol)
+    planar(v, corners, all, &ends, &selected, blends, body, built, tol)
 }
 
 fn find<'a>(corners: &'a [Corner], f: impl Fn(&Corner) -> bool) -> &'a Corner {
@@ -93,8 +99,8 @@ fn find<'a>(corners: &'a [Corner], f: impl Fn(&Corner) -> bool) -> &'a Corner {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn planar(v: usize, corners: &[Corner], ends: &[End], selected: &[End], blends: &HashMap<usize, EdgeBlend>, body: &Body,
-    built: &mut Built, tol: f64) -> Result<Plan, KernelError> {
+fn planar(v: usize, corners: &[Corner], all: &HashMap<usize, Vec<Corner>>, ends: &[End], selected: &[End],
+    blends: &HashMap<usize, EdgeBlend>, body: &Body, built: &mut Built, tol: f64) -> Result<Plan, KernelError> {
     let faces: Vec<usize> = corners.iter().map(|c| c.face).collect();
     if faces[0] == faces[1] || faces[1] == faces[2] || faces[0] == faces[2] {
         return unsupported(format!("vertex {v}: a face meets itself there"));
@@ -107,25 +113,63 @@ fn planar(v: usize, corners: &[Corner], ends: &[End], selected: &[End], blends: 
         1 => {
             let s = selected[0];
             let eb = &blends[&s.edge];
+            let h = *find(corners, |c| c.inn != s && c.out != s);
+            let (hp, hn) = plane_of(body, h.face).expect("a plane");
+            let at = body.vertices[v];
+            // Each side's rail meets the end face's edge on its face; a side that meets it past the edge's far vertex
+            // runs out onto the curved face beyond when `runout` classifies it so (else the trim refuses it by name).
+            let mut points: HashMap<End, (usize, Vec3)> = HashMap::new();
+            let mut runouts = Vec::new();
             for c in corners.iter().filter(|c| c.inn == s || c.out == s) {
                 let other = if c.inn == s { c.out } else { c.inn };
                 let p = meet(eb.rail_line(c.face), line_of(body, other.edge)?, tol,
                     &format!("vertex {v}: the blend of edge {} meeting edge {}", s.edge, other.edge))?;
+                let far = body.vertices[if other.at_end { body.edges[other.edge].start } else { body.edges[other.edge].end }];
+                let len = far.distance(at);
+                let along = p.sub(at).dot(far.sub(at)) / len;
+                if along > len + tol {
+                    if let Some(by) = runout::classify(eb, c.face, h.face, other, body, all, blends) {
+                        runouts.push((c.face, by, p));
+                        continue;
+                    }
+                }
                 let id = built.vertex(p);
+                points.insert(other, (id, p));
                 plan.point.insert(other, id);
                 plan.rail.insert((s, c.face), id);
             }
-            let h = find(corners, |c| c.inn != s && c.out != s);
-            let (from, to) = (plan.point[&h.inn], plan.point[&h.out]);
-            let (hp, hn) = plane_of(body, h.face).expect("a plane");
-            let (pf, pt) = (built.vertices[from], built.vertices[to]);
-            let curve = match (eb.radius, &eb.shape) {
-                (Some(r), Shape::Planar { axis: Some(c), d, .. }) => cylinder_section(*c, *d, r, hp, hn, pf, pt)?,
-                _ => Curve::Line { a: pf, b: pt },
-            };
-            let id = built.edge(curve, from, to);
-            plan.chain.insert(s, id);
-            plan.insert.insert((h.face, h.lp, h.k), (id, true));
+            match runouts.len() {
+                0 => {
+                    let (from, to) = (plan.point[&h.inn], plan.point[&h.out]);
+                    let (pf, pt) = (built.vertices[from], built.vertices[to]);
+                    let curve = match (eb.radius, &eb.shape) {
+                        (Some(r), Shape::Planar { axis: Some(c), d, .. }) => cylinder_section(*c, *d, r, hp, hn, pf, pt)?,
+                        _ => Curve::Line { a: pf, b: pt },
+                    };
+                    let id = built.edge(curve, from, to);
+                    plan.chain.insert(s, vec![id]);
+                    plan.insert.insert((h.face, h.lp, h.k), (id, true));
+                }
+                1 => {
+                    let (x, by, past) = runouts.pop().expect("one");
+                    let (qi, q) = *points.values().next().expect("the other side's point");
+                    let ro = runout::build(v, eb, x, &by, body, q, past, (hp, hn), tol)?;
+                    let (si, pi) = (built.vertex(ro.s), built.vertex(ro.p));
+                    plan.rail.insert((s, x), pi);
+                    plan.point.insert(by.seam, si);
+                    plan.point.insert(by.arc, pi);
+                    plan.consumed_edges.push(by.g);
+                    plan.consumed_vertices.push(by.w);
+                    let section = built.edge(ro.section, qi, si);
+                    let beyond = built.edge(ro.beyond, si, pi);
+                    // On H the section replaces the corner at V (g is gone); on H2 the curve fills the corner at W.
+                    let new_at_v = |x: End| if x.edge == by.g { si } else { points[&x].0 };
+                    plan.insert.insert((h.face, h.lp, h.k), (section, new_at_v(h.inn) == qi));
+                    plan.insert.insert((by.h2.face, by.h2.lp, by.h2.k), (beyond, by.h2.inn == by.seam));
+                    plan.chain.insert(s, vec![section, beyond]);
+                }
+                _ => return unsupported(format!("vertex {v}: the blend of edge {} runs past its end face on both sides", s.edge)),
+            }
         }
         2 => {
             let common = *find(corners, |c| selected.contains(&c.inn) && selected.contains(&c.out));
@@ -163,8 +207,8 @@ fn planar(v: usize, corners: &[Corner], ends: &[End], selected: &[End], blends: 
             plan.rail.insert((s2, cb.face), qi);
             plan.point.insert(u, qi);
             let id = built.edge(curve, ti, qi);
-            plan.chain.insert(s1, id);
-            plan.chain.insert(s2, id);
+            plan.chain.insert(s1, vec![id]);
+            plan.chain.insert(s2, vec![id]);
         }
         3 => {
             let all: Vec<&EdgeBlend> = selected.iter().map(|s| &blends[&s.edge]).collect();
@@ -222,7 +266,7 @@ fn planar(v: usize, corners: &[Corner], ends: &[End], selected: &[End], blends: 
                 let (pf, pt) = (built.vertices[from], built.vertices[to]);
                 let curve = match centre { Some(c) => arc_between(c, pf, pt)?, None => Curve::Line { a: pf, b: pt } };
                 let id = built.edge(curve, from, to);
-                plan.chain.insert(s, id);
+                plan.chain.insert(s, vec![id]);
                 edges.push(id);
             }
             plan.corner = Some((surface, sense, edges));
@@ -294,7 +338,7 @@ fn rim(v: usize, corners: &[Corner], ends: &[End], selected: &[End], blends: &Ha
     plan.rail.insert((s2, cb.face), qi);
     plan.point.insert(u, qi);
     let id = built.edge(curve, ti, qi);
-    plan.chain.insert(s1, id);
-    plan.chain.insert(s2, id);
+    plan.chain.insert(s1, vec![id]);
+    plan.chain.insert(s2, vec![id]);
     Ok(plan)
 }

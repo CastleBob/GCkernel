@@ -6,7 +6,8 @@
 //!   distance and an angle) is a plane, a fillet a circular cylinder;
 //! - circles where a flat face meets a cylinder at right angles (hole rims, bar and pipe ends, boss bases): a chamfer
 //!   is a cone, a fillet a torus; the rim must be blended all round, alike;
-//! - their ends at vertices where three faces meet (see `vertex`): running out on a flat end face, two blends meeting
+//! - their ends at vertices where three faces meet (see `vertex`): running out on a flat end face (or past a short one
+//!   onto the cylinder strip beyond it: `runout`), two blends meeting
 //!   in a mitre (chamfer planes in a line; equal fillets in an ellipse), three meeting at a corner (a plane triangle
 //!   for chamfers; a sphere patch for equal fillets where one face is square to the other two).
 //!
@@ -23,6 +24,7 @@
 
 mod edge;
 mod proof;
+mod runout;
 mod vertex;
 
 use crate::extrude::signed_area;
@@ -137,21 +139,36 @@ pub fn blend(body: &Body, items: &[Item], tol: f64) -> Result<Blended, KernelErr
         .map(|v| (!touched.contains(&v)).then(|| built.vertex(body.vertices[v]))).collect();
     let mut plans: HashMap<usize, Plan> = HashMap::new();
     for &v in &touched {
-        plans.insert(v, vertex::plan(v, &at_vertex[&v], &blends, body, &mut built, tol)?);
+        plans.insert(v, vertex::plan(v, &at_vertex[&v], &at_vertex, &blends, body, &mut built, tol)?);
     }
+    // What the plans move, insert and consume, by edge end and face corner (a run-out reaches past its own vertex).
+    let moved: HashMap<End, usize> = plans.values().flat_map(|p| p.point.iter().map(|(&x, &id)| (x, id))).collect();
+    let inserts: HashMap<(usize, usize, usize), (usize, bool)> = plans.values().flat_map(|p| p.insert.iter().map(|(&k, &x)| (k, x))).collect();
+    let consumed: BTreeSet<usize> = plans.values().flat_map(|p| p.consumed_edges.iter().copied()).collect();
+    let gone: Vec<(usize, usize)> = plans.iter().flat_map(|(&v, p)| p.consumed_vertices.iter().map(move |&w| (w, v))).collect();
     let end_vertex = |x: End| if x.at_end { body.edges[x.edge].end } else { body.edges[x.edge].start };
     // Unblended edges, trimmed where a blend meets them.
     let mut is_new: Vec<bool> = vec![true; built.edges.len()];
     let mut edge_map: Vec<Option<usize>> = vec![None; body.edges.len()];
     for (e, edge) in body.edges.iter().enumerate() {
-        if selected.contains(&e) { continue; }
-        let id_of = |x: End| match plans.get(&end_vertex(x)) {
-            Some(p) => (p.point[&x], true),
-            None => (vmap[end_vertex(x)].expect("an untouched vertex"), false),
+        if selected.contains(&e) || consumed.contains(&e) { continue; }
+        let id_of = |x: End| match moved.get(&x) {
+            Some(&id) => Ok((id, true)),
+            None => vmap[end_vertex(x)].map(|id| (id, false))
+                .ok_or_else(|| KernelError::Internal(format!("edge {e}: its end at a blended vertex was not planned"))),
         };
-        let ((s, ts), (t, tt)) = (id_of(End { edge: e, at_end: false }), id_of(End { edge: e, at_end: true }));
-        let curve = if !ts && !tt { edge.curve.clone() } else {
-            let Curve::Line { a, b } = edge.curve else { unreachable!("vertex plans trim only straight edges") };
+        let ((s, ts), (t, tt)) = (id_of(End { edge: e, at_end: false })?, id_of(End { edge: e, at_end: true })?);
+        let curve = if !ts && !tt { edge.curve.clone() } else if let Curve::Arc { c, n, x, r, t0, t1 } = edge.curve {
+            // A run-out trims the curved face's arc on its flat face: the new ends' angles, inside the old span.
+            let y = n.cross(x);
+            let angle = |p: Vec3| { let w = p.sub(c); t0 + (w.dot(y).atan2(w.dot(x)) - t0 + 1e-12).rem_euclid(std::f64::consts::TAU) - 1e-12 };
+            let (u0, u1) = (if ts { angle(built.vertices[s]) } else { t0 }, if tt { angle(built.vertices[t]) } else { t1 });
+            if u0 < t0 - 1e-12 || u1 > t1 + 1e-12 || (u1 - u0) * r <= tol {
+                return unsupported(format!("edge {e} would be consumed: the blend reaching it passes its end"));
+            }
+            Curve::Arc { c, n, x, r, t0: u0, t1: u1 }
+        } else {
+            let Curve::Line { a, b } = edge.curve else { unreachable!("vertex plans trim only straight edges and run-out arcs") };
             let (ps, pt) = (built.vertices[s], built.vertices[t]);
             let (d, len) = (b.sub(a), b.distance(a));
             let along = |p: Vec3| p.sub(a).dot(d) / (len * len);
@@ -195,8 +212,8 @@ pub fn blend(body: &Body, items: &[Item], tol: f64) -> Result<Blended, KernelErr
         for (l, lp) in face.loops.iter().enumerate() {
             let mut nl = Vec::new();
             for (k, &(e, fwd)) in lp.iter().enumerate() {
-                let v = if fwd { body.edges[e].start } else { body.edges[e].end };
-                if let Some(&(id, dir)) = plans.get(&v).and_then(|p| p.insert.get(&(f, l, k))) { nl.push((id, dir)); }
+                if let Some(&(id, dir)) = inserts.get(&(f, l, k)) { nl.push((id, dir)); }
+                if consumed.contains(&e) { continue; }
                 nl.push((if selected.contains(&e) { rails[&(e, f)] } else { edge_map[e].expect("mapped") }, fwd));
             }
             loops.push(nl);
@@ -212,12 +229,14 @@ pub fn blend(body: &Body, items: &[Item], tol: f64) -> Result<Blended, KernelErr
         let (s_end, e_end) = (End { edge: e, at_end: false }, End { edge: e, at_end: true });
         let ra = rails[&(e, eb.a)];
         let rb = rails[&(e, eb.b)];
-        let cs = plans[&sv].chain[&s_end];
-        let ce = plans[&ev].chain[&e_end];
-        let ds = built.edges[cs].start == plans[&sv].rail[&(s_end, eb.a)];
-        let de = built.edges[ce].start == plans[&ev].rail[&(e_end, eb.b)];
-        for (c, d) in [(cs, ds), (ce, de)] { chain_use.insert(c, d); }
-        faces.push(Face { surface: eb.surface.clone(), sense: eb.sense, loops: vec![vec![(ra, false), (cs, ds), (rb, true), (ce, de)]] });
+        let cs = walk(&built, &plans[&sv].chain[&s_end], plans[&sv].rail[&(s_end, eb.a)], e)?;
+        let ce = walk(&built, &plans[&ev].chain[&e_end], plans[&ev].rail[&(e_end, eb.b)], e)?;
+        for &(c, d) in cs.iter().chain(&ce) { chain_use.insert(c, d); }
+        let mut lp = vec![(ra, false)];
+        lp.extend(cs);
+        lp.push((rb, true));
+        lp.extend(ce);
+        faces.push(Face { surface: eb.surface.clone(), sense: eb.sense, loops: vec![lp] });
         origins.push(Origin::Edge(e));
         changed.push(false);
     }
@@ -238,7 +257,8 @@ pub fn blend(body: &Body, items: &[Item], tol: f64) -> Result<Blended, KernelErr
         origins.push(Origin::Vertex(v));
         changed.push(false);
     }
-    let result = Body { vertices: built.vertices, edges: built.edges, faces };
+    let mut result = Body { vertices: built.vertices, edges: built.edges, faces };
+    if !gone.is_empty() { drop_unused_vertices(&mut result); }
     // Proofs.
     for (f, face) in result.faces.iter().enumerate() {
         if !changed[f] { continue; }
@@ -262,7 +282,7 @@ pub fn blend(body: &Body, items: &[Item], tol: f64) -> Result<Blended, KernelErr
             .map(|v| along(result.vertices[v])).chain([along(body.vertices[body.edges[e].start]), along(body.vertices[body.edges[e].end])]);
         reach.insert(e, points.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), a| (lo.min(a), hi.max(a))));
     }
-    check_interference(body, &blends, &selected, &reach, tol)?;
+    check_interference(body, &blends, &selected, &gone, &reach, tol)?;
     topology::check(&result, tol).map_err(|e| KernelError::Internal(format!("the blend built an invalid solid: {e}")))?;
     Ok(Blended { body: result, origins })
 }
@@ -371,8 +391,8 @@ fn check_rim_cylinder(body: &Body, eb: &EdgeBlend, is_new: &[bool], tol: f64) ->
 
 /// No edge of the input body other than those at the blended chain's own vertices may enter a blend's region: the
 /// triangle the blend cuts from (or adds to) the cross-section, swept along the edge (for a rim, the annulus it sweeps).
-fn check_interference(body: &Body, blends: &HashMap<usize, EdgeBlend>, selected: &BTreeSet<usize>, reach: &HashMap<usize, (f64, f64)>,
-    tol: f64) -> Result<(), KernelError> {
+fn check_interference(body: &Body, blends: &HashMap<usize, EdgeBlend>, selected: &BTreeSet<usize>, gone: &[(usize, usize)],
+    reach: &HashMap<usize, (f64, f64)>, tol: f64) -> Result<(), KernelError> {
     // The chains of blended edges joined at vertices.
     let mut parent: Vec<usize> = (0..body.vertices.len()).collect();
     fn root(p: &mut Vec<usize>, mut v: usize) -> usize { while p[v] != v { p[v] = p[p[v]]; v = p[v]; } v }
@@ -380,7 +400,14 @@ fn check_interference(body: &Body, blends: &HashMap<usize, EdgeBlend>, selected:
         let (a, b) = (root(&mut parent, body.edges[e].start), root(&mut parent, body.edges[e].end));
         parent[a] = b;
     }
-    let touched: BTreeSet<usize> = selected.iter().flat_map(|&e| [body.edges[e].start, body.edges[e].end]).collect();
+    // A run-out's consumed vertex joins its vertex's chain: the edges there are trimmed on faces whose new curves are
+    // proved (the flat ones in check_flat_face, the curved one in runout::build).
+    for &(w, v) in gone {
+        let (a, b) = (root(&mut parent, w), root(&mut parent, v));
+        parent[a] = b;
+    }
+    let touched: BTreeSet<usize> = selected.iter().flat_map(|&e| [body.edges[e].start, body.edges[e].end])
+        .chain(gone.iter().map(|&(w, _)| w)).collect();
     for &e in selected {
         let eb = &blends[&e];
         let chain = root(&mut parent, body.edges[e].start);
@@ -425,4 +452,41 @@ fn check_interference(body: &Body, blends: &HashMap<usize, EdgeBlend>, selected:
         }
     }
     Ok(())
+}
+
+/// A blend face's closing edges at one end, from the rail vertex `from`, each with the direction it runs.
+fn walk(built: &Built, chain: &[usize], from: usize, e: usize) -> Result<Vec<(usize, bool)>, KernelError> {
+    let mut at = from;
+    let mut out: Vec<(usize, bool)> = Vec::new();
+    for _ in 0..chain.len() {
+        let next = chain.iter().copied()
+            .find(|&c| !out.iter().any(|&(o, _)| o == c) && (built.edges[c].start == at || built.edges[c].end == at))
+            .ok_or_else(|| KernelError::Internal(format!("edge {e}: the blend face's end edges do not chain")))?;
+        let fwd = built.edges[next].start == at;
+        at = if fwd { built.edges[next].end } else { built.edges[next].start };
+        out.push((next, fwd));
+    }
+    Ok(out)
+}
+
+/// Removes vertices no edge uses (a run-out's consumed vertex), keeping the others in order.
+fn drop_unused_vertices(body: &mut Body) {
+    let mut used = vec![false; body.vertices.len()];
+    for e in &body.edges {
+        used[e.start] = true;
+        used[e.end] = true;
+    }
+    let mut map = vec![usize::MAX; body.vertices.len()];
+    let mut kept = Vec::new();
+    for (i, &p) in body.vertices.iter().enumerate() {
+        if used[i] {
+            map[i] = kept.len();
+            kept.push(p);
+        }
+    }
+    body.vertices = kept;
+    for e in &mut body.edges {
+        e.start = map[e.start];
+        e.end = map[e.end];
+    }
 }

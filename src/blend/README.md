@@ -1,7 +1,9 @@
 # Fillets and chamfers (blend)
 
-Owner: Claude (2026-11-01, Bob: "continue with ... the fillets and the chamfers"). Clean room: written from the
-public mathematics below; no third-party kernel source was read or translated. No new dependencies.
+Owner: Claude (2026-11-01, Bob: "continue with ... the fillets and the chamfers"). Written from the public mathematics
+below; no third-party kernel source was translated. The run-out ends (`runout.rs`, 2026-11-03) follow the idea in
+solidcore's generic-blend notes (docs/generic-blend.md, Apache-2.0, a blend ending on its end faces); no code was
+copied. No new dependencies.
 
 Entry: `blend(body, items, tolerance) -> Result<Blended, KernelError>`; worker op 19 (`protocol.rs`). Result faces
 0..F-1 are the input faces in their order; then one blend face per edge (input edge order); then corner patches.
@@ -16,7 +18,11 @@ Entry: `blend(body, items, tolerance) -> Result<Blended, KernelError>`; worker o
 Chamfer forms: equal distance; two distances (the first on a named face); distance and angle (from a named face).
 
 Ends, at vertices where three faces meet:
-- one blend there: it runs out on the flat end face (section: line, circle, or ellipse for a slanted face);
+- one blend there: it runs out on the flat end face (section: line, circle, or ellipse for a slanted face); where the
+  end face is too short on one side (Bob's angle toe: 0.0625 flat, then the toe round) and the face beyond is a
+  cylinder strip square to that side's face, the blend runs on over it: the short edge and its far vertex go, the end
+  face gets the section to the seam, and the cylinder gets the blend's intersection with it (two square cylinders, a
+  `CylinderPair`, for a fillet; an ellipse arc for a chamfer);
 - two: a mitre (chamfer planes meet in a line; equal fillets in an ellipse) or, along a rim, the torus meridian or
   cone generator through the seam;
 - three: chamfers get the triangular plane through the face corners; equal fillets get a sphere patch when one face
@@ -25,14 +31,15 @@ Ends, at vertices where three faces meet:
 ## Refused by name
 
 Vertices where other than three faces meet (including the coplanar seams the rectilinear cut leaves); blends ending on
-curved faces; fillet + chamfer, convex + concave, or unequal fillets meeting at a vertex; mitres whose sides reach the
+curved faces other than the run-out above; a run-out wider than the face beyond (named with its reach and that width); fillet + chamfer, convex + concave, or unequal fillets meeting at a vertex; mitres whose sides reach the
 third edge at different points; three-fillet corners without a square face; rims blended part way round or unalike;
 planes not square to the cylinder; edges on other surfaces; any blend that consumes a face or edge, crosses another
 loop, reaches the axis, runs past a cylinder face's other boundary, or comes near any other edge of the body.
 
 ## Proofs before return
 
-Trims stay inside their edges; every new or trimmed curve on a changed flat face is proved apart from the face's
+Trims stay inside their edges; a run-out's curve on the cylinder runs monotonically across and down its strip (so it
+meets the strip's boundary only at its two ends) and its `CylinderPair` discriminant stays positive (closed form); every new or trimmed curve on a changed flat face is proved apart from the face's
 other curves (Lipschitz balls for lines, circles and ellipses; control hulls for Bezier pieces); joints neither fold
 back nor cross again (closed-form line/conic roots); loops still nest (one outer loop, holes winding once); no other
 body edge enters a blend's cross-section region; then `topology::check`. Work limits refuse; nothing is assumed.
