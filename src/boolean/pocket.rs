@@ -27,7 +27,7 @@ struct Bit {
 }
 
 /// A section loop's material lies on its left; the outward side face of a piece: (surface, sense).
-fn wall_surface(seg: &Seg, k: usize, at: f64) -> Result<(Surface, bool)> {
+pub(super) fn wall_surface(seg: &Seg, k: usize, at: f64) -> Result<(Surface, bool)> {
     let (u, v) = axes(k);
     let lift = |q: P| { let mut w = [0.; 3]; w[u] = q.x; w[v] = q.y; w[k] = at; Vec3::new(w[0], w[1], w[2]) };
     let dir = |q: P| { let mut w = [0.; 3]; w[u] = q.x; w[v] = q.y; Vec3::new(w[0], w[1], w[2]) };
@@ -53,7 +53,7 @@ fn wall_surface(seg: &Seg, k: usize, at: f64) -> Result<(Surface, bool)> {
 }
 
 /// The piece as a 3D curve at level `at`, run the piece's way.
-fn curve_at(seg: &Seg, k: usize, at: f64) -> Curve {
+pub(super) fn curve_at(seg: &Seg, k: usize, at: f64) -> Curve {
     let (u, v) = axes(k);
     let lift = |q: P| { let mut w = [0.; 3]; w[u] = q.x; w[v] = q.y; w[k] = at; Vec3::new(w[0], w[1], w[2]) };
     let along = |q: P| { let mut w = [0.; 3]; w[u] = q.x; w[v] = q.y; Vec3::new(w[0], w[1], w[2]) };

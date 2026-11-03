@@ -26,6 +26,13 @@ const LIMIT: usize = 2000;
 
 #[path = "pocket.rs"]
 mod pocket;
+// Union domains (ops 24/25, Claude 2026-11-02): they read the section arrangement above.
+#[path = "unite_face.rs"]
+pub(super) mod unite_face;
+#[path = "unite_stack.rs"]
+pub(super) mod unite_stack;
+#[path = "unite_overhang.rs"]
+pub(super) mod unite_overhang;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct P {

@@ -46,7 +46,12 @@
 //!        to d, inner and outer wall radii, mating cylinder axis point p, unit axis b, radius, then the band's inner
 //!        and outer radii and its far level along d: 21 values -> the waste band whose top is the radial conoid of
 //!        the deeper wall's crossing (GCmaker's Normalize End), followed by its volume; normalize.rs).
-//!     (24 and 25 are reserved for union.)
+//!     24 union (two bodies back to back, body then tool, as op 3 -> their union, one solid; refused by name outside
+//!        the union domains, and when the bodies do not touch; boolean::union, Claude 2026-11-02),
+//!     25 named union (op 24's request -> op 24's reply, then the provenance envelope with its outcome section exactly
+//!        as op 12, roles 30-41 with body = the first operand and tool = the second, plus role 43 EDGE_CROSSING [body
+//!        edge, tool edge, n] for vertices where the boss's base outline crosses the face's; refused by name in a union
+//!        domain that records no history; boolean::union_named).
 //!     26 recorded cut (op 3's request -> op 3's reply, then 1 and op 12's provenance envelope with its outcome section
 //!        when the one selected domain records this cut's history, otherwise 0, n and the n UTF-8 bytes of the reason
 //!        it records none; nothing follows; boolean::cut_recorded, Claude 2026-11-02).
@@ -82,6 +87,8 @@ pub const OP_SHELL: u32 = 20;
 pub const OP_OFFSET: u32 = 21;
 pub const OP_IGES_READ: u32 = 22;
 pub const OP_NORMALIZED_END: u32 = 23;
+pub const OP_UNION: u32 = 24;
+pub const OP_UNION_NAMED: u32 = 25;
 pub const OP_CUT_RECORDED: u32 = 26;
 
 pub struct Request {
@@ -192,6 +199,24 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             if !result.faces.is_empty() {
                 topology::check(&result, tol).map_err(|e| KernelError::Internal(format!("cut built an invalid solid: {e}")))?;
             }
+            let mut out = write_body(&result);
+            let inputs = [body.faces.len(), body.edges.len(), body.vertices.len(), tool.faces.len(), tool.edges.len(), tool.vertices.len()];
+            provenance::write_cut(&mut out, &history, inputs, &outcomes);
+            Ok(out)
+        }
+        OP_UNION | OP_UNION_NAMED => {
+            let body = reader.body()?;
+            let tool = reader.body()?;
+            reader.finish()?;
+            topology::check(&body, tol)?;
+            topology::check(&tool, tol)?;
+            if request.op == OP_UNION {
+                let result = boolean::union(&body, &tool, tol)?;
+                topology::check(&result, tol).map_err(|e| KernelError::Internal(format!("union built an invalid solid: {e}")))?;
+                return Ok(write_body(&result));
+            }
+            let (result, history, outcomes) = boolean::union_named(&body, &tool, tol)?;
+            topology::check(&result, tol).map_err(|e| KernelError::Internal(format!("union built an invalid solid: {e}")))?;
             let mut out = write_body(&result);
             let inputs = [body.faces.len(), body.edges.len(), body.vertices.len(), tool.faces.len(), tool.edges.len(), tool.vertices.len()];
             provenance::write_cut(&mut out, &history, inputs, &outcomes);
