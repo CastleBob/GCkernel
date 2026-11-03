@@ -528,3 +528,36 @@ G(s) g(theta) dtheta along the curve by quadrature. Tests (tests/cone_bore.rs) c
 centre and turned, solid through and blind, three holes in turn and one on the straight base against independent
 disk quadratures of the walls' depth (1e-9). Not done: a hole on the revolve's seam (the seam is shared with the
 adjoining section and not moved; refused by name), holes not square to the axis, holes ending inside a wall.
+
+## Cut history in more domains; op 26 recorded cut (Claude, 2026-11-02)
+
+Persistent names on every stock (Bob, contract in GCm GCmaker/Handoff/Claude-GcKernel-PersistentReferences.md):
+op 12 history is now recorded, from the construction itself (`trace.rs`), in five more domains:
+- **radial** (pipe holes) and **cone_bore** (holes through tapered or straight Pole walls, through cuts): the body is
+  kept; each wall crossed gains one closed meeting loop [wall, cutter cylinder, n] (n counts that wall's crossings
+  along the cutter) whose one vertex is the new role **42 MEETING_POINT [i, j, n] k=3**; each wall passage a seam
+  TOOL_SEAM [entry wall, j] and a face from the cutter's cylinder. No history (the cut still runs) when the radial
+  bore moves a wall's seam, or for a blind cone bore.
+- **capsule** (slots): through a box, the box is rebuilt by op 10's extrusion with the slot as a hole, so its records
+  are op 10's mapped back (sides, their cap edges, rulings and corners unchanged; caps modified; the hole from the
+  tool); through anything else, each wall's cavity is spliced (`passage::splice_cavity`): the body kept, its two
+  wall faces modified, cavity sides FROM_TOOL_FACE, cap copies MEETING, rulings FROM_TOOL_EDGE, their ends
+  TOOL_EDGE_END. No history for the transverse cross-cut route.
+- **box_cut** (rectangles and polygons): the passage splices as above; none for the transverse route or when coplanar
+  cap patches had to be joined first (several parents of one face).
+- **Selection change:** a plain cardinal box cutter making a clear passage through the planar walls of a body with
+  no curved faces (`box_cut::clear_box_passage`, decided before construction) now runs in box_cut's passage branch
+  instead of the rectilinear cell engine, whose cell seams split every face a cut touches. Same material removed
+  (tests check exact volumes); every other rectilinear cut is unchanged. This changes op 3's body for those cuts
+  (cleaner topology), the only op 3 change.
+Op 12's refusals are unchanged in kind; a domain that records history now computes the body once and then reports
+whether this cut's history was recorded.
+
+**Op 26 CUT_RECORDED:** op 3's request; reply = op 3's body, then `1` and op 12's envelope (records and outcomes)
+when the one selected domain recorded this cut's history, otherwise `0, n` and the n UTF-8 bytes of the reason. The
+cut runs once; nothing is retried, matched or guessed. The host keeps names only while every cut carries records.
+Tests (tests/provenance.rs): first interior rectangle, slot and turned square in a plate; hole, slot, rectangle and
+square in sequence through an angle's leg; hole then rectangle through both walls of a tube; radial bores through one
+and both pipe walls and a bore through both conical walls of a tapered tube; op 26's reply against op 3 and op 12.
+Every case through the shared checker (each record against its geometry, generated names unique, outcomes re-derived)
+with op 12's body byte-identical to op 3's.

@@ -367,6 +367,13 @@ fn boundary(body: &Body, face: &Face) -> Vec<Curve> {
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    cut_traced(body, tool, tol).map(|(result, _)| result)
+}
+
+/// The slot and its history: through a box, the box rebuilt with the slot as a hole (trace::box_with_hole); through
+/// the walls of anything else, each wall's cavity spliced in (trace::splice). None for the transverse cross-cut route.
+pub(super) fn cut_traced(body: &Body, tool: &Body, tol: f64) -> Result<(Body, super::History)> {
+    let crossing = || Err("cut history is not recorded for a slot crossing a cylindrical wall yet".to_string());
     if !tol.is_finite() || tol <= 0. {
         return Err(invalid("slot tolerance must be finite and positive"));
     }
@@ -382,7 +389,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         })
         .collect();
     if radii.len() == 2 && radii[0] != radii[1] {
-        return super::endcut::cross_cut(body, tool, tol);
+        return Ok((super::endcut::cross_cut(body, tool, tol)?, crossing()));
     }
     let admitted = admit(tool, tol)?;
     let axis = admitted.axis;
@@ -396,7 +403,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         admitted.high,
         tol,
     ) {
-        return super::endcut::cross_cut(body, tool, tol);
+        return Ok((super::endcut::cross_cut(body, tool, tol)?, crossing()));
     }
     if !(body.vertices.len() == 8 && body.edges.len() == 12 && body.faces.len() == 6) {
         let passages = super::passage::round_passages(
@@ -409,13 +416,16 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             tol,
         )?;
         let mut result = body.clone();
+        let segments = super::trace::cap_segments(tool, admitted.lower_face);
+        let mut history: super::History = segments.clone().map(|_| super::trace::kept(body));
+        let mut meetings = super::trace::Meetings::default();
         for (low, high, bottom_face, top_face) in passages {
             let shift = n.scale(low - admitted.low);
             let outline = boundary(tool, &tool.faces[admitted.lower_face])
                 .into_iter()
                 .map(|c| c.translated(shift))
                 .collect();
-            let cavity = crate::extrude::extrude(
+            let (cavity, records) = crate::extrude::extrude_named(
                 &Profile {
                     loops: vec![outline],
                     n,
@@ -426,8 +436,13 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             )?;
             result =
                 super::passage::splice_cavity(&result, cavity, axis, bottom_face, top_face, tol)?;
+            history = match (history, &segments) {
+                (Ok(mut h), Ok(segs)) => super::trace::splice(&mut h, &records, segs, bottom_face, top_face, &mut meetings).map(|_| h),
+                (Err(e), _) => Err(e),
+                (_, Err(e)) => Err(e.clone()),
+            };
         }
-        return Ok(result);
+        return Ok((result, history));
     }
     let (low, high) = super::rectilinear::plain_box_bounds(body, tol)?;
     if admitted.low > low[axis] || admitted.high < high[axis] {
@@ -465,14 +480,15 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             ));
         }
     }
-    let lower = body
+    let lower_index = body
         .faces
         .iter()
-        .find(|f| {
+        .position(|f| {
             matches!(f.surface,Surface::Plane {p,n:fnorm,..}
         if xyz(p)[axis]==low[axis]&&fnorm.dot(n)*(if f.sense {1.}else{-1.})< -0.999999)
         })
         .ok_or_else(|| invalid("box lower cap is missing"))?;
+    let lower = &body.faces[lower_index];
     let outer: Vec<Curve> = boundary(body, lower)
         .iter()
         .rev()
@@ -480,7 +496,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         .collect();
     let shift = n.scale(low[axis] - admitted.low);
     let hole = hole.iter().map(|c| c.translated(shift)).collect();
-    let result = crate::extrude::extrude(
+    let (result, records) = crate::extrude::extrude_named(
         &Profile {
             loops: vec![outer, hole],
             n,
@@ -492,7 +508,16 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     crate::topology::check(&result, tol).map_err(|e| {
         KernelError::Internal(format!("slot result failed topology validation: {e}"))
     })?;
-    Ok(result)
+    // The box's other cap: the plane facing +axis at its top.
+    let upper = body.faces.iter().position(|f| {
+        matches!(f.surface, Surface::Plane { p, n: fnorm, .. }
+            if xyz(p)[axis] == high[axis] && fnorm.dot(n) * (if f.sense { 1. } else { -1. }) > 0.999999)
+    });
+    let history = match upper {
+        Some(upper) => super::trace::box_with_hole(body, lower_index, upper, tool, admitted.lower_face, &records),
+        None => Err("cut history is not recorded for this cut: the box has no single upper cap".to_string()),
+    };
+    Ok((result, history))
 }
 
 #[cfg(test)]

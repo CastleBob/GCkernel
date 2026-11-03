@@ -46,6 +46,10 @@
 //!        to d, inner and outer wall radii, mating cylinder axis point p, unit axis b, radius, then the band's inner
 //!        and outer radii and its far level along d: 21 values -> the waste band whose top is the radial conoid of
 //!        the deeper wall's crossing (GCmaker's Normalize End), followed by its volume; normalize.rs).
+//!     (24 and 25 are reserved for union.)
+//!     26 recorded cut (op 3's request -> op 3's reply, then 1 and op 12's provenance envelope with its outcome section
+//!        when the one selected domain records this cut's history, otherwise 0, n and the n UTF-8 bytes of the reason
+//!        it records none; nothing follows; boolean::cut_recorded, Claude 2026-11-02).
 
 use crate::frame::{Frame, Point2, Point3, Rigid};
 use crate::geom::Vec3;
@@ -78,6 +82,7 @@ pub const OP_SHELL: u32 = 20;
 pub const OP_OFFSET: u32 = 21;
 pub const OP_IGES_READ: u32 = 22;
 pub const OP_NORMALIZED_END: u32 = 23;
+pub const OP_CUT_RECORDED: u32 = 26;
 
 pub struct Request {
     pub op: u32,
@@ -190,6 +195,31 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             let mut out = write_body(&result);
             let inputs = [body.faces.len(), body.edges.len(), body.vertices.len(), tool.faces.len(), tool.edges.len(), tool.vertices.len()];
             provenance::write_cut(&mut out, &history, inputs, &outcomes);
+            Ok(out)
+        }
+        OP_CUT_RECORDED => {
+            let body = reader.body()?;
+            let tool = reader.body()?;
+            reader.finish()?;
+            topology::check(&body, tol)?;
+            topology::check(&tool, tol)?;
+            let (result, recorded) = boolean::cut_recorded(&body, &tool, tol)?;
+            if !result.faces.is_empty() {
+                topology::check(&result, tol).map_err(|e| KernelError::Internal(format!("cut built an invalid solid: {e}")))?;
+            }
+            let mut out = write_body(&result);
+            match recorded {
+                Ok((history, outcomes)) => {
+                    out.push(1.0);
+                    let inputs = [body.faces.len(), body.edges.len(), body.vertices.len(), tool.faces.len(), tool.edges.len(), tool.vertices.len()];
+                    provenance::write_cut(&mut out, &history, inputs, &outcomes);
+                }
+                Err(reason) => {
+                    out.push(0.0);
+                    out.push(reason.len() as f64);
+                    out.extend(reason.bytes().map(f64::from));
+                }
+            }
             Ok(out)
         }
         OP_MEASURE => {

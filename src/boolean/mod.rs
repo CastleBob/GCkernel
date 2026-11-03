@@ -13,6 +13,7 @@ mod passage;
 mod radial;
 mod rectilinear;
 mod section;
+mod trace;
 
 #[derive(Clone, Copy, Debug)]
 enum Domain {
@@ -100,6 +101,9 @@ fn select(
         {
             Ok(Domain::BoxCut)
         }
+        // A clear box passage through a body with no curved faces splices its cavity (box_cut.rs, which records its
+        // history) instead of rebuilding cells (Claude 2026-11-02).
+        0 if box_cut::clear_box_passage(body, tool, tolerance) => Ok(Domain::BoxCut),
         0 => Ok(Domain::Rectilinear),
         1 if drill(tool) => Ok(Domain::Bore),
         1 => Ok(Domain::Cross),
@@ -115,7 +119,17 @@ pub fn cut(
     tool: &crate::neutral::Body,
     tolerance: f64,
 ) -> Result<crate::neutral::Body, crate::KernelError> {
-    match select(body, tool, tolerance)? {
+    run(select(body, tool, tolerance)?, body, tool, tolerance)
+}
+
+/// The cut in its selected domain, with no history.
+fn run(
+    domain: Domain,
+    body: &crate::neutral::Body,
+    tool: &crate::neutral::Body,
+    tolerance: f64,
+) -> Result<crate::neutral::Body, crate::KernelError> {
+    match domain {
         Domain::Section => section::cut(body, tool, tolerance),
         Domain::Radial => radial::cut(body, tool, tolerance),
         Domain::BoxCut => box_cut::cut(body, tool, tolerance),
@@ -129,22 +143,54 @@ pub fn cut(
     }
 }
 
-/// Op 12: the cut, the recorded history of its every output entity (provenance.rs roles 30-39) and the outcome of every
-/// input entity. A domain that does not record its history refuses by name; nothing is matched after the fact.
-pub fn cut_named(
+/// A domain's recorded history of one cut, or why it records none. The body never depends on which.
+pub(crate) type History = std::result::Result<crate::provenance::Provenance, String>;
+
+/// A cut's records and input outcomes, or why there are none.
+pub type Recorded = std::result::Result<(crate::provenance::Provenance, Vec<crate::provenance::Outcome>), String>;
+
+/// The domains that record history (for some or all of their cuts).
+fn records(domain: Domain) -> bool {
+    matches!(domain, Domain::Bore | Domain::Section | Domain::Radial | Domain::ConeBore | Domain::Capsule | Domain::BoxCut)
+}
+
+/// The cut in its one selected domain and that domain's history. `strict` (op 12) refuses a domain that records nothing
+/// before cutting. A domain recording history computes the body once, the same body as op 3, whether or not it can
+/// record this cut's history.
+fn traced(
     body: &crate::neutral::Body,
     tool: &crate::neutral::Body,
     tolerance: f64,
-) -> Result<(crate::neutral::Body, crate::provenance::Provenance, Vec<crate::provenance::Outcome>), crate::KernelError> {
+    strict: bool,
+) -> Result<(crate::neutral::Body, History), crate::KernelError> {
+    let domain = select(body, tool, tolerance)?;
+    let none = format!("cut history is not recorded for the {domain:?} cut domain yet");
+    if strict && !records(domain) {
+        return Err(crate::KernelError::Unsupported(none));
+    }
+    Ok(match domain {
+        Domain::Bore => bore::cut_traced(body, tool, tolerance)?,
+        Domain::Section => section::cut_traced(body, tool, tolerance)?,
+        Domain::Radial => radial::cut_traced(body, tool, tolerance)?,
+        Domain::ConeBore => cone_bore::cut_traced(body, tool, tolerance)?,
+        Domain::Capsule => capsule::cut_traced(body, tool, tolerance)?,
+        Domain::BoxCut => box_cut::cut_traced(body, tool, tolerance)?,
+        domain => (run(domain, body, tool, tolerance)?, Err(none)),
+    })
+}
+
+/// The admitted history's checks and the input outcomes. A count mismatch is a defect; two generated entities with one
+/// name make the history unrecordable.
+fn finish(
+    body: &crate::neutral::Body,
+    tool: &crate::neutral::Body,
+    result: &crate::neutral::Body,
+    history: History,
+) -> Result<Recorded, crate::KernelError> {
     use crate::provenance::*;
-    let (result, history) = match select(body, tool, tolerance)? {
-        Domain::Bore => bore::cut_named(body, tool, tolerance)?,
-        Domain::Section => section::cut_named(body, tool, tolerance)?,
-        domain => {
-            return Err(crate::KernelError::Unsupported(format!(
-                "cut history is not recorded for the {domain:?} cut domain yet"
-            )))
-        }
+    let history = match history {
+        Ok(history) => history,
+        Err(reason) => return Ok(Err(reason)),
     };
     let counts = (history.faces.len(), history.edges.len(), history.vertices.len());
     if counts != (result.faces.len(), result.edges.len(), result.vertices.len()) {
@@ -153,12 +199,38 @@ pub fn cut_named(
     // Generated entities must be told apart by their records alone.
     for list in [&history.faces, &history.edges, &history.vertices] {
         for (i, r) in list.iter().enumerate() {
-            if matches!(r.role, MEETING | TOOL_SEAM | SEAM_POINT | MEETING_END | TOOL_EDGE_END) && list[i + 1..].contains(r) {
-                return Err(crate::KernelError::Unsupported(format!("cut history would name two entities {r:?}")));
+            if matches!(r.role, MEETING | TOOL_SEAM | SEAM_POINT | MEETING_END | TOOL_EDGE_END | MEETING_POINT) && list[i + 1..].contains(r) {
+                return Ok(Err(format!("cut history would name two entities {r:?}")));
             }
         }
     }
     let inputs = [body.faces.len(), body.edges.len(), body.vertices.len(), tool.faces.len(), tool.edges.len(), tool.vertices.len()];
     let outcomes = outcomes(&history, inputs);
+    Ok(Ok((history, outcomes)))
+}
+
+/// Op 12: the cut, the recorded history of its every output entity (provenance.rs roles 30-41) and the outcome of every
+/// input entity. A domain that does not record its history refuses by name; nothing is matched after the fact.
+pub fn cut_named(
+    body: &crate::neutral::Body,
+    tool: &crate::neutral::Body,
+    tolerance: f64,
+) -> Result<(crate::neutral::Body, crate::provenance::Provenance, Vec<crate::provenance::Outcome>), crate::KernelError> {
+    let (result, history) = traced(body, tool, tolerance, true)?;
+    let (history, outcomes) = finish(body, tool, &result, history)?.map_err(crate::KernelError::Unsupported)?;
     Ok((result, history, outcomes))
+}
+
+/// Op 26 (Claude 2026-11-02, persistent names on every stock): op 3's cut, run once in its one selected domain, with
+/// op 12's history when that domain records this cut's history, otherwise the reason it does not. The body is op 3's
+/// either way; a failed cut fails. Nothing is retried, matched or guessed: the host keeps names only while every cut
+/// in its history carries records.
+pub fn cut_recorded(
+    body: &crate::neutral::Body,
+    tool: &crate::neutral::Body,
+    tolerance: f64,
+) -> Result<(crate::neutral::Body, Recorded), crate::KernelError> {
+    let (result, history) = traced(body, tool, tolerance, false)?;
+    let recorded = finish(body, tool, &result, history)?;
+    Ok((result, recorded))
 }

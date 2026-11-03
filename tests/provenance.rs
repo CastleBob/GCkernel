@@ -350,6 +350,7 @@ fn on_surface(s: &Surface, q: Vec3) -> bool {
     match *s {
         Surface::Plane { p, n, .. } => q.sub(p).dot(n).abs() <= TOL,
         Surface::Cylinder { p, a, r, .. } => { let w = q.sub(p); (w.sub(a.scale(w.dot(a))).length() - r).abs() <= TOL }
+        Surface::Cone { p, a, r, k, .. } => { let w = q.sub(p); let s = w.dot(a); (w.sub(a.scale(s)).length() - (r + k * s)).abs() <= TOL }
         _ => panic!("surface {s:?}"),
     }
 }
@@ -368,7 +369,7 @@ fn outward(s: &Surface, sense: bool) -> Option<Vec3> { match *s { Surface::Plane
 
 fn prove_cut(body: &Body, tool: &Body, result: &Body, prov: &Provenance, outcomes: &[Outcome]) {
     assert_eq!((prov.faces.len(), prov.edges.len(), prov.vertices.len()), (result.faces.len(), result.edges.len(), result.vertices.len()));
-    let arity = |role: u32| match role { FROM_BODY_VERTEX | FROM_TOOL_VERTEX => 1, MEETING => 3, MEETING_END => 4, _ => 2 };
+    let arity = |role: u32| match role { FROM_BODY_VERTEX | FROM_TOOL_VERTEX => 1, MEETING | MEETING_POINT => 3, MEETING_END => 4, _ => 2 };
     for r in prov.faces.iter().chain(&prov.edges).chain(&prov.vertices) { assert_eq!(r.refs.len(), arity(r.role), "{r:?}"); }
     for list in [&prov.faces, &prov.edges, &prov.vertices] {
         for (i, a) in list.iter().enumerate() {
@@ -381,7 +382,7 @@ fn prove_cut(body: &Body, tool: &Body, result: &Body, prov: &Provenance, outcome
         let q = result.vertices[v];
         let ok = match r.role {
             FROM_BODY_VERTEX => near(q, body.vertices[r.refs[0]]),
-            SEAM_POINT => on_surface(bsurf(r.refs[0]), q) && on_surface(tsurf(r.refs[1]), q),
+            SEAM_POINT | MEETING_POINT => on_surface(bsurf(r.refs[0]), q) && on_surface(tsurf(r.refs[1]), q),
             MEETING_END => on_surface(bsurf(r.refs[0]), q) && on_surface(tsurf(r.refs[1]), q) && on_surface(bsurf(r.refs[3]), q),
             TOOL_EDGE_END => on_curve(&tool.edges[r.refs[0]].curve, q) && on_surface(bsurf(r.refs[1]), q),
             other => panic!("vertex role {other}"),
@@ -410,11 +411,13 @@ fn prove_cut(body: &Body, tool: &Body, result: &Body, prov: &Provenance, outcome
             MEETING => {
                 assert!(samples(&edge.curve).iter().all(|&q| on_surface(bsurf(r.refs[0]), q) && on_surface(tsurf(r.refs[1]), q)), "edge {e} {r:?}");
                 if edge.start == edge.end && s.role == SEAM_POINT { assert_eq!(s.refs, r.refs[..2], "edge {e} circle from its seam point"); }
+                if edge.start == edge.end && s.role == MEETING_POINT { assert_eq!(s.refs, r.refs, "edge {e} loop from its own point"); }
                 if s.role == MEETING_END && t.role == MEETING_END && s.refs[..3] == r.refs[..] { assert_eq!(t.refs[..3], r.refs[..], "edge {e} ruling ends"); }
             }
             TOOL_SEAM => {
                 assert!(matches!(edge.curve, Curve::Line { .. }) && on_surface(tsurf(r.refs[1]), mid(&edge.curve)), "edge {e} {r:?}");
-                assert!(s.role == SEAM_POINT && s.refs == r.refs && t.role == SEAM_POINT && t.refs[1] == r.refs[1], "edge {e} ends");
+                let seam_end = |x: &Record| matches!(x.role, SEAM_POINT | MEETING_POINT) && x.refs[1] == r.refs[1];
+                assert!(seam_end(s) && s.refs[0] == r.refs[0] && seam_end(t), "edge {e} ends");
             }
             other => panic!("edge role {other}"),
         }
@@ -640,17 +643,149 @@ fn rounded_cutout_and_drill_in_either_order() {
     for v in [volume(&a), volume(&b)] { assert!((v - want).abs() <= 1e-12 * want, "{v} vs {want}"); }
 }
 
-/// Every interior first cut a passage domain already took keeps that domain (op 12 still names it).
+fn slot_tool() -> Body { through(vec![line((2.0, 1.5), (4.0, 1.5)), arc(4.0, 2.0, 0.5, -PI / 2.0, PI), line((4.0, 2.5), (2.0, 2.5)), arc(2.0, 2.0, 0.5, PI / 2.0, PI)]) }
+fn turned_tool() -> Body { through(vec![line((3.0, 1.0), (4.0, 2.0)), line((4.0, 2.0), (3.0, 3.0)), line((3.0, 3.0), (2.0, 2.0)), line((2.0, 2.0), (3.0, 1.0))]) }
+
+/// The first interior rectangle, slot and turned square in a plain plate (2026-11-02): the box passage splices its
+/// cavity (the rectangle no longer rebuilds cells), the slot rebuilds the box with the slot as a hole, the square
+/// splices: each recorded, the caps modified, the four sides unchanged, exact volumes; op 12 body = op 3 body.
 #[test]
-fn passage_domains_keep_their_first_cuts() {
-    let slot = through(vec![line((2.0, 1.5), (4.0, 1.5)), arc(4.0, 2.0, 0.5, -PI / 2.0, PI), line((4.0, 2.5), (2.0, 2.5)), arc(2.0, 2.0, 0.5, PI / 2.0, PI)]);
-    let turned = through(vec![line((3.0, 1.0), (4.0, 2.0)), line((4.0, 2.0), (3.0, 3.0)), line((3.0, 3.0), (2.0, 2.0)), line((2.0, 2.0), (3.0, 1.0))]);
-    for (tool, domain) in [(block(1.0, 1.0, 2.0, 2.0), "Rectilinear"), (slot, "Capsule"), (turned, "BoxCut")] {
-        match gc_kernel::boolean::cut_named(&plate(), &tool, TOL) {
-            Err(gc_kernel::KernelError::Unsupported(m)) => assert!(m.contains(domain), "{m}"),
-            other => panic!("{domain}: expected its refusal, got {:?}", other.map(|_| ())),
+fn first_interior_cuts_in_a_plate_record_history() {
+    for (tool, area, walls) in [
+        (block(1.0, 1.0, 2.0, 2.0), 1.0, 4),
+        (slot_tool(), 2.0 + PI * 0.25, 4),
+        (turned_tool(), 2.0, 4),
+    ] {
+        let body = plate();
+        let (result, prov, outcomes) = named(&body, &tool);
+        let want = 0.5 * (24.0 - area);
+        assert!((volume(&result) - want).abs() <= 1e-12 * want, "{} vs {want}", volume(&result));
+        let nf = body.faces.len();
+        for (i, out) in outcomes[..nf].iter().enumerate() {
+            assert_eq!(out.code, if is_z_face(&body, i) { MODIFIED } else { UNCHANGED }, "plate face {i}");
         }
-        assert!(gc_kernel::boolean::cut(&plate(), &tool, TOL).is_ok(), "{domain} still cuts");
+        assert_eq!((count(&prov, FROM_TOOL_FACE), count(&prov, FROM_TOOL_EDGE), count(&prov, MEETING), count(&prov, TOOL_EDGE_END)),
+            (walls, walls, 2 * walls, 2 * walls));
     }
-    named(&plate(), &drill(2.0, 1.5, 0.5));
+}
+
+// ---- Persistent names on every stock (Claude 2026-11-02): cuts through angle legs, tube walls, pipe and cone walls ----
+
+fn p3(x: f64, y: f64, z: f64) -> Vec3 { Vec3::new(x, y, z) }
+const Y: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+
+/// A closed polygon in the XZ plane (x, z), swept along +Y from 0 to `length`: angle, tube and channel stock as the
+/// shape factories lay them out.
+fn stock(points: &[(f64, f64)], holes: &[&[(f64, f64)]], length: f64) -> Body {
+    let polygon = |pts: &[(f64, f64)]| (0..pts.len()).map(|i| {
+        let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+        Curve::Line { a: p3(a.0, 0.0, a.1), b: p3(b.0, 0.0, b.1) }
+    }).collect::<Vec<_>>();
+    let mut loops = vec![polygon(points)];
+    loops.extend(holes.iter().map(|h| polygon(h)));
+    extrude(&Profile { loops, n: Y, low: 0.0, high: length }, TOL).unwrap()
+}
+
+fn angle() -> Body { stock(&[(0.0, 0.0), (3.0, 0.0), (3.0, -0.25), (0.25, -0.25), (0.25, -3.0), (0.0, -3.0)], &[], 12.0) }
+
+/// A cutter along z from `low` to `high` through (x, y) of the given section.
+fn along_z(curves: Vec<Curve>, low: f64, high: f64) -> Body { extrude(&Profile { loops: vec![curves], n: Z, low, high }, TOL).unwrap() }
+
+/// Hole, slot, rectangle and turned square through an angle's horizontal leg, one after another (each cutter spanning the
+/// whole angle, as the app's Through All does): every cut recorded,
+/// the angle's own faces that the cuts pass through modified, every other angle face unchanged at each step.
+#[test]
+fn cuts_through_an_angle_leg_keep_the_angle_names() {
+    let circle = |x: f64, y: f64, r: f64| vec![Curve::Arc { c: p(x, y), n: Z, x: Vec3::new(1.0, 0.0, 0.0), r, t0: 0.0, t1: 2.0 * PI }];
+    let shift = |curves: Vec<Curve>, dy: f64| curves.into_iter().map(|c| c.translated(Vec3::new(0.0, dy, 0.0))).collect::<Vec<_>>();
+    let slot = vec![line((1.0, 1.5), (2.0, 1.5)), arc(2.0, 2.0, 0.5, -PI / 2.0, PI), line((2.0, 2.5), (1.0, 2.5)), arc(1.0, 2.0, 0.5, PI / 2.0, PI)];
+    let square = vec![line((1.5, 0.0), (2.0, 0.5)), line((2.0, 0.5), (1.5, 1.0)), line((1.5, 1.0), (1.0, 0.5)), line((1.0, 0.5), (1.5, 0.0))];
+    let tools = [
+        along_z(circle(1.5, 1.0, 0.25), -4.0, 1.0),
+        along_z(shift(slot, 2.0), -4.0, 1.0),
+        along_z(rect(1.0, 6.0, 2.0, 7.0), -4.0, 1.0),
+        along_z(shift(square, 8.0), -4.0, 1.0),
+    ];
+    let mut body = angle();
+    let start = volume(&body);
+    let mut removed = 0.0;
+    for (k, (tool, area)) in tools.iter().zip([PI * 0.0625, 1.0 + PI * 0.25, 1.0, 0.5]).enumerate() {
+        let (result, prov, outcomes) = named(&body, tool);
+        removed += 0.25 * area;
+        assert!((start - volume(&result) - removed).abs() <= 1e-9, "cut {k}");
+        let modified: Vec<usize> = (0..body.faces.len()).filter(|&i| outcomes[i].code == MODIFIED).collect();
+        assert_eq!(modified.len(), 2, "cut {k}: the leg's top and bottom faces");
+        assert!(modified.iter().all(|&i| is_z_face(&body, i)), "cut {k}");
+        assert!(outcomes[..body.faces.len()].iter().all(|o| matches!(o.code, MODIFIED | UNCHANGED)), "cut {k}");
+        assert!(count(&prov, FROM_TOOL_FACE) >= 1);
+        body = result;
+    }
+}
+
+/// A rectangular tube drilled through both walls, then cut through both walls by a rectangle: two passages each,
+/// the four wall faces modified, every other face unchanged; generated names never repeat.
+#[test]
+fn cuts_through_both_walls_of_a_tube() {
+    let tube = stock(&[(0.0, 0.0), (0.0, -2.0), (4.0, -2.0), (4.0, 0.0)], &[&[(0.125, -0.125), (3.875, -0.125), (3.875, -1.875), (0.125, -1.875)]], 12.0);
+    let hole = along_z(vec![Curve::Arc { c: p(2.0, 3.0), n: Z, x: Vec3::new(1.0, 0.0, 0.0), r: 0.25, t0: 0.0, t1: 2.0 * PI }], -3.0, 1.0);
+    let (once, prov, outcomes) = named(&tube, &hole);
+    assert_eq!(outcomes[..tube.faces.len()].iter().filter(|o| o.code == MODIFIED).count(), 4);
+    assert_eq!((count(&prov, FROM_TOOL_FACE), count(&prov, MEETING), count(&prov, TOOL_SEAM)), (2, 4, 2));
+    let (_, prov, outcomes) = named(&once, &along_z(rect(1.5, 6.0, 2.5, 7.5), -3.0, 1.0));
+    assert_eq!(outcomes[..once.faces.len()].iter().filter(|o| o.code == MODIFIED).count(), 4);
+    assert_eq!((count(&prov, FROM_TOOL_FACE), count(&prov, MEETING), count(&prov, TOOL_EDGE_END)), (8, 16, 16));
+}
+
+/// A pipe along +Y (outer ro, inner ri), as the shape factory places it.
+fn pipe(ro: f64, ri: f64) -> Body {
+    let ring = |r: f64| vec![Curve::Arc { c: p3(0.0, 0.0, 0.0), n: Vec3::new(0.0, -1.0, 0.0), x: Vec3::new(1.0, 0.0, 0.0), r, t0: 0.0, t1: 2.0 * PI }];
+    extrude(&Profile { loops: vec![ring(ro), ring(ri)], n: Y, low: 0.0, high: 10.0 }, TOL).unwrap()
+}
+
+/// Radial bores through one wall and through both walls of a pipe, then of a tapered tube (cone_bore): the walls the
+/// hole crosses are modified, everything else of the stock unchanged; each crossing a numbered meeting loop with its
+/// own point (MEETING_POINT, role 42), each wall passage a seam and a wall from the drill.
+#[test]
+fn radial_and_conical_bores_record_history() {
+    let drill_z = |y: f64, r: f64, low: f64, high: f64| along_z(vec![Curve::Arc { c: p(0.0, y), n: Z, x: Vec3::new(1.0, 0.0, 0.0), r, t0: 0.0, t1: 2.0 * PI }], low, high);
+    let body = pipe(1.75, 1.5);
+    for (tool, passages) in [(drill_z(4.0, 0.25, 1.0, 1.751), 1), (drill_z(6.0, 0.25, -2.5, 2.5), 2)] {
+        let (_, prov, outcomes) = named(&body, &tool);
+        assert_eq!(outcomes[..body.faces.len()].iter().filter(|o| o.code == MODIFIED).count(), 2, "outer and inner walls");
+        assert_eq!((count(&prov, MEETING), count(&prov, MEETING_POINT), count(&prov, TOOL_SEAM), count(&prov, FROM_TOOL_FACE)),
+            (2 * passages, 2 * passages, passages, passages));
+        if passages == 2 {
+            let mut n: Vec<usize> = prov.edges.iter().filter(|r| r.role == MEETING).map(|r| r.refs[2]).collect();
+            n.sort();
+            assert_eq!(n, [0, 0, 1, 1], "each wall met twice, numbered along the drill");
+        }
+    }
+    use gc_kernel::revolve::{revolve_general, Kind, Revolution, Segment};
+    let section = [(2.0, 0.0), (1.5, 10.0), (1.25, 10.0), (1.75, 0.0)];
+    let cone = revolve_general(&Revolution { p: p3(0.0, 0.0, 0.0), a: Y, x: Vec3::new(1.0, 0.0, 0.0), angle: 2.0 * PI,
+        loops: vec![section.iter().map(|&(r, z)| Segment { r, z, kind: Kind::Line }).collect()] }, TOL).unwrap();
+    let (_, prov, outcomes) = named(&cone, &drill_z(5.0, 0.25, -3.0, 3.0));
+    assert_eq!(outcomes[..cone.faces.len()].iter().filter(|o| o.code == MODIFIED).count(), 2, "both conical walls");
+    assert_eq!((count(&prov, MEETING_POINT), count(&prov, TOOL_SEAM)), (4, 2));
+}
+
+/// Op 26: op 3's reply, then 1 and op 12's envelope for a recorded cut, or 0, n and the reason's n UTF-8 bytes.
+#[test]
+fn op26_reply_is_op3_reply_and_history_or_reason() {
+    use gc_kernel::protocol::OP_CUT_RECORDED;
+    let (body, tool) = (plate(), block(1.0, 1.0, 2.0, 2.0));
+    let (three, recorded) = (cut_reply(OP_CUT, &body, &tool).unwrap(), cut_reply(OP_CUT_RECORDED, &body, &tool).unwrap());
+    let twelve = cut_reply(OP_CUT_NAMED, &body, &tool).unwrap();
+    assert_eq!(recorded[..three.len()], three[..]);
+    assert_eq!(recorded[three.len()], 1.0);
+    assert_eq!(recorded[three.len() + 1..], twelve[three.len()..]);
+    // A blind pocket: same body as op 3, no history, and why.
+    let pocket = extrude(&Profile { loops: vec![rect(1.0, 1.0, 2.0, 2.0)], n: Z, low: 0.2, high: 1.5 }, TOL).unwrap();
+    let (three, recorded) = (cut_reply(OP_CUT, &body, &pocket).unwrap(), cut_reply(OP_CUT_RECORDED, &body, &pocket).unwrap());
+    assert_eq!(recorded[..three.len()], three[..]);
+    assert_eq!(recorded[three.len()], 0.0);
+    let n = recorded[three.len() + 1] as usize;
+    assert_eq!(recorded.len(), three.len() + 2 + n);
+    let reason = String::from_utf8(recorded[three.len() + 2..].iter().map(|&b| b as u8).collect()).unwrap();
+    assert!(reason.contains("cut history is not recorded"), "{reason}");
 }

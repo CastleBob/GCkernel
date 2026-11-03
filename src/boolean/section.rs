@@ -818,12 +818,13 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
 }
 
 /// The section cut and the recorded history of its every entity (provenance.rs op 12 roles), mapped from the extruder's
-/// own records through each result piece's tag. Refused where a piece or corner has no single recorded parent.
-pub(super) fn cut_named(body: &Body, tool: &Body, tol: f64) -> Result<(Body, Provenance)> {
+/// own records through each result piece's tag. No history where a piece or corner has no single recorded parent.
+pub(super) fn cut_traced(body: &Body, tool: &Body, tol: f64) -> Result<(Body, super::History)> {
     section_cut(body, tool, tol, true)
 }
 
-fn section_cut(body: &Body, tool: &Body, tol: f64, named: bool) -> Result<(Body, Provenance)> {
+fn section_cut(body: &Body, tool: &Body, tol: f64, named: bool) -> Result<(Body, super::History)> {
+    let none = || Err(String::new());
     if !tol.is_finite() || tol <= 0. {
         return Err(KernelError::InvalidInput("invalid section cut tolerance".into()));
     }
@@ -846,11 +847,9 @@ fn section_cut(body: &Body, tool: &Body, tol: f64, named: bool) -> Result<(Body,
         for k in (0..3).filter(|&k| prism_along(tool, k)) {
             let (Some(a), Some(b)) = (prism(body, k, tol)?, prism(tool, k, tol)?) else { continue };
             let Some(from_top) = pocketed(a.lo, a.hi, b.lo, b.hi, tol) else { continue };
-            if named {
-                return Err(unsupported("cut history is not recorded for blind pockets yet"));
-            }
+            let pocketed = || Err("cut history is not recorded for blind pockets yet".to_string());
             if from_top {
-                return pocket::cut(body, &a, &b, k, tol).map(|r| (r, Provenance::default()));
+                return pocket::cut(body, &a, &b, k, tol).map(|r| (r, pocketed()));
             }
             let (u, _) = axes(k);
             let mut m = [[0.; 3]; 3];
@@ -863,7 +862,7 @@ fn section_cut(body: &Body, tool: &Body, tol: f64, named: bool) -> Result<(Body,
                 return Err(KernelError::Internal("blind pocket: a prism turned half a turn is not a prism".into()));
             };
             let result = pocket::cut(&tb, &a, &b, k, tol)?;
-            return Ok((turn.body(&result), Provenance::default()));
+            return Ok((turn.body(&result), pocketed()));
         }
     }
     let (k, a, mut b) = chart.ok_or_else(|| unsupported("section cut needs a right-prism body and a tool spanning it along one axis"))?;
@@ -871,7 +870,7 @@ fn section_cut(body: &Body, tool: &Body, tol: f64, named: bool) -> Result<(Body,
     b.tags.iter_mut().flatten().for_each(|t| t.tool = true);
     let (result, tags) = difference(&a.loops, &a.tags, &b.loops, &b.tags, tol)?;
     if result.is_empty() {
-        return Ok((Body::default(), Provenance::default()));
+        return Ok((Body::default(), if named { Ok(Provenance::default()) } else { none() }));
     }
     let outer = result.iter().filter(|l| loop_area(l) > 0.).count();
     if outer != 1 {
@@ -917,10 +916,14 @@ fn section_cut(body: &Body, tool: &Body, tol: f64, named: bool) -> Result<(Body,
         .collect();
     let profile = Profile { loops: curves, n: unit(k), low: 0., high: hi - lo };
     if !named {
-        return crate::extrude::extrude(&profile, tol).map(|built| (built, Provenance::default()));
+        return crate::extrude::extrude(&profile, tol).map(|built| (built, none()));
     }
     let (built, records) = crate::extrude::extrude_named(&profile, tol)?;
-    let history = history(body, tool, &a, &b, &tags, &records)?;
+    let history = match history(body, tool, &a, &b, &tags, &records) {
+        Ok(history) => Ok(history),
+        Err(KernelError::Unsupported(reason)) => Err(reason),
+        Err(e) => return Err(e),
+    };
     Ok((built, history))
 }
 

@@ -18,13 +18,18 @@ fn vector(v: [f64; 3]) -> Vec3 {
 // A polygonal prism can also punch a clear planar wall after earlier cuts have
 // introduced several cylinder axes. Select by the finite cutter corridor before
 // either local passage construction or transverse admission; never retry errors.
-fn planar_profile_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+/// History of a cut through the transverse route: none yet.
+fn crossing(result: Body) -> (Body, super::History) {
+    (result, Err("cut history is not recorded for a planar cutter crossing curved stock (the transverse route) yet".to_string()))
+}
+
+fn planar_profile_cut(body: &Body, tool: &Body, tol: f64) -> Result<(Body, super::History)> {
     if tool.faces.len() > 34 || tool.edges.len() > 96 || tool.vertices.len() > 64 {
         return Err(unsupported("planar profile cutter exceeds its work limit"));
     }
     crate::topology::check(tool, tol)?;
     if tool.faces.iter().any(|f| f.loops.len() != 1) {
-        return super::endcut::planar_cross_cut(body, tool, tol);
+        return super::endcut::planar_cross_cut(body, tool, tol).map(crossing);
     }
     let axes: Vec<_> = (0..3)
         .filter(|axis| {
@@ -49,7 +54,7 @@ fn planar_profile_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             .iter()
             .any(|e| !matches!(e.curve, Curve::Line { .. }))
     {
-        return super::endcut::planar_cross_cut(body, tool, tol);
+        return super::endcut::planar_cross_cut(body, tool, tol).map(crossing);
     }
     let axis = axes[0];
     let mut lo = [f64::INFINITY; 3];
@@ -65,16 +70,17 @@ fn planar_profile_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     let v = (axis + 2) % 3;
     let radius = (hi[u] - lo[u]).hypot(hi[v] - lo[v]) * 0.5;
     if super::endcut::crosses_cylinder(body, axis, center, radius, lo[axis], hi[axis], tol) {
-        return super::endcut::planar_cross_cut(body, tool, tol);
+        return super::endcut::planar_cross_cut(body, tool, tol).map(crossing);
     }
-    let lower = tool
+    let lower_index = tool
         .faces
         .iter()
-        .find(|f| {
+        .position(|f| {
             matches!(f.surface, Surface::Plane { p, n, .. }
         if xyz(n)[axis].abs() == 1. && (xyz(p)[axis] - lo[axis]).abs() <= tol)
         })
         .ok_or_else(|| unsupported("planar profile has no lower cap"))?;
+    let lower = &tool.faces[lower_index];
     if lower.loops.len() != 1 || lower.loops[0].len() < 3 || lower.loops[0].len() > 32 {
         return Err(unsupported(
             "planar profile requires one bounded convex polygon",
@@ -112,16 +118,25 @@ fn planar_profile_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         tol,
     )?;
     super::capsule::match_prism(tool, &expected, tol)?;
+    let original = body;
     let body = super::passage::coalesce_caps(body, axis, tol)?;
     let passages =
         super::passage::round_passages(&body, axis, center, radius, lo[axis], hi[axis], tol)?;
+    // Joined cap patches are several parents of one face: no history then (Codex 2026-10-30: record all or refuse).
+    let segments = if body.faces.len() != original.faces.len() {
+        Err("cut history is not recorded for this cut: coplanar cap patches were joined first".to_string())
+    } else {
+        super::trace::cap_segments(tool, lower_index)
+    };
+    let mut history: super::History = segments.clone().map(|_| super::trace::kept(original));
+    let mut meetings = super::trace::Meetings::default();
     let mut result = body;
     for (bottom, top, bottom_face, top_face) in passages {
         let boundary = outline
             .iter()
             .map(|c| c.translated(n.scale(bottom - lo[axis])))
             .collect();
-        let cavity = crate::extrude::extrude(
+        let (cavity, records) = crate::extrude::extrude_named(
             &Profile {
                 loops: vec![boundary],
                 n,
@@ -131,11 +146,22 @@ fn planar_profile_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             tol,
         )?;
         result = super::passage::splice_cavity(&result, cavity, axis, bottom_face, top_face, tol)?;
+        history = match (history, &segments) {
+            (Ok(mut h), Ok(segs)) => super::trace::splice(&mut h, &records, segs, bottom_face, top_face, &mut meetings).map(|_| h),
+            (Err(e), _) => Err(e),
+            (_, Err(e)) => Err(e.clone()),
+        };
     }
-    Ok(result)
+    Ok((result, history))
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    cut_traced(body, tool, tol).map(|(result, _)| result)
+}
+
+/// The planar cut and its history: a clear passage keeps the body and splices each wall's cavity (trace::splice); the
+/// transverse route records none yet.
+pub(super) fn cut_traced(body: &Body, tool: &Body, tol: f64) -> Result<(Body, super::History)> {
     if !tol.is_finite() || tol <= 0. {
         return Err(KernelError::InvalidInput(
             "rectangular passage tolerance must be positive".into(),
@@ -153,6 +179,50 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         return planar_profile_cut(body, tool, tol);
     }
     let (lo, hi) = super::rectilinear::plain_box_bounds(tool, tol)?;
+    let (base_lo, base_hi) = base_bounds(body)?;
+    let axes: Vec<_> = (0..3)
+        .filter(|k| lo[*k] <= base_lo[*k] && hi[*k] >= base_hi[*k])
+        .collect();
+    if axes.len() != 1 {
+        return super::endcut::planar_cross_cut(body, tool, tol).map(crossing);
+    }
+    let axis = axes[0];
+    let u = (axis + 1) % 3;
+    let v = (axis + 2) % 3;
+    let center = vector(std::array::from_fn(|k| (lo[k] + hi[k]) * 0.5));
+    let radius = (hi[u] - lo[u]).hypot(hi[v] - lo[v]) * 0.5;
+    if super::endcut::crosses_cylinder(body, axis, center, radius, lo[axis], hi[axis], tol) {
+        return super::endcut::box_cross_cut(body, tool, axis, tol).map(crossing);
+    }
+    let passages =
+        super::passage::round_passages(body, axis, center, radius, lo[axis], hi[axis], tol)?;
+    splice_box(body, tool, axis, lo, hi, passages, tol)
+}
+
+/// Selection (mod.rs, before anything is built; Claude 2026-11-02): a plain cardinal box cutter making a clear passage
+/// through the planar walls of a body with no curved faces, exactly as the box branch of `cut_traced` admits it. Such
+/// a cut runs here (the body kept, the cavity spliced in) rather than in the rectilinear cell engine, whose cell seams
+/// split every face the cut touches. Same material removed; every other rectilinear cut is unchanged.
+pub(super) fn clear_box_passage(body: &Body, tool: &Body, tol: f64) -> bool {
+    if !tol.is_finite() || tol <= 0. || tool.vertices.len() != 8 || tool.edges.len() != 12 || tool.faces.len() != 6
+        || tool.faces.iter().any(|f| !matches!(f.surface, Surface::Plane { n, .. } if xyz(n).iter().filter(|v| **v != 0.).count() == 1))
+    {
+        return false;
+    }
+    let (Ok((lo, hi)), Ok((base_lo, base_hi))) = (super::rectilinear::plain_box_bounds(tool, tol), base_bounds(body)) else {
+        return false;
+    };
+    let axes: Vec<_> = (0..3).filter(|k| lo[*k] <= base_lo[*k] && hi[*k] >= base_hi[*k]).collect();
+    let [axis] = axes[..] else { return false };
+    let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+    let center = vector(std::array::from_fn(|k| (lo[k] + hi[k]) * 0.5));
+    let radius = (hi[u] - lo[u]).hypot(hi[v] - lo[v]) * 0.5;
+    !super::endcut::crosses_cylinder(body, axis, center, radius, lo[axis], hi[axis], tol)
+        && super::passage::round_passages(body, axis, center, radius, lo[axis], hi[axis], tol).is_ok()
+}
+
+/// The body's analytic bounds (cylinder-pair edges by their cylinders).
+fn base_bounds(body: &Body) -> Result<([f64; 3], [f64; 3])> {
     if body.faces.len() > 5000 || body.edges.len() > 20000 || body.vertices.len() > 20000 {
         return Err(unsupported(
             "rectangular passage exceeds its input work limit",
@@ -193,23 +263,33 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             base_hi[k] = base_hi[k].max(h[k]);
         }
     }
-    let axes: Vec<_> = (0..3)
-        .filter(|k| lo[*k] <= base_lo[*k] && hi[*k] >= base_hi[*k])
-        .collect();
-    if axes.len() != 1 {
-        return super::endcut::planar_cross_cut(body, tool, tol);
-    }
-    let axis = axes[0];
+    Ok((base_lo, base_hi))
+}
+
+/// The box branch's construction: per admitted wall interval, the cutter's section extruded through it and spliced.
+fn splice_box(
+    body: &Body,
+    tool: &Body,
+    axis: usize,
+    lo: [f64; 3],
+    hi: [f64; 3],
+    passages: Vec<(f64, f64, usize, usize)>,
+    tol: f64,
+) -> Result<(Body, super::History)> {
     let u = (axis + 1) % 3;
     let v = (axis + 2) % 3;
-    let center = vector(std::array::from_fn(|k| (lo[k] + hi[k]) * 0.5));
-    let radius = (hi[u] - lo[u]).hypot(hi[v] - lo[v]) * 0.5;
-    if super::endcut::crosses_cylinder(body, axis, center, radius, lo[axis], hi[axis], tol) {
-        return super::endcut::box_cross_cut(body, tool, axis, tol);
-    }
-    let passages =
-        super::passage::round_passages(body, axis, center, radius, lo[axis], hi[axis], tol)?;
     let mut result = body.clone();
+    // The cutter's low cap (facing -axis at lo) and its segments along the corners below.
+    let segments = tool
+        .faces
+        .iter()
+        .position(|f| matches!(f.surface, Surface::Plane { p, n, .. }
+            if xyz(p)[axis] == lo[axis] && xyz(n)[axis] * if f.sense { 1. } else { -1. } == -1.))
+        .ok_or_else(|| "cut history is not recorded for this cut: the box cutter has no low cap".to_string())
+        .and_then(|cap| super::trace::box_segments(tool, cap, u, v,
+            &[[lo[u], lo[v]], [hi[u], lo[v]], [hi[u], hi[v]], [lo[u], hi[v]]]));
+    let mut history: super::History = segments.clone().map(|_| super::trace::kept(body));
+    let mut meetings = super::trace::Meetings::default();
     for (bottom, top, bottom_face, top_face) in passages {
         let point = |s: f64, t: f64| {
             let mut q = [0.; 3];
@@ -232,7 +312,7 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             .collect();
         let mut n = [0.; 3];
         n[axis] = 1.;
-        let cavity = crate::extrude::extrude(
+        let (cavity, records) = crate::extrude::extrude_named(
             &Profile {
                 loops: vec![boundary],
                 n: vector(n),
@@ -242,8 +322,13 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             tol,
         )?;
         result = super::passage::splice_cavity(&result, cavity, axis, bottom_face, top_face, tol)?;
+        history = match (history, &segments) {
+            (Ok(mut h), Ok(segs)) => super::trace::splice(&mut h, &records, segs, bottom_face, top_face, &mut meetings).map(|_| h),
+            (Err(e), _) => Err(e),
+            (_, Err(e)) => Err(e.clone()),
+        };
     }
-    Ok(result)
+    Ok((result, history))
 }
 
 #[cfg(test)]
