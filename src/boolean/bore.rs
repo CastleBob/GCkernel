@@ -254,6 +254,11 @@ fn bore(body: &Body, tool: &Body, tolerance: f64) -> Result<(Body, super::Histor
         let result = super::endcut::cross_cut(body, tool, tolerance)?;
         return Ok((result, Err("cut history is not recorded for a bore crossing a cylindrical wall yet".into())));
     }
+    // Seams an earlier transverse cut left on the caps are joined first (passage::join_cap_seams); the joined faces have
+    // several sources, so such a bore records no history yet.
+    let joined = super::passage::join_cap_seams(body, axis, cutter.center, radius, cutter.low, cutter.high, tolerance)?;
+    let seamed = joined.is_some();
+    let body = joined.as_ref().unwrap_or(body);
     // Admission is selected by the operand representation before execution.
     // A failed box admission never retries against the general passage checker.
     let passages = if body.vertices.len() == 8 && body.edges.len() == 12 && body.faces.len() == 6 {
@@ -350,6 +355,9 @@ fn bore(body: &Body, tool: &Body, tolerance: f64) -> Result<(Body, super::Histor
     }
     crate::topology::check(&result, tolerance)
         .map_err(|e| KernelError::Internal(format!("bore result failed topology checks: {e}")))?;
+    if seamed {
+        return Ok((result, Err("cut history is not recorded for a bore across cap seams joined by this cut yet".into())));
+    }
     Ok((result, Ok(history)))
 }
 

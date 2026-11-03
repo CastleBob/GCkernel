@@ -594,6 +594,72 @@ pub(super) fn coalesce_caps(body: &Body, axis: usize, tol: f64) -> Result<Body> 
     Ok(result)
 }
 
+/// Seams on a cap plane (Bob's angle corner cut, 2026-11-03): earlier transverse cuts leave a cap split into faces on
+/// one plane with one outward side, meeting across edges inside the material. Those edges are not cap boundaries. The
+/// axis-normal faces the corridor reaches are grouped by plane and side and joined across the edges they share (exact
+/// topology edits, unite_tidy: no point moved, no surface fitted). `None` when the corridor meets no such seam. Decided
+/// from the operands before admission; the joined body is then admitted as any other.
+pub(super) fn join_cap_seams(
+    body: &Body,
+    axis: usize,
+    center: Vec3,
+    radius: f64,
+    tool_low: f64,
+    tool_high: f64,
+    tol: f64,
+) -> Result<Option<Body>> {
+    let bounds = validate(body, tol)?;
+    let c = xyz(center);
+    let mut corridor_low = c.map(|v| v - radius);
+    let mut corridor_high = c.map(|v| v + radius);
+    corridor_low[axis] = tool_low;
+    corridor_high[axis] = tool_high;
+    let mut planes: Vec<(f64, f64)> = vec![];
+    let group: Vec<Option<usize>> = body
+        .faces
+        .iter()
+        .enumerate()
+        .map(|(index, face)| {
+            let (lo, hi) = bounds[index];
+            if (0..3).any(|k| hi[k] < corridor_low[k] - tol || lo[k] > corridor_high[k] + tol) {
+                return None;
+            }
+            let Surface::Plane { p, n, .. } = face.surface else { return None };
+            let nn = xyz(n);
+            if nn[axis].abs() != 1. || (0..3).any(|k| k != axis && nn[k] != 0.) {
+                return None;
+            }
+            let (height, side) = (xyz(p)[axis], nn[axis] * sign(face.sense));
+            Some(planes.iter().position(|&(h, s)| s == side && (h - height).abs() <= tol).unwrap_or_else(|| {
+                planes.push((height, side));
+                planes.len() - 1
+            }))
+        })
+        .collect();
+    let mut owner: Vec<Option<usize>> = vec![None; body.edges.len()];
+    let mut seam = false;
+    for (index, face) in body.faces.iter().enumerate() {
+        let Some(g) = group[index] else { continue };
+        for &(e, _) in face.loops.iter().flatten() {
+            match owner[e] {
+                Some(other) if other != index && group[other] == Some(g) => seam = true,
+                _ => owner[e] = Some(index),
+            }
+        }
+    }
+    if !seam {
+        return Ok(None);
+    }
+    let mut joined = body.clone();
+    super::unite_tidy::join_faces(&mut joined, &group, &|_, _| false)?;
+    let _ = super::unite_tidy::compact(&mut joined);
+    super::unite_tidy::join_edges(&mut joined, tol);
+    super::unite_tidy::outer_first(&mut joined);
+    crate::topology::check(&joined, tol)
+        .map_err(|e| KernelError::Internal(format!("joining cap seams built an invalid solid: {e}")))?;
+    Ok(Some(joined))
+}
+
 /// Ordered (lower height, upper height, lower face, upper face) intervals.
 /// A disk wholly inside each cap, alternating signs and exclusion of all other
 /// patches prove complete material intervals throughout the finite corridor.

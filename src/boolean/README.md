@@ -635,3 +635,12 @@ into a non-layered body; flush bosses on non-layered bodies), history for the st
 Bezier operands. Tests: `tests/union.rs` (closed-form volumes, topology check and tessellation of
 every result, entity-for-entity preservation in the face domain, op 24/25 through the protocol, a hole cut after a
 boss).
+
+## Bores across cap seams (Claude 2026-11-03)
+A transverse cut (endcut_cross) leaves the faces it crosses split into cells on one plane. A later bore whose corridor
+meets such a seam on its caps joins the axis-normal faces it reaches, grouped by plane and outward side, across the
+edges they share (`passage::join_cap_seams`, unite_tidy's exact topology edits; no point moved). Decided from the
+operands before admission; the joined body is admitted as any other. Such a bore records no history yet (op 26 reason
+"... across cap seams joined by this cut ..."). The transverse engine itself keeps its cells: joining them globally
+broke later transverse cuts (patch coverage), so the join is local to the bore. Regression: tests/cap_seams.rs (Bob's
+Angle Corner Cutout).

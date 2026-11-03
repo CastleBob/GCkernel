@@ -1,0 +1,8 @@
+GC Kernel fixture, written 2026-11-03 (Claude) from Bob's "Angle Corner Cutout - Repaired.gcmprt" (Codex's repaired copy)
+units inch; tolerance 1E-06
+format: neutral body v1, little-endian f64, the exact arrays GCmaker sends
+base.f64: Angle L3X3X1/4 x 3.5 stock (op 2)
+step01.f64: cut tool, Extrude1 (Cut) - corner cutout with an R0.5 arc through the vertical leg (transverse route)
+step02.f64: cut tool, Hole_1 placement 1 (horizontal leg)
+step03.f64: cut tool, Hole_1 placement 2 (horizontal leg)
+step04.f64: cut tool, Hole_2 - 1 inch side hole through the vertical leg, across the cap seams step01 leaves
