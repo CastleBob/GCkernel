@@ -33,6 +33,20 @@ pub struct MassProperties {
     pub exact: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceArea {
+    pub area: f64,
+    pub exact: bool,
+}
+
+/// Areas in body face order, using the same trimmed-surface integrals as whole-body mass.
+/// As with `measure`, the caller must validate the body topology first.
+pub fn face_areas(body: &Body, tolerance: f64) -> Result<Vec<FaceArea>, KernelError> {
+    let mut faces = Vec::with_capacity(body.faces.len());
+    measure_impl(body, tolerance, Some(&mut faces))?;
+    Ok(faces)
+}
+
 fn gauss_nodes() -> &'static [(f64, f64)] {
     static NODES: std::sync::OnceLock<Vec<(f64, f64)>> = std::sync::OnceLock::new();
     NODES.get_or_init(|| {
@@ -93,7 +107,11 @@ fn segment(body: &Body, edge: usize, forward: bool, shift: Vec3) -> Curve {
 /// nothing to cancellation (Astra). The body itself is not changed.
 /// Curves that do not lie on their cylinder (beyond `tolerance`) are refused.
 pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelError> {
-    let (mut volume, mut area) = (0.0, 0.0);
+    measure_impl(body, tolerance, None)
+}
+
+fn measure_impl(body: &Body, tolerance: f64, mut faces: Option<&mut Vec<FaceArea>>) -> Result<MassProperties, KernelError> {
+    let (mut total_volume, mut total_area) = (0.0, 0.0);
     let exact = !body.edges.iter().any(|e| matches!(e.curve, Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::RationalBezier { .. }))
         && !body.faces.iter().any(|f| matches!(f.surface, Surface::EllipticCylinder { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. })
             || matches!(f.surface, Surface::Cylinder { .. })
@@ -105,6 +123,7 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
     let shift = o.scale(-1.0);
     let o = Vec3::new(0.0, 0.0, 0.0);
     for (f, face) in body.faces.iter().enumerate() {
+        let (mut volume, mut area) = (0.0, 0.0);
         let sense = if face.sense { 1.0 } else { -1.0 };
         match &face.surface {
             Surface::Spline { data } => {
@@ -263,11 +282,24 @@ pub fn measure(body: &Body, tolerance: f64) -> Result<MassProperties, KernelErro
                 area -= sense * sweep;
             }
         }
+        if !volume.is_finite() || !area.is_finite() {
+            return Err(KernelError::Unsupported(format!("face {f}: a boundary integral could not be evaluated")));
+        }
+        if let Some(output) = faces.as_mut() {
+            let face_exact = !matches!(face.surface, Surface::EllipticCylinder { .. } | Surface::Revolution { .. } | Surface::Spline { .. } | Surface::Conoid { .. })
+                && !face.loops.iter().flatten().any(|&(edge, _)| {
+                    matches!(body.edges[edge].curve, Curve::CylinderPair { .. } | Curve::RadialPair { .. } | Curve::ConePair { .. } | Curve::RationalBezier { .. })
+                        || matches!(face.surface, Surface::Cylinder { .. }) && matches!(body.edges[edge].curve, Curve::Bezier { .. })
+                });
+            output.push(FaceArea { area, exact: face_exact });
+        }
+        total_volume += volume;
+        total_area += area;
     }
-    if !volume.is_finite() || !area.is_finite() {
+    if !total_volume.is_finite() || !total_area.is_finite() {
         return Err(KernelError::Unsupported("a boundary integral could not be evaluated".into()));
     }
-    Ok(MassProperties { volume, area, exact })
+    Ok(MassProperties { volume: total_volume, area: total_area, exact })
 }
 
 /// For one boundary curve on the cylinder: (integral of s f dtheta, integral of s r dtheta). s is measured along the

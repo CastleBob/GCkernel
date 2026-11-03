@@ -6,7 +6,7 @@ use std::f64::consts::PI;
 use gc_kernel::boolean;
 use gc_kernel::extrude::{extrude, volume};
 use gc_kernel::geom::{Curve, Vec3};
-use gc_kernel::mass::measure;
+use gc_kernel::mass::{measure, face_areas};
 use gc_kernel::neutral::{write_body, Body, Profile, Reader};
 use gc_kernel::protocol::{handle, parse_request, encode_request, OP_MEASURE};
 
@@ -131,4 +131,46 @@ fn measure_op_answers_volume_and_area() {
     close(reply[0], 320.0, 1e-14);
     close(reply[1], 304.0, 1e-14);
     assert_eq!(reply[2], 1.0);   // closed form
+}
+
+#[test]
+fn selected_face_areas_include_holes_and_curved_walls_in_body_order() {
+    let (_, body) = prism(vec![rectangle(0., 0., 10., 8.), vec![circle(5., 4., 1.)]], 0., 4.);
+    let faces = face_areas(&body, TOL).unwrap();
+    assert_eq!(faces.len(), body.faces.len());
+    for (face, result) in body.faces.iter().zip(&faces) {
+        assert!(result.exact);
+        match face.surface {
+            gc_kernel::geom::Surface::Plane { n, .. } if n.dot(Z).abs() > 0.9 => close(result.area, 80. - PI, 1e-13),
+            gc_kernel::geom::Surface::Cylinder { .. } => close(result.area, 8. * PI, 1e-13),
+            _ => assert!(result.area == 32. || result.area == 40.),
+        }
+    }
+    close(faces.iter().map(|f| f.area).sum(), measure(&body, TOL).unwrap().area, 1e-14);
+    let request = encode_request(gc_kernel::protocol::OP_FACE_AREAS, TOL, &write_body(&body));
+    let reply = handle(&parse_request(&request).unwrap()).unwrap();
+    assert_eq!(reply.len(), 2 + 2 * faces.len());
+    assert_eq!(&reply[..2], &[1., faces.len() as f64]);
+    for (i, f) in faces.iter().enumerate() { assert_eq!(&reply[2+2*i..4+2*i], &[f.area, 1.]); }
+    let mut bad = body.clone(); bad.faces.pop();
+    assert!(handle(&parse_request(&encode_request(gc_kernel::protocol::OP_FACE_AREAS, TOL, &write_body(&bad))).unwrap()).is_err());
+}
+
+#[test]
+fn elliptical_wall_reports_quadrature_separately_from_its_closed_form_caps() {
+    let ellipse = Curve::Conic { c: Vec3::new(0.,0.,0.), u: Vec3::new(2.,0.,0.), v: Vec3::new(0.,1.,0.), t0: 0., t1: 2.*PI };
+    let (_, body) = prism(vec![vec![ellipse]], 0., 3.);
+    let faces = face_areas(&body, TOL).unwrap();
+    let mut walls = 0;
+    for (face, area) in body.faces.iter().zip(&faces) {
+        match face.surface {
+            gc_kernel::geom::Surface::Plane { .. } => { assert!(area.exact); close(area.area, 2.*PI, 1e-12); },
+            gc_kernel::geom::Surface::EllipticCylinder { .. } => {
+                walls += 1; assert!(!area.exact); close(area.area, 3.*9.688448220547675, 1e-12);
+            },
+            _ => panic!("unexpected surface"),
+        }
+    }
+    assert_eq!(walls, 1);
+    close(faces.iter().map(|a|a.area).sum(), measure(&body, TOL).unwrap().area, 1e-14);
 }

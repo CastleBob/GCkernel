@@ -30,6 +30,10 @@ Request `GCKQ`, u32 version 1, u32 op, u32 units (1 = inch), f64 tolerance, u32 
 Reply `GCKR`, u32 version 1, u32 status (0 ok, 1 unsupported, 2 invalid input, 3 internal), u32 count,
 then count f64 (ok) or count UTF-8 message bytes.
 
+Op 27 face areas (body -> [1, faceCount, (area, 1 closed form | 0 quadrature)...])
+uses the same trimmed-surface mass integrals after checking the complete body;
+values are square inches in body-face order, including hole loops.
+
 Ops: 1 check, 2 extrude, 3 cut, 4 measure ([volume, area, 1 closed form | 0 quadrature]),
 5 rebuild prism, 6 tessellate ([chord, body] -> display mesh and edge polylines, `src/tessellate.rs`; display only),
 7 transform (one rigid motion and a batch of items -> the items moved; `src/frame.rs`, `protocol::transform`):

@@ -90,6 +90,8 @@ pub const OP_NORMALIZED_END: u32 = 23;
 pub const OP_UNION: u32 = 24;
 pub const OP_UNION_NAMED: u32 = 25;
 pub const OP_CUT_RECORDED: u32 = 26;
+/// A validated body -> [1, face count, (area in square inches, closed-form flag 0/1)...].
+pub const OP_FACE_AREAS: u32 = 27;
 
 pub struct Request {
     pub op: u32,
@@ -253,6 +255,20 @@ pub fn handle(request: &Request) -> Result<Vec<f64>, KernelError> {
             topology::check(&body, tol)?;
             let m = mass::measure(&body, tol)?;
             Ok(vec![m.volume, m.area, if m.exact { 1.0 } else { 0.0 }])
+        }
+        OP_FACE_AREAS => {
+            let body = reader.body()?;
+            reader.finish()?;
+            topology::check(&body, tol)?;
+            let faces = mass::face_areas(&body, tol)?;
+            let mut out = vec![1.0, faces.len() as f64];
+            for (index, face) in faces.iter().enumerate() {
+                if !face.area.is_finite() || face.area < 0.0 {
+                    return Err(KernelError::InvalidInput(format!("face {index}: invalid surface area")));
+                }
+                out.extend_from_slice(&[face.area, if face.exact { 1.0 } else { 0.0 }]);
+            }
+            Ok(out)
         }
         OP_REBUILD_PRISM => {
             let body = reader.body()?;
