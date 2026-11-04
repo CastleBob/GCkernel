@@ -626,10 +626,10 @@ pub(super) fn join_cap_seams(
             }
             let Surface::Plane { p, n, .. } = face.surface else { return None };
             let nn = xyz(n);
-            if nn[axis].abs() != 1. || (0..3).any(|k| k != axis && nn[k] != 0.) {
+            if !cap_normal(nn, axis) {
                 return None;
             }
-            let (height, side) = (xyz(p)[axis], nn[axis] * sign(face.sense));
+            let (height, side) = (xyz(p)[axis], nn[axis].signum() * sign(face.sense));
             Some(planes.iter().position(|&(h, s)| s == side && (h - height).abs() <= tol).unwrap_or_else(|| {
                 planes.push((height, side));
                 planes.len() - 1
@@ -660,6 +660,97 @@ pub(super) fn join_cap_seams(
     Ok(Some(joined))
 }
 
+/// A planar face's unit normal along the corridor axis, within 1e-12 per component: a cap. Stock built by rotated or
+/// filleted profile math carries normals off the axis in the last bits (a web face's 2.6e-17); over any admitted part
+/// that is far inside the kernel tolerance, so such a face is the same cap (Bob 10-28: what agrees within the kernel
+/// tolerance is the same).
+fn cap_normal(nn: [f64; 3], axis: usize) -> bool {
+    (nn[axis].abs() - 1.).abs() <= 1e-12 && (0..3).all(|k| k == axis || nn[k].abs() <= 1e-12)
+}
+
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// The distance between segments p0-p1 and q0-q1 (closest points by the clamped normal equations; a degenerate
+/// segment is its point).
+fn segment_distance(p0: [f64; 3], p1: [f64; 3], q0: [f64; 3], q1: [f64; 3]) -> f64 {
+    let (d1, d2, r) = (sub3(p1, p0), sub3(q1, q0), sub3(p0, q0));
+    let (a, e, f) = (dot3(d1, d1), dot3(d2, d2), dot3(d2, r));
+    let (s, t);
+    if a <= f64::EPSILON && e <= f64::EPSILON {
+        (s, t) = (0., 0.);
+    } else if a <= f64::EPSILON {
+        (s, t) = (0., (f / e).clamp(0., 1.));
+    } else {
+        let c = dot3(d1, r);
+        if e <= f64::EPSILON {
+            (s, t) = ((-c / a).clamp(0., 1.), 0.);
+        } else {
+            let b = dot3(d1, d2);
+            let denom = a * e - b * b;
+            let mut s1 = if denom > 0. { ((b * f - c * e) / denom).clamp(0., 1.) } else { 0. };
+            let mut t1 = (b * s1 + f) / e;
+            if t1 < 0. {
+                t1 = 0.;
+                s1 = (-c / a).clamp(0., 1.);
+            } else if t1 > 1. {
+                t1 = 1.;
+                s1 = ((b - c) / a).clamp(0., 1.);
+            }
+            (s, t) = (s1, t1);
+        }
+    }
+    let cp = [p0[0] + d1[0] * s, p0[1] + d1[1] * s, p0[2] + d1[2] * s];
+    let cq = [q0[0] + d2[0] * t, q0[1] + d2[1] * t, q0[2] + d2[2] * t];
+    let d = sub3(cp, cq);
+    dot3(d, d).sqrt()
+}
+
+/// A planar face bounded by straight edges only that lies farther than radius + tol from the corridor's axis segment
+/// (from tool_low to tool_high along the axis through the centre): every point of the corridor's cylinder is within
+/// the radius of that segment, so the face cannot meet it. The least distance from a segment to a planar region is
+/// reached on the region's boundary, where the segment crosses the region, or at a segment end above the region;
+/// each is tested. Any curved boundary edge, or a point on a boundary in the inside test, answers false.
+#[allow(clippy::too_many_arguments)]
+fn clear_of_corridor(body: &Body, face: &Face, n: Vec3, axis: usize, c: [f64; 3], radius: f64, tool_low: f64, tool_high: f64, tol: f64) -> bool {
+    let (mut a, mut b) = (c, c);
+    a[axis] = tool_low;
+    b[axis] = tool_high;
+    let limit = radius + tol;
+    let mut first = None;
+    for &(e, _) in face.loops.iter().flatten() {
+        let edge = &body.edges[e];
+        let Curve::Line { .. } = edge.curve else { return false };
+        let (p, q) = (xyz(body.vertices[edge.start]), xyz(body.vertices[edge.end]));
+        first.get_or_insert(p);
+        if segment_distance(a, b, p, q) <= limit {
+            return false;
+        }
+    }
+    let Some(origin) = first else { return false };
+    let nn = xyz(n);
+    let height = |x: [f64; 3]| dot3(sub3(x, origin), nn);
+    let (ha, hb) = (height(a), height(b));
+    let on_region = |x: [f64; 3]| inside(body, face, vector(x), n, tol).unwrap_or(true);
+    if ha * hb <= 0. && ha != hb {
+        let t = ha / (ha - hb);
+        let x = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+        if on_region(x) {
+            return false;
+        }
+    }
+    for (x, h) in [(a, ha), (b, hb)] {
+        if h.abs() <= limit && on_region([x[0] - nn[0] * h, x[1] - nn[1] * h, x[2] - nn[2] * h]) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Ordered (lower height, upper height, lower face, upper face) intervals.
 /// A disk wholly inside each cap, alternating signs and exclusion of all other
 /// patches prove complete material intervals throughout the finite corridor.
@@ -688,7 +779,12 @@ pub(super) fn round_passages(
             return Err(unsupported("bore corridor may intersect a curved face; fillet-crossing cuts require intersection support"));
         };
         let nn = xyz(n);
-        if nn[axis].abs() != 1. || (0..3).any(|k| k != axis && nn[k] != 0.) {
+        if !cap_normal(nn, axis) {
+            // A side or sloped face inside the corridor's box need not meet the corridor itself: excluded when it is
+            // provably farther than the radius from the corridor's axis segment.
+            if clear_of_corridor(body, face, n, axis, c, radius, tool_low, tool_high, tol) {
+                continue;
+            }
             return Err(unsupported("bore corridor may cross a non-cap planar face"));
         }
         let height = xyz(p)[axis];
@@ -707,7 +803,7 @@ pub(super) fn round_passages(
             ));
         }
         if inside(body, face, q, n.scale(sign(face.sense)), tol)? {
-            hits.push((height, nn[axis] * sign(face.sense), index));
+            hits.push((height, nn[axis].signum() * sign(face.sense), index));
         }
     }
     hits.sort_by(|a, b| a.0.total_cmp(&b.0));
