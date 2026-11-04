@@ -675,11 +675,12 @@ fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// The distance between segments p0-p1 and q0-q1 (closest points by the clamped normal equations; a degenerate
-/// segment is its point).
-fn segment_distance(p0: [f64; 3], p1: [f64; 3], q0: [f64; 3], q1: [f64; 3]) -> f64 {
+/// Distance used only as clearance evidence. None means the normal equations cannot safely distinguish a
+/// near-parallel edge from a parallel one; the caller must refuse exclusion, not guess a distance.
+fn segment_distance(p0: [f64; 3], p1: [f64; 3], q0: [f64; 3], q1: [f64; 3]) -> Option<f64> {
     let (d1, d2, r) = (sub3(p1, p0), sub3(q1, q0), sub3(p0, q0));
     let (a, e, f) = (dot3(d1, d1), dot3(d2, d2), dot3(d2, r));
+    if ![a, e, f].iter().all(|x| x.is_finite()) { return None; }
     let (s, t);
     if a <= f64::EPSILON && e <= f64::EPSILON {
         (s, t) = (0., 0.);
@@ -687,11 +688,20 @@ fn segment_distance(p0: [f64; 3], p1: [f64; 3], q0: [f64; 3], q1: [f64; 3]) -> f
         (s, t) = (0., (f / e).clamp(0., 1.));
     } else {
         let c = dot3(d1, r);
+        if !c.is_finite() { return None; }
         if e <= f64::EPSILON {
             (s, t) = ((-c / a).clamp(0., 1.), 0.);
         } else {
             let b = dot3(d1, d2);
             let denom = a * e - b * b;
+            let roundoff_scale = a * e + b * b;
+            if !roundoff_scale.is_finite() { return None; }
+            // The first segment is the cardinal bore axis. Parallelism is exact only when
+            // both directions have zero off-axis components; a rounded zero determinant
+            // is insufficient. Near-parallel uncertainty supplies no exclusion evidence.
+            let exact_parallel = (0..3).any(|axis| d1[axis] != 0.
+                && (0..3).all(|k| k == axis || (d1[k] == 0. && d2[k] == 0.)));
+            if !exact_parallel && denom <= 16. * f64::EPSILON * roundoff_scale { return None; }
             let mut s1 = if denom > 0. { ((b * f - c * e) / denom).clamp(0., 1.) } else { 0. };
             let mut t1 = (b * s1 + f) / e;
             if t1 < 0. {
@@ -707,7 +717,8 @@ fn segment_distance(p0: [f64; 3], p1: [f64; 3], q0: [f64; 3], q1: [f64; 3]) -> f
     let cp = [p0[0] + d1[0] * s, p0[1] + d1[1] * s, p0[2] + d1[2] * s];
     let cq = [q0[0] + d2[0] * t, q0[1] + d2[1] * t, q0[2] + d2[2] * t];
     let d = sub3(cp, cq);
-    dot3(d, d).sqrt()
+    let distance = dot3(d, d).sqrt();
+    distance.is_finite().then_some(distance)
 }
 
 /// A planar face bounded by straight edges only that lies farther than radius + tol from the corridor's axis segment
@@ -727,7 +738,8 @@ fn clear_of_corridor(body: &Body, face: &Face, n: Vec3, axis: usize, c: [f64; 3]
         let Curve::Line { .. } = edge.curve else { return false };
         let (p, q) = (xyz(body.vertices[edge.start]), xyz(body.vertices[edge.end]));
         first.get_or_insert(p);
-        if segment_distance(a, b, p, q) <= limit {
+        let Some(distance) = segment_distance(a, b, p, q) else { return false };
+        if distance <= limit {
             return false;
         }
     }
@@ -899,10 +911,18 @@ mod codex_clearance_review {
     use crate::neutral::Edge;
 
     #[test]
-    fn long_nearly_parallel_crossing_segments_have_zero_distance() {
+    fn long_nearly_parallel_crossing_segments_cannot_supply_clearance_evidence() {
         let distance = segment_distance([0.,0.,0.], [0.,100000.,0.],
             [-0.0001,0.,0.], [0.0001,100000.,0.]);
-        assert!(distance <= 1e-12, "segments intersect at (0,50000,0), distance={distance}");
+        assert!(distance.is_none(), "segments intersect at (0,50000,0); the unstable equations must refuse: {distance:?}");
+    }
+
+    #[test]
+    fn exact_parallel_and_well_conditioned_segments_retain_distance_evidence() {
+        assert_eq!(segment_distance([0.,0.,0.], [0.,100000.,0.],
+            [0.0001,0.,0.], [0.0001,100000.,0.]), Some(0.0001));
+        assert_eq!(segment_distance([0.,0.,0.], [0.,10.,0.],
+            [-1.,5.,0.], [1.,5.,0.]), Some(0.));
     }
 
     #[test]
