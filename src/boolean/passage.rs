@@ -892,3 +892,30 @@ pub(super) fn splice_cavity(
     })?;
     Ok(result)
 }
+
+#[cfg(test)]
+mod codex_clearance_review {
+    use super::*;
+    use crate::neutral::Edge;
+
+    #[test]
+    fn long_nearly_parallel_crossing_segments_have_zero_distance() {
+        let distance = segment_distance([0.,0.,0.], [0.,100000.,0.],
+            [-0.0001,0.,0.], [0.0001,100000.,0.]);
+        assert!(distance <= 1e-12, "segments intersect at (0,50000,0), distance={distance}");
+    }
+
+    #[test]
+    fn a_planar_strip_crossing_the_bore_axis_is_not_clear() {
+        let vertices = vec![Vec3::new(-0.0001,0.,0.), Vec3::new(-0.00009,0.,0.),
+            Vec3::new(0.00011,100000.,0.), Vec3::new(0.0001,100000.,0.)];
+        let edges = (0..4).map(|i| Edge { start:i, end:(i+1)%4,
+            curve:Curve::Line { a:vertices[i], b:vertices[(i+1)%4] } }).collect();
+        let face = Face { surface:Surface::Plane { p:vertices[0], n:Vec3::new(0.,0.,1.), x:Vec3::new(1.,0.,0.) },
+            sense:true, loops:vec![(0..4).map(|i|(i,true)).collect()] };
+        let body = Body { vertices, edges, faces:vec![face] };
+        assert!(inside(&body,&body.faces[0],Vec3::new(0.,47500.,0.),Vec3::new(0.,0.,1.),1e-6).unwrap());
+        assert!(!clear_of_corridor(&body,&body.faces[0],Vec3::new(0.,0.,1.),1,[0.,0.,0.],1e-5,0.,100000.,1e-6),
+            "the bore axis crosses the interior of this face; it cannot be excluded");
+    }
+}
