@@ -3,6 +3,70 @@
 //! are read from the current B-rep; no prior stock or operation recipe is used.
 use super::*;
 
+#[cfg(test)]
+mod codex_stepped_face_review {
+    use super::*;
+    const TOL: f64 = 1e-6;
+
+    fn prism(points: &[(f64, f64)], lo: f64, hi: f64, scale: f64) -> Body {
+        let q: Vec<_> = points.iter().map(|&(y,z)| p(0.,y*scale,z*scale)).collect();
+        let edges = (0..q.len()).map(|i| Curve::Line { a:q[i], b:q[(i+1)%q.len()] }).collect();
+        crate::extrude::extrude(&crate::neutral::Profile { loops:vec![edges],
+            n:p(1.,0.,0.), low:lo*scale, high:hi*scale }, TOL*scale).unwrap()
+    }
+    fn body(scale: f64) -> Body {
+        // A 3x3 square missing its upper-right 2x2 square: area 5, length 2.
+        prism(&[(0.,0.),(3.,0.),(3.,1.),(1.,1.),(1.,3.),(0.,3.)], 0.,2.,scale)
+    }
+    fn band(y0: f64,y1: f64,z0: f64,z1: f64,scale: f64) -> Band {
+        let g = |v| Graph::Line { m:0., b:v*scale };
+        Band { lo:0.,hi:2.*scale,y0:g(y0),y1:g(y1),z0:g(z0),z1:g(z1) }
+    }
+
+    #[test]
+    fn l_shaped_caps_match_their_material_and_refuse_false_coverage() {
+        for scale in [0.01,1.,25.4] {
+            let b = body(scale);
+            validate(&b,TOL*scale).unwrap();
+            let xs = [0.,2.*scale];
+            let material = vec![vec![band(0.,3.,0.,1.,scale),band(0.,1.,1.,3.,scale)]];
+            verify_interfaces(&b,&xs,&material,TOL*scale).unwrap();
+            let volume = crate::mass::measure(&b,TOL*scale).unwrap().volume;
+            assert!((volume/scale.powi(3)-10.).abs()<1e-10);
+
+            // A bounding rectangle would incorrectly fill the 2x2 notch.
+            let filled_notch = vec![vec![band(0.,3.,0.,3.,scale)]];
+            assert!(verify_interfaces(&b,&xs,&filled_notch,TOL*scale).is_err());
+            let cap = b.faces.iter().position(|f| matches!(f.surface,Surface::Plane {n,..} if n.x.abs()==1.)).unwrap();
+            let mut duplicate = b.clone();
+            duplicate.faces.push(b.faces[cap].clone());
+            assert!(verify_interfaces(&duplicate,&xs,&material,TOL*scale).is_err());
+            let mut missing = b.clone();
+            missing.faces.remove(cap);
+            assert!(verify_interfaces(&missing,&xs,&material,TOL*scale).is_err());
+            let mut reversed = b.clone();
+            reversed.faces[cap].sense = !reversed.faces[cap].sense;
+            assert!(verify_interfaces(&reversed,&xs,&material,TOL*scale).is_err());
+        }
+    }
+
+    #[test]
+    fn trimming_an_l_prism_keeps_its_analytic_volume_and_closed_boundary() {
+        for scale in [0.01,1.,25.4] {
+            let b = body(scale);
+            let tool = prism(&[(-1.,-1.),(4.,-1.),(4.,4.),(-1.,4.)],-1.,0.5,scale);
+            // Direct domain entry avoids unrelated route-selection and direction
+            // normalization. Remove length .5 of the area-5 cross-section.
+            let result = cut_local(&b,&tool,TOL*scale).unwrap();
+            let topology = crate::topology::check(&result,TOL*scale).unwrap();
+            assert_eq!(topology.genus(),0.);
+            let volume = crate::mass::measure(&result,TOL*scale).unwrap().volume;
+            assert!((volume/scale.powi(3)-7.5).abs()<1e-9,"{scale}: {volume}");
+            assert!(result.vertices.iter().all(|v| v.x>=0.5*scale-TOL*scale && v.x<=2.*scale+TOL*scale));
+        }
+    }
+}
+
 fn positive(lower: Graph, upper: Graph, lo: f64, hi: f64, tol: f64) -> bool {
     // At a computed intersection station, evaluating two independently stored
     // graphs can leave a few ulps of endpoint residual. Bound only that arithmetic
