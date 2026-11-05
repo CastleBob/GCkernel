@@ -59,7 +59,9 @@ fn cap(body: &Body, tool: &Body, tol: f64) -> Option<(usize, Vec3, Vec3)> {
     found
 }
 pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
-    cap(body, tool, tol).is_some()
+    // Domain selection proves eligibility before execution. In particular,
+    // existing blind-pocket domains keep cutters that do not reach the bore.
+    cap(body, tool, tol).is_some() && admission(body, tool, tol).is_ok()
 }
 
 struct Band {
@@ -317,7 +319,8 @@ fn loop_from(out: &Body, edges: &[usize], first: (usize, bool)) -> Result<Vec<(u
     Ok(lp)
 }
 
-pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+type Split = (Vec3, Vec3, Vec3, f64, f64, f64, f64, f64);
+fn admission(body: &Body, tool: &Body, tol: f64) -> Result<(Plan, Vec<Split>)> {
     crate::topology::check(body, tol)?;
     crate::topology::check(tool, tol)?;
     super::radial::planar_faces_outward(body)?;
@@ -349,6 +352,10 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         }
         splits.push((c, n, x, r, t0, t1, lo, hi));
     }
+    Ok((p, splits))
+}
+pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    let (p, splits) = admission(body, tool, tol)?;
     let mut out = body.clone();
     let mut pieces = vec![];
     for (i, band) in p.walls.iter().enumerate() {

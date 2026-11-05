@@ -15,7 +15,7 @@ A whole simple-shell proof excludes hidden prior openings and preserves distant
 planes/cones without regenerating them. Exact frame/center/coaxial relations and
 strict finite reach/clearance are required. No guessed recovery or tolerance edit.
 
-Verification: six new focused tests pass, covering plain/distant-bevel stock,
+Verification: seven new focused tests pass, covering plain/distant-bevel stock,
 both ends, three cardinal frames with translation, two physical scale factors,
 independent half-disk volume quadrature, neutral round trips, outward closed
 meshes, unchanged far faces/edges and unchanged operands. Seven refusal cases
@@ -23,8 +23,12 @@ cover previous/identical openings, bevel crossing, seam crossing, wall pocket,
 excessive radius and offset center; inverted cutters are also rejected.
 Op 26 computes the body with an explicit unavailable-history reason; strict
 named op 12 refuses. Seven existing annular-window, five conical-bore and four
-radial-bore regressions pass (22 distinct focused tests including the new six).
-Logs TEMP/GCKernel-radial-notch-{final,regression,radial-regression}.log.
+radial-bore regressions pass (23 distinct focused tests including the new seven).
+Final selection uses the complete admission proof before any operation: a
+coarse end-plane-only match would wrongly intercept PlasticPipe's existing
+blind pocket. The added regression preserves its independently checked
+837.40000870796257 in3 volume through its existing domain. No execution retry.
+Logs TEMP/GCKernel-radial-notch-{admission,regression,radial-regression}.log.
 
 Original GCcore/GCm consumer checks are next, not yet claimed. In particular,
 Tube_3in's repeated identical cutters are not admitted by this first domain;

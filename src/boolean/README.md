@@ -743,12 +743,15 @@ must clear the bore radius, far wall transition and both existing periodic seams
 General rotated frames whose rounded coordinates lose these exact relations
 may refuse; no center, direction or dimension is snapped.
 
-The new RadialNotch domain is selected before execution. It splits each near
+The new RadialNotch domain is selected only after the full geometric admission
+proof, before execution. Existing blind-pocket domains retain cutters that do
+not reach the bore; no failed cut retries another domain. It splits each near
 ring into complement arcs, inserts the exact half CylinderPair intersection,
 joins the end annulus around the notch and adds the inward cutter cylinder.
 It clones the supplied body: all far faces and their edges remain unchanged.
 No stock is regenerated, other features dropped or second algorithm retried.
 Prior openings/repeated cuts, off-center cuts, partial-depth pockets, seam
-crossings and bevel-intersecting notches remain unsupported. Failure preserves
+crossings and bevel-intersecting notches are outside this domain. Existing
+domain behavior is unchanged for ineligible inputs. Failure preserves
 both operands. Op 26 explicitly returns missing history; strict named op 12
 refuses this domain. No synthetic persistent names are assigned.

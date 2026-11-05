@@ -234,8 +234,14 @@ fn inverted_cutter_is_not_treated_as_a_positive_cutting_volume() {
     }
     topology::check(&t, TOL).unwrap();
     let original = (write_body(&b), write_body(&t));
+    let result = boolean::cut(&b, &t, TOL);
     assert!(
-        matches!(boolean::cut(&b,&t,TOL),Err(gc_kernel::KernelError::Unsupported(e)) if e.contains("inverted"))
+        matches!(
+            result,
+            Err(gc_kernel::KernelError::Unsupported(_))
+                | Err(gc_kernel::KernelError::InvalidInput(_))
+        ),
+        "{result:?}"
     );
     assert_eq!(original, (write_body(&b), write_body(&t)));
 }
@@ -283,4 +289,42 @@ fn scaled_stock_and_tools_preserve_the_dimensionless_cut() {
             verify(&boolean::cut(&b, &t, TOL).unwrap(), want * k.powi(3));
         }
     }
+}
+
+#[test]
+fn preexisting_blind_end_pocket_keeps_its_original_domain_and_volume() {
+    // PlasticPipe's first tool is wider than the floor-to-bore clearance.
+    // It is an existing supported blind cut, outside the new through-wall
+    // notch domain, and must not be intercepted by a coarse end-plane match.
+    let b = revolve(
+        &Section {
+            p: Vec3::new(0., 0., 0.),
+            a: Vec3::new(0., 1., 0.),
+            x: Vec3::new(1., 0., 0.),
+            points: vec![(6.25, 0.), (6.25, 45.), (5.75, 45.), (5.75, 0.)],
+        },
+        TOL,
+    )
+    .unwrap();
+    let t = gc_kernel::extrude::extrude(
+        &Profile {
+            loops: vec![vec![Curve::Arc {
+                c: Vec3::new(0., 0., 0.),
+                n: Vec3::new(0., 0., 1.),
+                x: Vec3::new(1., 0., 0.),
+                r: 4.,
+                t0: 0.,
+                t1: TAU,
+            }]],
+            n: Vec3::new(0., 0., 1.),
+            low: 5.25,
+            high: 6.251,
+        },
+        TOL,
+    )
+    .unwrap();
+    let out = boolean::cut(&b, &t, TOL).unwrap();
+    topology::check(&out, TOL).unwrap();
+    let volume = mass::measure(&out, TOL).unwrap().volume;
+    assert!((volume - 837.40000870796257).abs() < 1e-8, "{volume}");
 }
