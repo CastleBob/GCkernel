@@ -645,20 +645,36 @@ operands before admission; the joined body is admitted as any other. Such a bore
 broke later transverse cuts (patch coverage), so the join is local to the bore. Regression: tests/cap_seams.rs (Bob's
 Angle Corner Cutout).
 
-## Near-cardinal directions are cardinal (Claude, 2026-11-05)
+## Near-cardinal directions are cardinal (Claude, 2026-11-05; certified after Astra's review)
 
 Declared normalization contract, under Bob's rule of 2026-10-28 ("what agrees within the kernel tolerance is the
 same, and the status says so"). Stock built by rotated, tapered or filleted profile math carries plane normals and
-axes off the coordinate axes in the last bits: a C12x20.7 flange end face's (-1, 1.3e-16, 0), a C6x13 inner web's
-(-2.6e-17, 0, -1). Two places now take a direction within 1e-12 per component of a coordinate axis as that axis.
-Points never move; over any admitted part the change lies far inside the tolerance.
+axes off the coordinate axes or planes in the last bits: a C12x20.7 flange end face's (-1, 1.3e-16, 0), a C6x13
+inner web's (-2.6e-17, 0, -1), a captured 45-degree miter's tiny third component.
 
-- **Transverse end cuts** (`endcut::snap_directions`, in `planar_cross_cut`, `cross::cut` and `cross::cut_along`):
-  the operands' plane normals and x axes and cylinder axes are snapped inside the domain, after selection, so
-  routing is unchanged. The captured pipe and rect-tube 45-degree miters, refused before, now cut. The rat holes'
-  plane-fillet crossings come out as circles (arcs) instead of near-circular conics.
-- **Round passages** (`passage::cap_normal`): such a face is a cap. A planar side face inside the corridor's box is
-  excluded when it lies provably farther than the radius from the corridor's axis segment.
+**Transverse end cuts** (`endcut::snap_directions`, in `planar_cross_cut`, `cross::cut`, `cross::cut_along`). Inside
+the domain, after selection, so routing is unchanged:
+
+- **Domain.** A plane normal or cylinder axis whose nonzero components of magnitude 1e-12 or less are set to zero
+  (renormalized). That is a direction along a coordinate axis or coordinate plane in the last bits. Plainly oblique or
+  already exact directions are never touched.
+- **Certified per face, against the request tolerance.**
+  - A plane face is snapped only when every point of it lies within tol / 2 of the snapped plane through its own
+    support point. The bound is exact over the boundary: lines by their ends, arcs by centre + r |n x d|, conics by
+    centre + |u.d| + |v.d|. A planar face lies in the convex hull of its boundary.
+  - A cylinder face is snapped only when its axial reach from its support point times the axis change is within
+    tol / 2.
+  - Any other face is left exactly as given, and the domain may refuse it.
+  - Points and curves never move. The frame x direction is squared to the new normal.
+- **Reported.** Each cut that uses it records one note: `boolean::take_equivalences()`, "N near-cardinal face
+  direction(s) taken as exact (largest departure ... in)".
+- **Tests.** Astra's counterexamples (codex/direction-snap-review e38498b) pass: a 1000-inch prism at tol 1e-10, a
+  1e8-inch prism, and a one-inch prism with plane origins 1e8 along their tangents. Each is left within tolerance.
+
+**Round passages** (`passage::cap_normal`): a cap face's normal within 1e-12 of the bore axis is that axis. A planar
+side face inside the corridor's box is excluded only when Astra's certified lower bound on its boundary's distance
+from the axis segment (`segment_clearance_lower_bound`, codex/bore-clearance-review b0637e6) exceeds the radius plus
+the tolerance.
 
 Fixtures: `parts/channel_end_partition` (Arc Steel B2025's first AK end cut, refused on b537031 as "an end-cut
 surface patch is below the admitted partition resolution") and `parts/channel_web_hole` (Valley Industrial B24's

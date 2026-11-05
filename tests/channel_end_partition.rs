@@ -20,7 +20,11 @@ fn read(name: &str) -> Body {
 #[test]
 fn a_channel_end_cut_with_near_cardinal_end_faces_is_cut() {
     let (body, tool) = (read("body.f64"), read("tool.f64"));
+    let _ = gc_kernel::boolean::take_equivalences();
     let (recorded, _) = cut_recorded(&body, &tool, TOL).unwrap();
+    // Bob 10-28: the status says so. The cut reports the equivalence it used.
+    let notes = gc_kernel::boolean::take_equivalences();
+    assert!(notes.iter().any(|n| n.contains("taken as exact")), "{notes:?}");
     let plain = cut(&body, &tool, TOL).unwrap();
     let genus = |b: &Body| gc_kernel::topology::check(b, TOL).unwrap().genus();
     assert_eq!(genus(&recorded), genus(&body));

@@ -1448,28 +1448,90 @@ pub(super) fn crosses_cylinder(
     }
     false
 }
-/// One direction with every component within 1e-12 of zero made exactly zero, renormalized. Stock built by rotated,
-/// tapered or filleted profile math carries plane normals and axes off the coordinate axes in the last bits (a channel
-/// flange face's 1.3e-16, a C6x13 inner web's 2.6e-17); the domains read directions exactly, and over any admitted
-/// part such a direction is the same within the kernel tolerance (Bob 10-28: what agrees within the kernel tolerance is
-/// the same). Points never move.
-fn snapped(v: Vec3) -> Vec3 {
-    let k = |c: f64| if c.abs() <= 1e-12 { 0. } else { c };
-    let w = Vec3::new(k(v.x), k(v.y), k(v.z));
+/// A direction with its components of magnitude at most 1e-12 made exactly zero, renormalized: the coordinate axis or
+/// coordinate plane it lies along in the last bits (a channel web's (-2.6e-17, 0, -1); a captured 45-degree miter's
+/// (0.707, 0.707, 1e-17)). None when no component is that small but nonzero, i.e. when it is already exact or plainly
+/// oblique.
+fn near_axis(v: Vec3) -> Option<Vec3> {
+    let c = xyz(v);
+    if !c.iter().any(|k| *k != 0. && k.abs() <= 1e-12) {
+        return None;
+    }
+    let w = c.map(|k| if k.abs() <= 1e-12 { 0. } else { k });
+    let w = p(w[0], w[1], w[2]);
     let l = w.length();
-    if l > 0. && w != v { w.scale(1. / l) } else { v }
+    (l > 0.5).then(|| w.scale(1. / l))
 }
 
-/// A transverse-cut operand with its planes' and cylinders' directions snapped (see `snapped`): the domain's charts and
-/// partitions read directions exactly. Applied inside the domain, after selection, so routing is unchanged.
-pub(super) fn snap_directions(body: &Body) -> Body {
+/// The largest |(q - origin) . d| over a face's boundary points q, from exact bounds per curve kind: a line by its two
+/// ends, an arc by its centre plus r |n x d|, a conic by its centre plus |u . d| + |v . d|. Every point of a planar
+/// face lies in the convex hull of its boundary, and a cylinder patch's axial extremes lie on its boundary, so this
+/// bounds the whole face. None for a boundary kind with no such bound.
+fn boundary_reach(body: &Body, face: &Face, origin: Vec3, d: Vec3) -> Option<f64> {
+    let mut most = 0_f64;
+    for &(e, _) in face.loops.iter().flatten() {
+        let edge = &body.edges[e];
+        let reach = match edge.curve {
+            Curve::Line { a, b } => a.sub(origin).dot(d).abs().max(b.sub(origin).dot(d).abs()),
+            Curve::Arc { c, n, r, .. } => c.sub(origin).dot(d).abs() + r * n.cross(d).length(),
+            Curve::Conic { c, u, v, .. } => c.sub(origin).dot(d).abs() + u.dot(d).abs() + v.dot(d).abs(),
+            _ => return None,
+        };
+        let ends = [body.vertices[edge.start], body.vertices[edge.end]].map(|q| q.sub(origin).dot(d).abs());
+        most = most.max(reach).max(ends[0]).max(ends[1]);
+    }
+    most.is_finite().then_some(most)
+}
+
+/// A frame direction made exactly perpendicular to a snapped normal or axis: snapped itself when near an axis,
+/// otherwise its component across the new direction, renormalized.
+fn square_to(x: Vec3, axis: Vec3) -> Vec3 {
+    let x = near_axis(x).unwrap_or(x);
+    if x.dot(axis) == 0. {
+        return x;
+    }
+    let w = x.sub(axis.scale(x.dot(axis)));
+    w.scale(1. / w.length())
+}
+
+/// A transverse-cut operand with its near-cardinal plane normals and cylinder axes taken as exact, face by face, only
+/// where that is certified within the request tolerance (declared contract, boolean/README; Bob 10-28: what agrees
+/// within the kernel tolerance is the same, and the status says so). A plane face is snapped when every point of it
+/// lies within tol / 2 of the snapped plane through its own support point; a cylinder face when its axial reach from its
+/// support point times the axis change is within tol / 2. Any other face is left as given (the domain then reads it as
+/// it is, and may refuse). Points and curves never move. Each equivalence used is recorded (`super::note`).
+pub(super) fn snap_directions(body: &Body, tol: f64) -> Body {
     let mut out = body.clone();
-    for f in &mut out.faces {
-        match &mut f.surface {
-            Surface::Plane { n, x, .. } => (*n, *x) = (snapped(*n), snapped(*x)),
-            Surface::Cylinder { a, x, .. } => (*a, *x) = (snapped(*a), snapped(*x)),
+    let mut used = 0usize;
+    let mut largest = 0_f64;
+    for (index, f) in body.faces.iter().enumerate() {
+        match f.surface {
+            Surface::Plane { p: origin, n, x } => {
+                let Some(n2) = near_axis(n) else { continue };
+                let Some(departure) = boundary_reach(body, f, origin, n2) else { continue };
+                if departure > tol * 0.5 {
+                    continue;
+                }
+                out.faces[index].surface = Surface::Plane { p: origin, n: n2, x: square_to(x, n2) };
+                used += 1;
+                largest = largest.max(departure);
+            }
+            Surface::Cylinder { p: origin, a, x, r } => {
+                let Some(a2) = near_axis(a) else { continue };
+                let Some(reach) = boundary_reach(body, f, origin, a) else { continue };
+                let departure = reach * a2.sub(a).length() * (1. + 1e-9);
+                if !departure.is_finite() || departure > tol * 0.5 {
+                    continue;
+                }
+                out.faces[index].surface = Surface::Cylinder { p: origin, a: a2, x: square_to(x, a2), r };
+                used += 1;
+                largest = largest.max(departure);
+            }
             _ => {}
         }
+    }
+    if used > 0 {
+        super::note(format!("{used} near-cardinal face direction(s) taken as exact (largest departure {largest:.1e} in, within the {tol:.0e} tolerance)"));
     }
     out
 }
@@ -1484,7 +1546,7 @@ pub(super) fn box_cross_cut(body: &Body, tool: &Body, axis: usize, tol: f64) -> 
 /// Select a transverse coordinate chart from the planar cutter's normals.
 /// This is geometric admission before construction, with no retry if it fails.
 pub(super) fn planar_cross_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
-    let (body, tool) = (&snap_directions(body), &snap_directions(tool));
+    let (body, tool) = (&snap_directions(body, tol), &snap_directions(tool, tol));
     let mut normals = Vec::new();
     for face in &tool.faces {
         let Surface::Plane { p, n, x } = face.surface else {
@@ -1923,7 +1985,7 @@ mod codex_direction_snap_review {
     fn direction_normalization_must_respect_the_request_distance_tolerance() {
         let tol=1e-10;
         let original=box_at_angle(1000.,tol);
-        let normalized=snap_directions(&original);
+        let normalized=snap_directions(&original,tol);
         let checked=crate::topology::check(&normalized,tol);
         assert!(checked.is_ok(),"valid input must not be changed beyond request tolerance by angular threshold: {checked:?}");
     }
@@ -1932,7 +1994,7 @@ mod codex_direction_snap_review {
     fn direction_normalization_must_bound_displacement_for_large_admitted_parts() {
         let tol=1e-6;
         let original=box_at_angle(1e8,tol);
-        let normalized=snap_directions(&original);
+        let normalized=snap_directions(&original,tol);
         let checked=crate::topology::check(&normalized,tol);
         assert!(checked.is_ok(),"valid input must not be changed beyond default tolerance: {checked:?}");
     }
@@ -1948,7 +2010,7 @@ mod codex_direction_snap_review {
         }
         // Moving a plane's origin within its own plane changes only its parameterization.
         validate(&original,tol).unwrap();
-        let normalized=snap_directions(&original);
+        let normalized=snap_directions(&original,tol);
         let checked=crate::topology::check(&normalized,tol);
         assert!(checked.is_ok(),"a one-inch part also needs a spatial bound relative to each support origin: {checked:?}");
     }

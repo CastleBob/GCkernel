@@ -530,11 +530,11 @@ fn neighbors(a: &Band, b: &Band, tol: f64) -> Option<(usize, usize)> {
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
-    let (body, tool) = (&super::snap_directions(body), &super::snap_directions(tool));
+    let (body, tool) = (&super::snap_directions(body, tol), &super::snap_directions(tool, tol));
     cut_in_frame(body, tool, tol, frame(body, tool)?)
 }
 pub(super) fn cut_along(body: &Body, tool: &Body, axis: usize, tol: f64) -> Result<Body> {
-    let (body, tool) = (&super::snap_directions(body), &super::snap_directions(tool));
+    let (body, tool) = (&super::snap_directions(body, tol), &super::snap_directions(tool, tol));
     cut_in_frame(body, tool, tol, frame_for_axis_with(body, Some(tool), axis)?)
 }
 fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {

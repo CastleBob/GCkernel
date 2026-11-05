@@ -118,6 +118,21 @@ fn select(
     }
 }
 
+thread_local! {
+    static EQUIVALENCES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Records a within-tolerance equivalence a domain used for the current cut (Bob 10-28: "the status says so").
+pub(crate) fn note(text: String) {
+    EQUIVALENCES.with(|e| e.borrow_mut().push(text));
+}
+
+/// The within-tolerance equivalences the cuts run on this thread have used since the last call, in order, and clears
+/// them: the caller's status reports them.
+pub fn take_equivalences() -> Vec<String> {
+    EQUIVALENCES.with(|e| std::mem::take(&mut *e.borrow_mut()))
+}
+
 pub fn cut(
     body: &crate::neutral::Body,
     tool: &crate::neutral::Body,
