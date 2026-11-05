@@ -270,3 +270,117 @@ fn op_19_replies_the_waste_band_and_its_volume() {
     let again = gc_kernel::neutral::write_body(&tool);
     assert_eq!(again, body.to_vec());
 }
+
+
+/// Preserve every exact curve/surface of the already-normalized cap, even as
+/// topology indexes change. This checks geometry retention, not persistent names.
+fn retained_cap(before: &Body, after: &Body) {
+    let cap=before.faces.iter().find(|f|matches!(f.surface,Surface::Conoid{..})).unwrap();
+    let signature=format!("{:?}",cap.surface);
+    let kept=after.faces.iter().find(|f|format!("{:?}",f.surface)==signature).unwrap();
+    assert_eq!(cap.sense,kept.sense);
+    let curves=|body: &Body, face: &gc_kernel::neutral::Face| {
+        face.loops.iter().map(|l|l.iter().map(|(e,f)|format!("{f}:{:?}",body.edges[*e].curve)).collect::<Vec<_>>()).collect::<Vec<_>>()
+    };
+    assert_eq!(curves(before,cap),curves(after,kept));
+}
+fn opposite_tools(length: f64, offset: f64, turn: f64) -> [Body;2] {
+    let theta=turn.to_radians();
+    let right=envelope(Vec3::new(0.,0.,0.),Vec3::new(0.,1.,0.),Vec3::new(0.,offset,0.),Vec3::new(1.,0.,0.),RC);
+    let left=envelope(Vec3::new(0.,length,0.),Vec3::new(0.,-1.,0.),Vec3::new(0.,length-offset,0.),Vec3::new(theta.sin(),0.,theta.cos()),RC);
+    [right,left].map(|e|waste_tool(&e,1.5,4.,-8.,TOL).unwrap().0)
+}
+fn closed_mesh(body: &Body, expected: f64) {
+    let chord=0.002;
+    let mesh=gc_kernel::tessellate::tessellate(body,chord).unwrap();
+    let bits=|x:f64|if x==0. {0}else{x.to_bits()};
+    let key=|p:Vec3|(bits(p.x),bits(p.y),bits(p.z));
+    let mut boundary=std::collections::HashMap::<_,i32>::new();
+    let mut volume=0.;
+    for tri in &mesh.triangles {
+        let [a,b,c]=tri.map(|i|mesh.positions[i]);
+        volume+=a.dot(b.cross(c))/6.;
+        for (p,q) in [(a,b),(b,c),(c,a)] {
+            let (p,q)=(key(p),key(q));if p==q {continue;}
+            let (edge,sign)=if p<q {((p,q),1)}else{((q,p),-1)};
+            *boundary.entry(edge).or_default()+=sign;
+        }
+    }
+    assert!(boundary.values().all(|v|*v==0),"open or inconsistently oriented display mesh");
+    assert!(volume>0. && (volume-expected).abs()<measure(body,TOL).unwrap().area*chord);
+}
+#[test]
+fn opposite_normalized_ends_keep_the_first_cap_in_either_order() {
+    let length=20.;
+    let body=pipe(RO,RI,length);let original=gc_kernel::neutral::write_body(&body);
+    for offset in [y0(),0.] {for turn in [0.,35.,90.] {for order in [[0,1],[1,0]] {
+        let tools=opposite_tools(length,offset,turn);
+        let first=cut(&body,&tools[order[0]],TOL).unwrap();
+        let snapshot=gc_kernel::neutral::write_body(&first);
+        let result=cut(&first,&tools[order[1]],TOL).unwrap();
+        check(&result,TOL).unwrap();
+        assert_eq!(result.faces.iter().filter(|f|matches!(f.surface,Surface::Conoid{..})).count(),2);
+        retained_cap(&first,&result);
+        let expected=PI*(RO*RO-RI*RI)*length-2.*square_cope_removed(offset);
+        assert!((measure(&result,TOL).unwrap().volume-expected).abs()<1e-9);
+        let wire=gc_kernel::neutral::write_body(&result);
+        let mut reader=gc_kernel::neutral::Reader::with_tolerance(&wire,TOL);
+        let again=reader.body().unwrap();reader.finish().unwrap();
+        // Reader::direction intentionally normalizes directions; a turned
+        // mating axis can change by an ulp, so test geometry and structure.
+        check(&again,TOL).unwrap();
+        let back=gc_kernel::neutral::write_body(&again);
+        assert_eq!(wire.len(),back.len());
+        assert!(wire.iter().zip(&back).all(|(a,b)|(a-b).abs()<=16.*f64::EPSILON*a.abs().max(1.)));
+        assert!((measure(&again,TOL).unwrap().volume-expected).abs()<1e-9);
+        closed_mesh(&again,expected);
+        assert_eq!(snapshot,gc_kernel::neutral::write_body(&first));
+    }}}
+    assert_eq!(original,gc_kernel::neutral::write_body(&body));
+}
+#[test]
+fn opposite_normalized_end_rejects_touching_overlap_and_recut() {
+    for length in [1.5,2.*(y0()+RC)] {
+        let tools=opposite_tools(length,y0(),90.);
+        let first=cut(&pipe(RO,RI,length),&tools[0],TOL).unwrap();
+        let snapshot=gc_kernel::neutral::write_body(&first);
+        let error=cut(&first,&tools[1],TOL).unwrap_err().to_string();
+        assert!(error.contains("envelope reaches a pipe end"),"{error}");
+        assert_eq!(snapshot,gc_kernel::neutral::write_body(&first));
+    }
+    let tools=opposite_tools(20.,y0(),35.);
+    let first=cut(&pipe(RO,RI,20.),&tools[0],TOL).unwrap();
+    assert!(cut(&first,&tools[0],TOL).is_err(),"same-end recut is outside this domain");
+}
+#[test]
+fn radial_hole_after_two_normalized_ends_preserves_both_caps() {
+    let tools=opposite_tools(20.,y0(),35.);
+    let first=cut(&pipe(RO,RI,20.),&tools[0],TOL).unwrap();
+    let ended=cut(&first,&tools[1],TOL).unwrap();
+    let hole=cutter(Vec3::new(0.,10.,RO),Vec3::new(0.,0.,-1.),0.5,-0.001,1.);
+    let result=cut(&ended,&hole,TOL).unwrap();check(&result,TOL).unwrap();
+    let expected=PI*(RO*RO-RI*RI)*20.-2.*square_cope_removed(y0())-one_wall(0.5,RO,RI);
+    assert!((measure(&result,TOL).unwrap().volume-expected).abs()<1e-9);
+    closed_mesh(&result,expected);
+}
+
+#[test]
+fn opposite_normalized_ends_support_translated_tilted_pipe_frames() {
+    let o=Vec3::new(7.,11.,13.);let d=Vec3::new(0.6,0.8,0.);let x=Vec3::new(0.,0.,1.);
+    let length=20.;
+    let ring=|r|vec![Curve::Arc {c:o,n:d,x,r,t0:0.,t1:TAU}];
+    let body=gc_kernel::extrude::extrude(&Profile {loops:vec![ring(RO),ring(RI)],n:d,low:0.,high:length},TOL).unwrap();
+    let left_o=o.add(d.scale(length));
+    let axes=[x,d.cross(x)];
+    let tools=[Envelope{o,d,x,ri:RI,ro:RO,p:o.add(d.scale(y0())),b:axes[0],rc:RC},
+       Envelope{o:left_o,d:d.scale(-1.),x,ri:RI,ro:RO,p:left_o.sub(d.scale(y0())),b:axes[1],rc:RC}]
+       .map(|e|waste_tool(&e,1.5,4.,-8.,TOL).unwrap().0);
+    for order in [[0,1],[1,0]] {
+        let first=cut(&body,&tools[order[0]],TOL).unwrap();
+        let result=cut(&first,&tools[order[1]],TOL).unwrap();
+        retained_cap(&first,&result);check(&result,TOL).unwrap();
+        let expected=PI*(RO*RO-RI*RI)*length-2.*square_cope_removed(y0());
+        assert!((measure(&result,TOL).unwrap().volume-expected).abs()<1e-9);
+        closed_mesh(&result,expected);
+    }
+}

@@ -10,6 +10,9 @@
 //! the wall's radius, one closed loop) and the new end face is the conoid between the rims. The far cap, both wall
 //! surfaces and the far rings are kept exactly; the seams lie on the far ring's generator. Anything else is refused by
 //! name; nothing is retried.
+//! A second opposite normalized end is also admitted when the first complete conoid
+//! and the new conoid have strictly separated axial ranges. Its entire far cap,
+//! rims and radial seam are retained. This does not recut an existing conoid.
 use crate::geom::{pair_height_range, Curve, Surface, Vec3};
 use crate::neutral::{Body, Edge, Face};
 use crate::KernelError;
@@ -31,6 +34,16 @@ struct Band {
     sa: f64,
     sb: f64,
     far: f64,
+}
+
+#[derive(Clone, Copy)]
+struct End {
+    face: usize,
+    low: f64,
+    high: f64,
+    outer: usize,
+    inner: usize,
+    normalized: bool,
 }
 
 fn band(tool: &Body, tol: f64) -> Result<Band> {
@@ -101,53 +114,98 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     if !(band.sa < ri - tol && band.sb > ro + tol) {
         return Err(unsupported("the waste band does not reach past both walls"));
     }
-    // Each wall: one plain band of two full rings and a seam.
+    // Each wall: one band of two complete rims and a twice-used axial seam.
     let wall = |face: usize, r: f64| -> Result<[usize; 2]> {
         let f = &body.faces[face];
         let [lp] = &f.loops[..] else { return Err(unsupported("a pipe wall already has holes or cuts")) };
-        let rings: Vec<usize> = lp.iter().filter(|(e, _)| matches!(body.edges[*e].curve, Curve::Arc { .. })).map(|(e, _)| *e).collect();
+        let rings: Vec<usize> = lp.iter().filter(|(e, _)| matches!(body.edges[*e].curve, Curve::Arc { .. } | Curve::RadialPair { .. })).map(|(e, _)| *e).collect();
         let lines: Vec<usize> = lp.iter().filter(|(e, _)| matches!(body.edges[*e].curve, Curve::Line { .. })).map(|(e, _)| *e).collect();
         if lp.len() != 4 || rings.len() != 2 || lines.len() != 2 || lines[0] != lines[1] || rings[0] == rings[1] {
             return Err(unsupported("a pipe wall is not one plain band"));
         }
         for e in &rings {
-            let Curve::Arc { c: rc, n, r: ar, t0, t1, .. } = body.edges[*e].curve else { unreachable!() };
-            if (t1 - t0 - TAU).abs() > 1e-9 || n.cross(a).length() > 1e-9 || (ar - r).abs() > tol || perp(rc.sub(c), a).length() > tol {
+            let (rc, n, ar, t0, t1) = match body.edges[*e].curve {
+                Curve::Arc { c, n, r, t0, t1, .. } => (c, n, r, t0, t1),
+                Curve::RadialPair { c, a, s, t0, t1, .. } => (c, a, s, t0, t1),
+                _ => unreachable!(),
+            };
+            if (t1 - t0 - TAU).abs() > 1e-9 || n.cross(a).length() > 1e-9 || (ar - r).abs() > tol || perp(rc.sub(c), a).length() > tol
+                || body.edges[*e].start != body.edges[*e].end {
                 return Err(unsupported("a pipe wall's end is not a full ring"));
             }
         }
         Ok([rings[0], rings[1]])
     };
     let (wo, wi) = (wall(oi, ro)?, wall(ii, ri)?);
-    // The ends: level along a, cap face, outer and inner ring.
+    // Each end supplies a containing axial range. A normalized far end must
+    // have exactly its two RadialPair rims and a twice-used radial seam.
     let mut ends = vec![];
     for cf in (0..4).filter(|i| *i != oi && *i != ii) {
         let f = &body.faces[cf];
-        let Surface::Plane { p: q, n, .. } = f.surface else { return Err(unsupported("a pipe end is not planar")) };
-        if n.cross(a).length() > 1e-9 || f.loops.len() != 2 || f.loops.iter().any(|l| l.len() != 1) {
-            return Err(unsupported("a pipe end is not a plain annulus square to the pipe"));
-        }
-        let ring_of = |w: &[usize; 2]| w.iter().copied().find(|e| f.loops.iter().any(|l| l[0].0 == *e));
+        let ring_of = |w: &[usize; 2]| w.iter().copied().find(|e| f.loops.iter().flatten().any(|(fe, _)| fe == e));
         let (Some(o_e), Some(i_e)) = (ring_of(&wo), ring_of(&wi)) else {
             return Err(unsupported("a pipe end does not close its walls"));
         };
-        ends.push((cf, q.sub(c).dot(a), o_e, i_e));
+        let (low, high, normalized) = match f.surface {
+            Surface::Plane { p: q, n, .. } => {
+                if n.cross(a).length() > 1e-9 || f.loops.len() != 2 || f.loops.iter().any(|l| l.len() != 1)
+                    || ![o_e, i_e].iter().all(|e| matches!(body.edges[*e].curve, Curve::Arc { .. })) {
+                    return Err(unsupported("a pipe end is not a plain annulus square to the pipe"));
+                }
+                let h = q.sub(c).dot(a);
+                (h, h, false)
+            }
+            Surface::Conoid { c: fc, a: fa, x: fx, rho: frho, p: fp, b: fb, r: fr, branch: fbranch } => {
+                // This new domain carries exact parallel frames; it never snaps
+                // a tilted retained conoid onto the new end's axis.
+                if fa != a && fa != a.scale(-1.0) {
+                    return Err(unsupported("the retained normalized end does not have the same axis direction"));
+                }
+                if perp(fc.sub(c), a).length() > tol || f.loops.len() != 1 || f.loops[0].len() != 4 {
+                    return Err(unsupported("the retained normalized end is not one complete conoid"));
+                }
+                for (edge, radius) in [(o_e, ro), (i_e, ri)] {
+                    let Curve::RadialPair { c: ec, a: ea, x: ex, rho: erho, p: ep, b: eb, r: er, branch: ebranch, s: es, .. } = body.edges[edge].curve else {
+                        return Err(unsupported("the retained normalized end has a non-radial rim"));
+                    };
+                    if ec != fc || ea != fa || ex != fx || erho != frho || ep != fp || eb != fb || er != fr || ebranch != fbranch || (es-radius).abs() > tol {
+                        return Err(unsupported("the retained conoid and its rim recipes differ"));
+                    }
+                }
+                let seam: Vec<_> = f.loops[0].iter().filter(|(e, _)| *e != o_e && *e != i_e).collect();
+                if seam.len() != 2 || seam[0].0 != seam[1].0 || seam[0].1 == seam[1].1
+                    || !matches!(body.edges[seam[0].0].curve, Curve::Line { .. }) {
+                    return Err(unsupported("the retained conoid lacks one twice-used radial seam"));
+                }
+                let (h0, h1) = pair_height_range(fc, fa, fx, frho, fp, fb, fr, fbranch, 0., TAU, 16384)
+                    .ok_or_else(|| unsupported("the retained conoid's height is not proved defined all the way round"))?;
+                let sign = fa.dot(a);
+                let origin = fc.sub(c).dot(a);
+                let (q0,q1) = (origin+sign*h0, origin+sign*h1);
+                (q0.min(q1), q0.max(q1), true)
+            }
+            _ => return Err(unsupported("a pipe end is neither planar nor one complete radial conoid")),
+        };
+        ends.push(End {face:cf, low, high, outer:o_e, inner:i_e, normalized});
     }
-    ends.sort_by(|x, y| x.1.total_cmp(&y.1));
+    if ends.iter().filter(|e| e.normalized).count() > 1 {
+        return Err(unsupported("both pipe ends are already normalized"));
+    }
+    ends.sort_by(|x, y| x.low.total_cmp(&y.low));
     let (lo_end, hi_end) = (ends[0], ends[1]);
-    // The conoid's height all the way round, proved strictly inside the pipe; the far cap beyond one end.
     let (hmin, hmax) = pair_height_range(c, a, band_x(&band.surface), rho, cp, cb, cr, branch, 0.0, TAU, 16384)
         .ok_or_else(|| unsupported("the conoid's height is not proved defined all the way round"))?;
-    if !(hmin > lo_end.1 + tol && hmax < hi_end.1 - tol) {
+    // Global separation is sufficient for every angular/radial point. If ranges
+    // overlap, refuse even when a tighter pointwise proof might admit the cut.
+    if !(hmin > lo_end.high + tol && hmax < hi_end.low - tol) {
         return Err(unsupported("the envelope reaches a pipe end (part of the end would stay uncut, or the pipe would be cut through)"));
     }
-    // toward: +1 when the tool takes the low end (material above the conoid along a).
-    let (far_end, toward) = if band.far < lo_end.1 - tol {
+    let (far_end, toward) = if band.far < lo_end.low - tol && !lo_end.normalized {
         (hi_end, 1.0)
-    } else if band.far > hi_end.1 + tol {
+    } else if band.far > hi_end.high + tol && !hi_end.normalized {
         (lo_end, -1.0)
     } else {
-        return Err(unsupported("the waste band's far cap is not beyond a pipe end"));
+        return Err(unsupported("the waste band's far cap is not beyond a planar pipe end"));
     };
     // Rebuild: the far cap and its rings kept; each wall trimmed back to its rim; the conoid between the rims.
     let mut vertices = vec![];
@@ -158,17 +216,21 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         vertices.len() - 1
     });
     let mut emap = std::collections::HashMap::new();
-    for ring in [far_end.2, far_end.3] {
+    let mut retained = vec![far_end.outer, far_end.inner];
+    for &(edge, _) in body.faces[far_end.face].loops.iter().flatten() {
+        if !retained.contains(&edge) { retained.push(edge); }
+    }
+    for ring in retained {
         let e = &body.edges[ring];
         let (s, t) = (keep(e.start, &mut vertices), keep(e.end, &mut vertices));
         edges.push(Edge { curve: e.curve.clone(), start: s, end: t });
         emap.insert(ring, edges.len() - 1);
     }
     // The seams on the far outer ring's generator: the rims' parameter starts there.
-    let v_far = body.edges[far_end.2].start;
+    let v_far = body.edges[far_end.outer].start;
     let x = perp(body.vertices[v_far].sub(c), a).unit()?;
     let mut rims = vec![];
-    for (r, far_ring) in [(ro, far_end.2), (ri, far_end.3)] {
+    for (r, far_ring) in [(ro, far_end.outer), (ri, far_end.inner)] {
         let curve = Curve::RadialPair { c, a, x, rho, p: cp, b: cb, r: cr, branch, t0: 0.0, t1: TAU, s: r };
         let q = curve.start();
         let vf = body.edges[far_ring].start;
@@ -182,7 +244,11 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
         let vf = keep(vf, &mut vertices);
         edges.push(Edge { curve: Curve::Line { a: q, b: vertices[vf] }, start: v, end: vf });
         let seam = edges.len() - 1;
-        let Curve::Arc { n, .. } = body.edges[far_ring].curve else { unreachable!() };
+        let n = match body.edges[far_ring].curve {
+            Curve::Arc { n, .. } => n,
+            Curve::RadialPair { a, .. } => a,
+            _ => unreachable!(),
+        };
         // Whether the far ring runs the way t does (counter-clockwise about a).
         rims.push((rim, seam, emap[&far_ring], n.dot(a) > 0.0, v));
     }
@@ -191,9 +257,9 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     edges.push(Edge { curve: Curve::Line { a: vertices[v_i], b: vertices[v_o] }, start: v_i, end: v_o });
     let ruling = edges.len() - 1;
     let far_face = Face {
-        surface: body.faces[far_end.0].surface.clone(),
-        sense: body.faces[far_end.0].sense,
-        loops: body.faces[far_end.0].loops.iter().map(|l| l.iter().map(|(e, f)| (emap[e], *f)).collect()).collect(),
+        surface: body.faces[far_end.face].surface.clone(),
+        sense: body.faces[far_end.face].sense,
+        loops: body.faces[far_end.face].loops.iter().map(|l| l.iter().map(|(e, f)| (emap[e], *f)).collect()).collect(),
     };
     // In each wall's chart (t round a, height along a; natural normal away from the axis) the outer wall runs
     // counter-clockwise, the inner one clockwise; the conoid (natural normal -s a + h' v) with the material above it
