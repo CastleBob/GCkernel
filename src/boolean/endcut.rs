@@ -2014,4 +2014,32 @@ mod codex_direction_snap_review {
         let checked=crate::topology::check(&normalized,tol);
         assert!(checked.is_ok(),"a one-inch part also needs a spatial bound relative to each support origin: {checked:?}");
     }
+
+    fn check_cylinder_support_budget(length: f64,tol: f64) {
+            let radius=1.+0.9*tol;
+            let profile=Profile { loops:vec![vec![Curve::Arc {c:p(0.,0.,0.),n:p(0.,0.,1.),
+                x:p(1.,0.,0.),r:radius,t0:0.,t1:TAU}]],n:p(0.,0.,1.),low:0.,high:length };
+            let mut original=crate::extrude::extrude(&profile,tol).unwrap();
+            for face in &mut original.faces {
+                if let Surface::Cylinder {r,..}=&mut face.surface { *r=1.; }
+            }
+            // The authored boundary is already 0.9*tol outside its cylindrical
+            // support. This remains an admitted input; no source repair here.
+            let original=Rigid::rotation(p(0.,1.,0.),5e-13,Point3::new(0.,0.,0.)).unwrap().body(&original);
+            validate(&original,tol).unwrap();
+            crate::topology::check(&original,tol).unwrap();
+            let normalized=snap_directions(&original,tol);
+            let checked=crate::topology::check(&normalized,tol);
+            assert!(checked.is_ok(),"length={length}, tolerance={tol}: original 0.9*tol residual plus admitted 0.45*tol axis change exceeds the total budget: {checked:?}");
+    }
+
+    #[test]
+    fn cylinder_normalization_must_include_the_existing_support_error() {
+        check_cylinder_support_budget(90.,1e-10);
+    }
+
+    #[test]
+    fn cylinder_normalization_must_keep_the_total_default_tolerance_budget() {
+        check_cylinder_support_budget(900000.,1e-6);
+    }
 }
