@@ -32,7 +32,7 @@ pub struct Mesh {
 /// Only suppress divisions of the SAME analytic support with the same outward sense. Tangent fillet
 /// boundaries (plane/cylinder or different cylinders) and even shallow real creases remain visible.
 /// This roundoff allowance is independent of display chord and modelling tolerance; no body is changed.
-fn same_support(a: &crate::neutral::Face, b: &crate::neutral::Face) -> bool {
+pub(crate) fn same_support(a: &crate::neutral::Face, b: &crate::neutral::Face) -> bool {
     const ROUND: f64 = 64.0 * f64::EPSILON;
     let sign = |sense: bool| if sense { 1.0 } else { -1.0 };
     match (&a.surface, &b.surface) {

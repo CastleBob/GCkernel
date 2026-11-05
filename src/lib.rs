@@ -29,6 +29,7 @@ pub mod step;
 pub mod stl;
 pub mod tessellate;
 pub mod topology;
+pub mod selection;
 
 /// Why an operation produced no result. Nothing partial is ever returned with an error.
 #[derive(Clone, Debug, PartialEq)]
