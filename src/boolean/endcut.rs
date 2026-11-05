@@ -848,6 +848,31 @@ fn selected_patches(b: &Band, exposed: [bool; 4], tol: f64) -> Result<Vec<Patch>
     }
     Ok(result)
 }
+/// A transverse face's outline in (y, z): edges parallel to the axes, one closed loop.
+struct Outline {
+    edges: Vec<((f64, f64), (f64, f64))>,
+}
+impl Outline {
+    fn bounds(&self) -> (f64, f64, f64, f64) {
+        let (mut y0, mut y1, mut z0, mut z1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+        for &((ay, az), (by, bz)) in &self.edges {
+            (y0, y1) = (y0.min(ay.min(by)), y1.max(ay.max(by)));
+            (z0, z1) = (z0.min(az.min(bz)), z1.max(az.max(bz)));
+        }
+        (y0, y1, z0, z1)
+    }
+    /// Even-odd containment of a sampling point, which never lies on an edge (the grid holds every edge's
+    /// coordinates and samples between them).
+    fn contains(&self, y: f64, z: f64) -> bool {
+        let mut inside = false;
+        for &((ay, az), (by, bz)) in &self.edges {
+            if (az > z) != (bz > z) && y < ay + (z - az) * (by - ay) / (bz - az) {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+}
 #[derive(Clone, Copy)]
 struct Rect {
     y0: f64,
@@ -944,7 +969,9 @@ fn verify_interfaces(body: &Body, xs: &[f64], bands: &[Vec<Band>], tol: f64) -> 
                 "end-cut transverse faces must be rectangular patches",
             ));
         }
-        let mut q = Vec::new();
+        // A rectilinear patch: one loop of edges parallel to the y or z axis (a rectangle, or the L and stepped
+        // outlines an earlier cut leaves between two material sections).
+        let mut edges = Vec::new();
         let mut area = 0.;
         for (i, forward) in &face.loops[0] {
             let Curve::Line { a, b } = body.edges[*i].curve else {
@@ -956,37 +983,20 @@ fn verify_interfaces(body: &Body, xs: &[f64], bands: &[Vec<Band>], tol: f64) -> 
                 ));
             }
             area += 0.5 * (a.y * b.z - a.z * b.y) * sign(*forward) * n.x * sign(face.sense);
-            q.extend([a, b]);
+            edges.push(((a.y, a.z), (b.y, b.z)));
         }
-        let r = Rect {
-            y0: q.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
-            y1: q.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
-            z0: q.iter().map(|p| p.z).fold(f64::INFINITY, f64::min),
-            z1: q.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max),
-        };
-        if (area - (r.y1 - r.y0) * (r.z1 - r.z0)).abs() > tol * 2. * ((r.y1 - r.y0) + (r.z1 - r.z0))
-            || area <= 0.
-        {
+        let patch = Outline { edges };
+        let (y0, y1, z0, z1) = patch.bounds();
+        if area <= 0. || area > (y1 - y0) * (z1 - z0) + tol * 2. * ((y1 - y0) + (z1 - z0)) {
             return Err(invalid(
                 "end-cut transverse patch orientation or coverage is invalid",
             ));
-        }
-        for (i, _) in &face.loops[0] {
-            let c = &body.edges[*i].curve;
-            let mid = c.start().add(c.end()).scale(0.5);
-            if (mid.y - r.y0).abs() > tol
-                && (mid.y - r.y1).abs() > tol
-                && (mid.z - r.z0).abs() > tol
-                && (mid.z - r.z1).abs() > tol
-            {
-                return Err(unsupported("end-cut transverse patch is not rectangular"));
-            }
         }
         let station = xs
             .iter()
             .position(|x| (*x - anchor.x).abs() <= tol)
             .ok_or_else(|| invalid("transverse face has no matching partition station"))?;
-        faces.push((station, r, if n.x * sign(face.sense) > 0. { 1 } else { -1 }));
+        faces.push((station, patch, if n.x * sign(face.sense) > 0. { 1 } else { -1 }));
     }
     let mut work = 0usize;
     for (i, x) in xs.iter().enumerate() {
@@ -1001,21 +1011,22 @@ fn verify_interfaces(body: &Body, xs: &[f64], bands: &[Vec<Band>], tol: f64) -> 
             .flatten()
             .map(|b| Rect::at(b, *x))
             .collect();
-        let patches: Vec<(Rect, i32)> = faces
+        let patches: Vec<(&Outline, i32)> = faces
             .iter()
             .filter(|(station, _, _)| *station == i)
-            .map(|(_, r, s)| (*r, *s))
+            .map(|(_, r, s)| (r, *s))
             .collect();
         let mut ys = Vec::new();
         let mut zs = Vec::new();
-        for r in left
-            .iter()
-            .chain(&right)
-            .copied()
-            .chain(patches.iter().map(|(r, _)| *r))
-        {
+        for r in left.iter().chain(&right) {
             ys.extend([r.y0, r.y1]);
             zs.extend([r.z0, r.z1]);
+        }
+        for (r, _) in &patches {
+            for &((ay, az), (by, bz)) in &r.edges {
+                ys.extend([ay, by]);
+                zs.extend([az, bz]);
+            }
         }
         let ys = stations(ys, tol)?;
         let zs = stations(zs, tol)?;

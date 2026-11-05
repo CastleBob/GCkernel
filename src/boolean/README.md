@@ -663,3 +663,12 @@ Points never move; over any admitted part the change lies far inside the toleran
 Fixtures: `parts/channel_end_partition` (Arc Steel B2025's first AK end cut, refused on b537031 as "an end-cut
 surface patch is below the admitted partition resolution") and `parts/channel_web_hole` (Valley Industrial B24's
 web hole).
+
+## Stepped transverse faces (Claude, 2026-11-05)
+
+The transverse coverage check (`verify_interfaces`) took every face parallel to the partition planes as a rectangle.
+After one end cutter, a channel's end face can be an L or stepped outline where two material sections meet at one
+station. Such a face is now any single loop of edges parallel to the y and z axes (`Outline`), with positive
+oriented area. Its membership is decided even-odd on a grid that holds all its vertex coordinates. The coverage
+equation (left sections minus right sections equals the signed patches, cell by cell) is unchanged. Fixture:
+`parts/channel_stepped_end` (Bob Cody 12004SL0's second AK cutter).
