@@ -1497,8 +1497,8 @@ fn square_to(x: Vec3, axis: Vec3) -> Vec3 {
 /// A transverse-cut operand with its near-cardinal plane normals and cylinder axes taken as exact, face by face, only
 /// where that is certified within the request tolerance (declared contract, boolean/README; Bob 10-28: what agrees
 /// within the kernel tolerance is the same, and the status says so). A plane face is snapped when every point of it
-/// lies within tol / 2 of the snapped plane through its own support point; a cylinder face when its axial reach from its
-/// support point times the axis change is within tol / 2. Any other face is left as given (the domain then reads it as
+/// lies within tol / 2 of the snapped plane through its own support point; a cylinder face needs both a support-motion
+/// bound including radius and a complete boundary certificate on the proposed cylinder. Any other face is left as given (the domain then reads it as
 /// it is, and may refuse). Points and curves never move. Each equivalence used is recorded (`super::note`).
 pub(super) fn snap_directions(body: &Body, tol: f64) -> Body {
     let mut out = body.clone();
@@ -1519,19 +1519,38 @@ pub(super) fn snap_directions(body: &Body, tol: f64) -> Body {
             Surface::Cylinder { p: origin, a, x, r } => {
                 let Some(a2) = near_axis(a) else { continue };
                 let Some(reach) = boundary_reach(body, f, origin, a) else { continue };
-                let departure = reach * a2.sub(a).length() * (1. + 1e-9);
+                // For unit axes, ||aa^T - bb^T|| <= 2 ||a-b||. Points of the
+                // bounded original cylinder patch have |q-origin| <= reach+r;
+                // radial distance is 1-Lipschitz under this projection change.
+                // The radius term is needed even when axial reach is small.
+                let departure = 2. * (reach + r.abs()) * a2.sub(a).length() * (1. + 1e-9);
                 if !departure.is_finite() || departure > tol * 0.5 {
                     continue;
                 }
-                out.faces[index].surface = Surface::Cylinder { p: origin, a: a2, x: square_to(x, a2), r };
+                let proposed = Surface::Cylinder { p: origin, a: a2, x: square_to(x, a2), r };
+                // The existing boundary may already consume the input tolerance.
+                // Certify its TOTAL residual on the new support, not just the
+                // additional motion. These are whole-curve checks, not samples.
+                let certified = f.loops.iter().flatten().all(|&(e, _)| {
+                    let edge = &body.edges[e];
+                    crate::topology::off_surface(&edge.curve, &proposed, tol * 0.5).is_none()
+                        && [edge.start, edge.end].iter().all(|&v| {
+                            let distance = crate::topology::distance(body.vertices[v], &proposed);
+                            distance.is_finite() && distance <= tol * 0.5
+                        })
+                });
+                if !certified { continue; }
+                out.faces[index].surface = proposed;
                 used += 1;
-                largest = largest.max(departure);
+                // The complete-boundary certificate establishes this upper bound;
+                // departure alone omits the old boundary residual.
+                largest = largest.max(tol * 0.5);
             }
             _ => {}
         }
     }
     if used > 0 {
-        super::note(format!("{used} near-cardinal face direction(s) taken as exact (largest departure {largest:.1e} in, within the {tol:.0e} tolerance)"));
+        super::note(format!("{used} near-cardinal face direction(s) taken as exact (largest certified departure bound {largest:.1e} in, within the {tol:.0e} tolerance)"));
     }
     out
 }
@@ -2041,5 +2060,37 @@ mod codex_direction_snap_review {
     #[test]
     fn cylinder_normalization_must_keep_the_total_default_tolerance_budget() {
         check_cylinder_support_budget(900000.,1e-6);
+    }
+
+    #[test]
+    fn cylinder_boundary_certificate_is_needed_even_when_motion_alone_fits() {
+        // The strengthened support-motion bound is below half the tolerance
+        // here; the old 0.9*tol residual still makes the proposed support invalid.
+        check_cylinder_support_budget(40.,1e-10);
+    }
+
+    #[test]
+    fn a_certified_cylinder_still_snaps_reports_and_preserves_its_boundary() {
+        let tol=1e-10;
+        let profile=Profile { loops:vec![vec![Curve::Arc { c:p(0.,0.,0.),n:p(0.,0.,1.),
+            x:p(0.,1.,0.),r:1.+0.1*tol,t0:0.,t1:TAU }]],n:p(0.,0.,1.),low:0.,high:20. };
+        let mut original=crate::extrude::extrude(&profile,tol).unwrap();
+        for face in &mut original.faces {
+            if let Surface::Cylinder {r,..}=&mut face.surface { *r=1.; }
+        }
+        let original=Rigid::rotation(p(0.,1.,0.),5e-13,Point3::new(0.,0.,0.)).unwrap().body(&original);
+        crate::topology::check(&original,tol).unwrap();
+        let cylinder=original.faces.iter().position(|f|matches!(f.surface,Surface::Cylinder {..})).unwrap();
+        let _=super::super::take_equivalences();
+        let normalized=snap_directions(&original,tol);
+        crate::topology::check(&normalized,tol).unwrap();
+        let Surface::Cylinder {a,..}=normalized.faces[cylinder].surface else {panic!("cylinder changed kind")};
+        assert_eq!(a,p(0.,0.,1.));
+        let notes=super::super::take_equivalences();
+        assert!(notes.iter().any(|n|n.contains("certified departure bound") && n.contains("within the")));
+        // Restoring only support frames must recover the original packet exactly.
+        let mut restored=normalized;
+        for (face,old) in restored.faces.iter_mut().zip(&original.faces) { face.surface=old.surface.clone(); }
+        assert_eq!(crate::neutral::write_body(&restored),crate::neutral::write_body(&original));
     }
 }

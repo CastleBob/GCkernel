@@ -662,12 +662,17 @@ the domain, after selection, so routing is unchanged:
   - A plane face is snapped only when every point of it lies within tol / 2 of the snapped plane through its own
     support point. The bound is exact over the boundary: lines by their ends, arcs by centre + r |n x d|, conics by
     centre + |u.d| + |v.d|. A planar face lies in the convex hull of its boundary.
-  - A cylinder face is snapped only when its axial reach from its support point times the axis change is within
-    tol / 2.
+  - A cylinder face needs two certificates. Its support motion is bounded by
+    `2 * (axial reach + radius) * |axis change|` (with a numerical margin), at most
+    tol / 2. The radius term follows the norm bound for the difference of the two
+    axial projection operators. Every complete boundary curve and endpoint must
+    also lie within tol / 2 of the proposed cylinder, using the existing analytic
+    topology checks. This includes existing boundary/support residual; half the
+    tolerance cannot be assumed unused. Uncertified directions remain authored.
   - Any other face is left exactly as given, and the domain may refuse it.
   - Points and curves never move. The frame x direction is squared to the new normal.
 - **Reported.** Each cut that uses it records one note: `boolean::take_equivalences()`, "N near-cardinal face
-  direction(s) taken as exact (largest departure ... in)".
+  direction(s) taken as exact (largest certified departure bound ... in)".
 - **Tests.** Astra's counterexamples (codex/direction-snap-review e38498b) pass: a 1000-inch prism at tol 1e-10, a
   1e8-inch prism, and a one-inch prism with plane origins 1e8 along their tangents. Each is left within tolerance.
 
