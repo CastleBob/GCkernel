@@ -203,7 +203,7 @@ fn near_bevel_refusals_preserve_both_operands() {
     )
     .unwrap();
     for (body, cutter) in [
-        (done, t.clone()),
+        (done, tool(0.501)), // Exact repeats have a separate whole-boundary proof.
         (stock(0.1, 0.5), t.clone()),
         (stock(0.1, 0.6), t.clone()),
         (b.clone(), tool(1.31)),

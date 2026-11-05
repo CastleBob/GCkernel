@@ -808,8 +808,18 @@ the entire representation, including all far faces/edges/vertices, is compared.
 
 This is intentionally representation-bounded. Different edge orderings and
 rounded transformed boundaries can refuse even when geometrically equivalent;
-there is no reordering/snapping rescue. Near-bevel notch repetitions remain
-outside the certificate. Tool radius changes do not qualify. Every source
+there is no reordering/snapping rescue. Tool radius changes do not qualify. Every source
 feature still executes and counts normally. The no-change domain currently
 reports unavailable provenance under op26 and refuses strict named op12;
 it does not invent persistent names by geometric matching.
+
+The same certificate now covers the near-bevel canonical splice (6/16/11
+faces/edges/vertices). Its temporary inverse restores three split rings and
+the cone's reused seam slot. The seam merely closes the proof shell; replay
+replaces it with the actual cone intersection. Complete simple-shell admission
+must identify a near cone, and every replayed neutral value must match B.
+Only the original B is returned. A changed cutter, trim vertex or cone support
+cannot be accepted by approximate equality. Cardinal translated constructions
+with exact direction values qualify. A wire reader's normalization of a
+0.9999999999999999 direction to 1.0 can invalidate this exact certificate;
+that case explicitly refuses, with no direction repair or second algorithm.

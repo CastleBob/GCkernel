@@ -738,13 +738,14 @@ fn cut_near_bevel(body: &Body, p: &Plan, splits: &[Split], tol: f64) -> Result<B
 pub(super) fn already_removed(body: &Body, tool: &Body, tol: f64) -> bool {
     fn prove(body: &Body, tool: &Body, tol: f64) -> Result<bool> {
         let counts = (body.faces.len(), body.edges.len(), body.vertices.len());
-        if counts != (5, 12, 8) && counts != (6, 14, 9) {
+        let near_bevel = counts == (6, 16, 11);
+        if counts != (5, 12, 8) && counts != (6, 14, 9) && !near_bevel {
             return Ok(false);
         }
         crate::topology::check(body, tol)?;
         crate::topology::check(tool, tol)?;
-        let base_edges = body.edges.len() - 6;
-        let base_vertices = body.vertices.len() - 4;
+        let base_edges = body.edges.len() - if near_bevel { 8 } else { 6 };
+        let base_vertices = body.vertices.len() - if near_bevel { 6 } else { 4 };
         let base_faces = body.faces.len() - 1;
         let mut proof = body.clone();
         let mut rings = vec![];
@@ -816,7 +817,95 @@ pub(super) fn already_removed(body: &Body, tool: &Body, tol: f64) -> bool {
         if rings[0] == rings[1] {
             return Ok(false);
         }
-        let sides = [base_edges + 4, base_edges + 5];
+        if near_bevel {
+            // The third split ring bounds the end cap and the cone. The
+            // cone's old seam slot now holds its first intersection segment.
+            let last = base_edges + 5;
+            let Curve::Arc {
+                c,
+                n,
+                x,
+                r,
+                t0: hi,
+                t1,
+            } = body.edges[last].curve
+            else {
+                return Ok(false);
+            };
+            let cones: Vec<_> = body.faces[..base_faces]
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| {
+                    matches!(f.surface, Surface::Cone { .. })
+                        && f.loops.len() == 1
+                        && f.loops[0].iter().any(|v| v.0 == last)
+                })
+                .collect();
+            let [(fi, face)] = &cones[..] else {
+                return Ok(false);
+            };
+            let arcs: Vec<_> = face.loops[0]
+                .iter()
+                .copied()
+                .filter(|(ei, _)| {
+                    *ei < base_edges
+                        && matches!(body.edges[*ei].curve,
+                    Curve::Arc { c: q, n: a, x: xx, r: rr, t0, t1: lo }
+                    if q == c && a == n && xx == x && rr == r && lo < hi && t1 - t0 == TAU)
+                })
+                .collect();
+            let [(ring, fw)] = &arcs[..] else {
+                return Ok(false);
+            };
+            let seams: Vec<_> = face.loops[0]
+                .iter()
+                .filter(|(ei, _)| {
+                    *ei < base_edges && matches!(body.edges[*ei].curve, Curve::ConePair { .. })
+                })
+                .collect();
+            let [seam] = &seams[..] else {
+                return Ok(false);
+            };
+            let upper: Vec<_> = face.loops[0]
+                .iter()
+                .copied()
+                .filter(|v| v.0 == rings[1])
+                .collect();
+            let [upper] = &upper[..] else {
+                return Ok(false);
+            };
+            if rings.contains(ring) {
+                return Ok(false);
+            }
+            let Curve::Arc { t0, .. } = body.edges[*ring].curve else {
+                unreachable!();
+            };
+            let start = body.edges[*ring].start;
+            let end = proof.edges[rings[1]].start;
+            if start != body.edges[last].end || start >= base_vertices || end >= base_vertices {
+                return Ok(false);
+            }
+            proof.edges[*ring] = Edge {
+                curve: Curve::Arc { c, n, x, r, t0, t1 },
+                start,
+                end: start,
+            };
+            // Only a proof seam is restored. It is replaced during replay,
+            // and is never returned as geometry from this no-change domain.
+            proof.edges[seam.0] = Edge {
+                curve: Curve::Line {
+                    a: body.vertices[start],
+                    b: body.vertices[end],
+                },
+                start,
+                end,
+            };
+            proof.faces[*fi].loops =
+                vec![vec![(*ring, *fw), (seam.0, true), *upper, (seam.0, false)]];
+            rings[1] = *ring;
+        }
+        let offset = if near_bevel { 6 } else { 4 };
+        let sides = [base_edges + offset, base_edges + offset + 1];
         let caps: Vec<_> = body.faces[..base_faces]
             .iter()
             .enumerate()
@@ -862,7 +951,7 @@ pub(super) fn already_removed(body: &Body, tool: &Body, tol: f64) -> bool {
             return Ok(false);
         }
         let (plan, _) = admission(&proof, tool, tol)?;
-        if plan.near_cone.is_some() {
+        if plan.near_cone.is_some() != near_bevel {
             return Ok(false);
         }
         // Direct single-domain construction used as the certificate equation,
