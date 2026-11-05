@@ -335,13 +335,29 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     crate::topology::check(tool, tol)?;
     super::radial::planar_faces_outward(body)?;
     super::radial::planar_faces_outward(tool)?;
-    let s = sector(tool, tol)?;
+    let mut s = sector(tool, tol)?;
     let (ri, ro, low, high) = plain_pipe(body, &s, tol)?;
     if !(s.ri < ri - tol && s.ro > ro + tol) {
         return Err(no("cutter must extend beyond both wall radii"));
     }
-    if !(s.low > low + tol && s.high < high - tol) {
-        return Err(no("window must be strictly clear of both pipe ends"));
+    let open_end = if s.low > low + tol && s.high < high - tol {
+        None
+    } else if s.low < low - tol && s.high > low + tol && s.high < high - tol {
+        Some(0)
+    } else if s.high > high + tol && s.low > low + tol && s.low < high - tol {
+        Some(1)
+    } else {
+        return Err(no(
+            "window must clear both ends or cross exactly one end with strict clearance",
+        ));
+    };
+    // Exact material intersection, not a changed cutter: an end notch starts
+    // at the stock boundary and terminates on the cutter's interior plane.
+    if open_end == Some(0) {
+        s.low = low;
+    }
+    if open_end == Some(1) {
+        s.high = high;
     }
     let phi = s.t1 - s.t0;
     let gap = (TAU - phi) / 2.;
@@ -498,6 +514,96 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
             (ray[0][1], true),
         ]],
     });
+    if let Some(end) = open_end {
+        let near = s.c.add(s.a.scale(if end == 0 { low } else { high }));
+        let mut ring = [0usize; 2];
+        for (r, rr) in [ri, ro].into_iter().enumerate() {
+            let ei = out.edges[..6]
+                .iter()
+                .position(|e| matches!(e.curve, Curve::Arc { c, r, .. } if c == near && r == rr))
+                .ok_or_else(|| {
+                    KernelError::Internal("annular notch lost its constructed end ring".into())
+                })?;
+            ring[r] = ei;
+            let seam = out.edges[ei].start;
+            // Replace the near full ring by its two complement pieces. The
+            // other piece reuses the now-absent window arc's edge slot.
+            out.edges[ei] = Edge {
+                curve: Curve::Arc {
+                    c: near,
+                    n: s.a,
+                    x,
+                    r: rr,
+                    t0: 0.,
+                    t1: angles[0],
+                },
+                start: seam,
+                end: v[r][end][0],
+            };
+            out.edges[arc[r][end]] = Edge {
+                curve: Curve::Arc {
+                    c: near,
+                    n: s.a,
+                    x,
+                    r: rr,
+                    t0: angles[1],
+                    t1: TAU,
+                },
+                start: v[r][end][1],
+                end: seam,
+            };
+            let wi = out.faces[..4]
+                .iter()
+                .position(|f| matches!(f.surface, Surface::Cylinder { r, .. } if r == rr))
+                .ok_or_else(|| {
+                    KernelError::Internal("annular notch lost its constructed wall".into())
+                })?;
+            let along = vec![
+                (ei, true),
+                (axis[r][0], end == 0),
+                (arc[r][1 - end], true),
+                (axis[r][1], end == 1),
+                (arc[r][end], true),
+            ];
+            let mut outline = Vec::new();
+            for &(edge, forward) in &out.faces[wi].loops[0] {
+                if edge == ei {
+                    if forward {
+                        outline.extend(along.iter().copied());
+                    } else {
+                        outline.extend(along.iter().rev().map(|(e, f)| (*e, !*f)));
+                    }
+                } else {
+                    outline.push((edge, forward));
+                }
+            }
+            out.faces[wi].loops = vec![outline];
+        }
+        let cap = out.faces[..4]
+            .iter()
+            .position(|f| matches!(f.surface,Surface::Plane { p, .. } if p==near))
+            .ok_or_else(|| {
+                KernelError::Internal("annular notch lost its constructed end cap".into())
+            })?;
+        let mut complement = vec![
+            (ring[1], true),
+            (ray[end][0], false),
+            (ring[0], false),
+            (arc[0][end], false),
+            (ray[end][1], true),
+            (arc[1][end], true),
+        ];
+        if end == 0 {
+            complement.reverse();
+            for (_, forward) in &mut complement {
+                *forward = !*forward;
+            }
+        }
+        out.faces[cap].loops = vec![complement];
+        // The coincident cut-plane patch is absent; the complement is the only
+        // material on that stock end. The interior plane and radial walls stay.
+        out.faces.remove(4 + end);
+    }
     crate::topology::check(&out, tol)?;
     super::radial::planar_faces_outward(&out)?;
     Ok(out)

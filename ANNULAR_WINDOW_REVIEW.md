@@ -49,3 +49,26 @@ Logs: TEMP/GCKernel-annular-window-{regression,boolean}.log. No full-suite,
 native EyeShot, saved SquareCutoutRevolved adapter, arbitrary-axis, persistent-name
 or production-readiness claim. GCcore c5861a9 remains the original red reproducer;
 a separately pinned consumer will verify that same test against this candidate.
+
+## One-end notch extension (Codex, 2026-11-04 night)
+This branch extends a2227e2 for the actual saved Pipe_SqCutRev placement.
+A cutter must cross strictly beyond one end, with its other axial plane strictly
+inside the pipe. Exact touching and both-end crossing still refuse. The same
+complete plain-pipe/sector admission stays; no new selector, fallback, tolerance
+change, foreign source or dependencies.
+
+Each wall's near full circle becomes two complementary circular arcs joined
+through the notch's axial sides and interior arc. The end-cap complement is one
+oriented loop; the coincident removed sector is absent. The far annular cap and
+interior cut plane remain. All edges have paired opposite occurrences. No names
+are invented; recorded results carry the existing AnnularWindow missing-history
+reason, and strict named cuts refuse before constructing.
+
+Seven focused annular-window tests pass (the previous five plus two new):
+28 end/sign/sweep combinations, another six translated/scaled/rotated cases,
+independent volumes/areas, physical cut planes, neutral round trip, source
+immutability, recorded/plain equality and bitwise-welded closed outward meshes.
+Sweeps 0.01 to 359.99 degrees; 0.1/1/25.4 scales. Original touching/insufficient
+reach/prior-window refusals and interior cases still pass. No broad-suite or
+native-consumer claim at this revision; a2227e2's 140 checks remain attributed
+to that baseline. Log TEMP/GCKernel-annular-end-tests.log.

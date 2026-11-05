@@ -157,6 +157,100 @@ fn recorded_cut_reports_missing_history_and_strict_named_cut_refuses() {
 }
 
 #[test]
+fn end_notches_on_both_ends_keep_analytic_volume_area_and_closed_meshes() {
+    let body = canonical(4., 5., 0., 10., TAU);
+    let before = write_body(&body);
+    for degrees in [0.01_f64, 30., 90., 180., 270., 350., 359.99] {
+        for sign in [-1., 1.] {
+            for upper in [false, true] {
+                let (lo, hi) = if upper {
+                    (7.9999, 12.0001)
+                } else {
+                    (-2.0001, 2.0001)
+                };
+                let tool = canonical(3.9999, 5.0001, lo, hi, degrees.to_radians() * sign);
+                let tool_before = write_body(&tool);
+                let result = boolean::cut(&body, &tool, TOL)
+                    .unwrap_or_else(|e| panic!("{degrees} * {sign}, upper {upper}: {e}"));
+                let theta = degrees.to_radians();
+                let h = 2.0001;
+                let expected = 90. * PI - 0.5 * theta * 9. * h;
+                let area = TAU * 9. * 10. + TAU * 9. - 9. * theta * h + 2. * h;
+                let props = mass::measure(&result, TOL).unwrap();
+                assert!(
+                    (props.volume - expected).abs() < 1e-8,
+                    "{degrees}: {} vs {expected}",
+                    props.volume
+                );
+                assert!(
+                    (props.area - area).abs() < 1e-8,
+                    "{degrees}: area {} vs {area}",
+                    props.area
+                );
+                let report = topology::check(&result, TOL).unwrap();
+                assert_eq!((report.faces, report.edges, report.vertices), (7, 18, 12));
+                closed_mesh(&result, expected, 1.);
+                let wire = write_body(&result);
+                let round = Reader::with_tolerance(&wire, TOL).body().unwrap();
+                topology::check(&round, TOL).unwrap();
+                assert!((mass::measure(&round, TOL).unwrap().volume - expected).abs() < 1e-8);
+                assert_eq!(write_body(&body), before);
+                assert_eq!(write_body(&tool), tool_before);
+            }
+        }
+    }
+}
+
+#[test]
+fn end_notches_preserve_rotated_positions_cardinal_frames_and_scale() {
+    for scale in [0.1, 1., 25.4] {
+        for upper in [false, true] {
+            let o = Vec3::new(7., 11., 13.).scale(scale);
+            let a = Vec3::new(0., 0., -1.);
+            let x = Vec3::new(1., 0., 0.);
+            let body = sector(4. * scale, 5. * scale, 0., 10. * scale, TAU, 0., o, a, x);
+            let (lo, hi) = if upper { (8., 13.) } else { (-3., 2.) };
+            let tool = sector(
+                3.9 * scale,
+                5.1 * scale,
+                lo * scale,
+                hi * scale,
+                1.5 * PI,
+                0.73,
+                o,
+                a,
+                x,
+            );
+            let result = boolean::cut(&body, &tool, TOL).unwrap();
+            let expected = (90. * PI - 0.5 * 1.5 * PI * 9. * 2.) * scale.powi(3);
+            assert!(
+                (mass::measure(&result, TOL).unwrap().volume - expected).abs()
+                    < 1e-8 * scale.powi(3)
+            );
+            closed_mesh(&result, expected, scale);
+            // Every new radial face lies at an authored boundary angle, and its
+            // cut reaches the original stock end rather than the tool's far cap.
+        for f in &result.faces {
+            if let Surface::Plane{n,..}=f.surface {if n.dot(a)==0. {
+                assert!([0.73-0.75*PI,0.73+0.75*PI].into_iter().any(|t| {
+                    let radial=x.scale(t.cos()).add(a.cross(x).scale(t.sin()));
+                    let normal=a.cross(radial);
+                    n.distance(normal)<1e-12 || n.distance(normal.scale(-1.))<1e-12
+                }));
+            }}
+        }
+            for p in &result.vertices {
+                let h = p.sub(o).dot(a) / scale;
+                assert!(h >= -1e-12 && h <= 10. + 1e-12);
+            }
+            let (again, history) = boolean::cut_recorded(&body, &tool, TOL).unwrap();
+            assert_eq!(write_body(&result), write_body(&again));
+            assert!(history.unwrap_err().contains("AnnularWindow"));
+        }
+    }
+}
+
+#[test]
 fn extruded_pipe_representation_is_admitted_and_malformed_supports_refuse() {
     let ring = |r| {
         vec![Curve::Arc {

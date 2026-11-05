@@ -699,13 +699,19 @@ The AnnularWindow domain is selected for a two-cylinder coaxial sector tool
 with a partial circular edge and a stock cylinder parallel to that axis.
 Its admission proves a plain four-face pipe and a six-face annular sector
 from every face, loop, edge and corner. The tool must overreach both pipe
-wall radii and be strictly clear of both end caps. Axis lines, angular recipes
+wall radii and either clear both end caps or cross exactly one end with strict
+clearance: one cutter plane beyond that end, the other strictly inside the pipe.
+Exact contact and a tool spanning both ends still refuse. Axis lines, angular recipes
 and cap planes agree exactly; there is no near-axis or near-plane substitution.
 The angular interval and its complement must exceed the stated clearance
 budget. Generic topology validation is followed by this stricter domain proof.
 
 The result retains the analytic pipe material outside the sector: two walls
-with window loops, two annular end caps and four planar window walls. A fresh
+with window loops, two annular end caps and four planar window walls. For an
+end notch each wall instead has one spliced outer loop, the crossed end retains
+the complementary annular sector, and the other cut plane plus two radial walls
+bound the removed material. Its intersection height is the distance from the
+stock end to the cutter's interior plane; the original cutter is not altered. A fresh
 periodic parameter seam lies halfway around the angular complement. This is
 the admitted plain-pipe boundary, not a regenerated stock with earlier features
 discarded: any earlier opening, trim or extra boundary refuses before building.
@@ -720,6 +726,8 @@ exact/interval-certified arithmetic; curves and surfaces stay analytic.
 
 The independent volume is pi*(Ro^2-Ri^2)*L minus
 theta*(Ro^2-Ri^2)*(z1-z0)/2. Surface area removes the two wall rectangles and
-adds two annular sectors and two radial rectangles. These derive from public
+adds two annular sectors and two radial rectangles. For a one-end notch the
+removed end-cap sector and added interior sector cancel in the area sum;
+the two radial rectangles remain. These derive from public
 cylindrical coordinates (MathWorld equation 17, r dr dtheta dz), written here
 independently; no third-party kernel source/dependency.
