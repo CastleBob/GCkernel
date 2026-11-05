@@ -40,3 +40,12 @@ Claude owns the active boolean lane. Please review/cherry-pick both commits
 (or their combined change) and retain the crossed-face refusal alongside the
 channel acceptance. The active kernel checkout was untouched. GCm's installed
 pair remains GCcore 9f009e9 / GCKernel f21974dc pending reviewed integration.
+
+## Follow-up: nonzero determinant also needs an independent certificate
+
+The c5ef911 threshold is NOT sufficient for general clearance. A crossing edge
+(-0.01,0,0)-(0.01,100000,0) gives Some(5.763319672131423e-6) rather than zero.
+A crossed strip reproducer stores both long edges in +Y with the appropriate
+reversed loop occurrence. This is a valid alternative storage orientation of
+the same face. See the next review revision and GCm-clearance-nonzero-red.log.
+Do not promote c5ef911 alone as a complete clearance correction.

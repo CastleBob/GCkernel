@@ -926,6 +926,33 @@ mod codex_clearance_review {
     }
 
     #[test]
+    fn nonzero_determinant_does_not_certify_crossing_segment_clearance() {
+        for x in [0.01, 0.1] {
+            let distance = segment_distance([0.,0.,0.], [0.,100000.,0.],
+                [-x,0.,0.], [x,100000.,0.]);
+            assert!(distance.is_none_or(|d| d <= 1e-6),
+                "segments intersect at (0,50000,0) despite nonzero determinant: x={x}, distance={distance:?}");
+        }
+    }
+
+    #[test]
+    fn nonzero_determinant_crossed_strip_cannot_be_excluded() {
+        let vertices = vec![Vec3::new(-0.01,0.,0.), Vec3::new(-0.00999,0.,0.),
+            Vec3::new(0.01001,100000.,0.), Vec3::new(0.01,100000.,0.)];
+        // Store both long edges in +Y; the last loop occurrence reverses its edge.
+        let edges = (0..4).map(|i| {
+            let (start, end) = if i == 3 { (0, 3) } else { (i, (i+1)%4) };
+            Edge { start, end, curve:Curve::Line { a:vertices[start], b:vertices[end] } }
+        }).collect();
+        let face = Face { surface:Surface::Plane { p:vertices[0], n:Vec3::new(0.,0.,1.), x:Vec3::new(1.,0.,0.) },
+            sense:true, loops:vec![(0..4).map(|i|(i,i != 3)).collect()] };
+        let body = Body { vertices, edges, faces:vec![face] };
+        assert!(inside(&body,&body.faces[0],Vec3::new(0.,49975.,0.),Vec3::new(0.,0.,1.),1e-6).unwrap());
+        assert!(!clear_of_corridor(&body,&body.faces[0],Vec3::new(0.,0.,1.),1,[0.,0.,0.],1e-6,0.,100000.,1e-6),
+            "a nonzero determinant does not justify excluding this crossed face");
+    }
+
+    #[test]
     fn a_planar_strip_crossing_the_bore_axis_is_not_clear() {
         let vertices = vec![Vec3::new(-0.0001,0.,0.), Vec3::new(-0.00009,0.,0.),
             Vec3::new(0.00011,100000.,0.), Vec3::new(0.0001,100000.,0.)];
