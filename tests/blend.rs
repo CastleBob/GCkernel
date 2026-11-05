@@ -115,6 +115,77 @@ fn refused(body: &Body, items: &[Item]) -> String {
 fn spandrel(r: f64) -> f64 { (1.0 - PI / 4.0) * r * r }
 fn spandrel_moment(r: f64) -> f64 { r * r * r * (5.0 / 6.0 - PI / 4.0) }
 
+fn capsule(radius: f64, kink: bool) -> Vec<Curve> {
+    let arc = |x: f64, a: f64, b: f64| Curve::Arc {
+        c: p2(x, 0.), n: Z, x: p2(1., 0.), r: radius, t0: a, t1: b,
+    };
+    let mut curves = vec![line((-2., -radius), (2., -radius)), arc(2., -PI/2., PI/2.)];
+    if kink {
+        curves.push(line((2., radius), (0., radius + 0.01)));
+        curves.push(line((0., radius + 0.01), (-2., radius)));
+    } else { curves.push(line((2., radius), (-2., radius))); }
+    curves.push(arc(-2., PI/2., 3.*PI/2.));
+    curves
+}
+
+fn capsule_prep(body: &Body, end: f64, height: f64, axial: f64) -> Vec<Item> {
+    let face = plane_face(body, Z.scale(if end == 0. { -1. } else { 1. }), Vec3::new(0., 0., end));
+    body.faces[face].loops[0].iter().map(|&(edge, _)| Item {
+        edge, kind: Kind::ChamferDistances { first: height, second: axial, face },
+    }).collect()
+}
+
+#[test]
+fn tangent_capsule_rim_chamfers_join_with_cone_generators() {
+    let body = prism(vec![capsule(1., false), capsule(0.75, false)], 5.);
+    let original = write_body(&body);
+    let base = (8. + PI - (6. + PI*0.75_f64.powi(2))) * 5.;
+    for (height, axial) in [(0.1,0.2),(0.1,0.05)] {
+        let removed = (8. + 2.*PI)*height*axial/2. - PI*height*height*axial/3.;
+        for end in [0.,5.] {
+            let mut items = capsule_prep(&body, end, height, axial);
+            // The result must not depend on which rim edge is first in the request.
+            items.reverse();
+            let out = blended(&body, &items, base-removed);
+            assert!(out.faces.iter().any(|f| matches!(f.surface,Surface::Cone { .. })));
+            let both = capsule_prep(&out, 5.-end, height, axial);
+            blended(&out, &both, base-2.*removed);
+        }
+    }
+    assert_eq!(write_body(&body), original);
+}
+
+#[test]
+fn tangent_capsule_chamfer_refuses_unequal_setbacks_and_mixed_fillets() {
+    let body = prism(vec![capsule(1., false), capsule(0.75, false)], 5.);
+    let original = write_body(&body);
+    let mut items = capsule_prep(&body, 5., 0.1, 0.2);
+    let face = match items[0].kind {Kind::ChamferDistances {face,..} => face,_=>unreachable!()};
+    items[0].kind=Kind::ChamferDistances {first:0.11,second:0.2,face};
+    assert!(refused(&body,&items).contains("matching setbacks"));
+    let mut items = capsule_prep(&body, 5., 0.1, 0.2);
+    for item in &mut items { item.kind=Kind::Fillet {radius:0.1}; }
+    assert!(refused(&body,&items).contains("matching setbacks"));
+    assert_eq!(write_body(&body), original);
+}
+
+#[test]
+fn tangent_capsule_chamfer_refuses_a_non_tangent_junction() {
+    let body=prism(vec![capsule(1.,true),capsule(0.75,false)],5.);
+    let items=capsule_prep(&body,5.,0.1,0.2);
+    assert!(refused(&body,&items).contains("matching setbacks"));
+}
+
+#[test]
+fn tangent_capsule_chamfer_does_not_skip_a_hole_inside_its_angular_sector() {
+    let body=prism(vec![capsule(1.,false),capsule(0.75,false),vec![circle(2.94,0.,0.02)]],5.);
+    let original=write_body(&body);
+    let items=capsule_prep(&body,5.,0.1,0.2);
+    let reason=refused(&body,&items);
+    assert!(!reason.is_empty());
+    assert_eq!(write_body(&body),original);
+}
+
 // ---- 1. chamfers between flat faces ----
 
 #[test]

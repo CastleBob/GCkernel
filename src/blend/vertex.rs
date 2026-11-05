@@ -87,11 +87,75 @@ pub(crate) fn plan(v: usize, corners: &[Corner], all: &HashMap<usize, Vec<Corner
     let rims = selected.iter().filter(|s| matches!(blends[&s.edge].shape, Shape::Rim { .. })).count();
     if rims > 0 {
         if rims != selected.len() {
-            return unsupported(format!("vertex {v}: a plane-cylinder blend meets a blend of another kind"));
+            return tangent_chamfer(v, corners, &ends, &selected, blends, body, built, tol);
         }
         return rim(v, corners, &ends, &selected, blends, body, built, tol);
     }
     planar(v, corners, all, &ends, &selected, blends, body, built, tol)
+}
+
+/// A straight outer rim tangent to a circular corner on the same end plane.
+/// Equal end/skin setbacks make the two chamfers meet along the cone generator
+/// at that angle. This is a declared analytic domain, not a retry of `rim`.
+/// Fillets, unequal setbacks and non-tangent supports remain unsupported.
+#[allow(clippy::too_many_arguments)]
+fn tangent_chamfer(v: usize, corners: &[Corner], ends: &[End], selected: &[End],
+    blends: &HashMap<usize, EdgeBlend>, body: &Body, built: &mut Built, tol: f64) -> Result<Plan, KernelError> {
+    let refuse = || KernelError::Unsupported(format!("vertex {v}: mixed rim chamfers require two tangent convex edges with matching setbacks"));
+    if selected.len() != 2 { return Err(refuse()); }
+    let common = corners.iter().find(|c| selected.contains(&c.inn) && selected.contains(&c.out)).ok_or_else(refuse)?;
+    let r = *selected.iter().find(|s| matches!(blends[&s.edge].shape, Shape::Rim { .. })).ok_or_else(refuse)?;
+    let p = *selected.iter().find(|s| **s != r).ok_or_else(refuse)?;
+    let u = *ends.iter().find(|s| !selected.contains(s)).ok_or_else(refuse)?;
+    let (rb, pb) = (&blends[&r.edge], &blends[&p.edge]);
+    let Shape::Rim { c0, ah, radius, alpha, beta, sp, sc, plane, cylinder, .. } = rb.shape else { return Err(refuse()); };
+    let Shape::Planar { wa, wb, sa, sb, .. } = pb.shape else { return Err(refuse()); };
+    if rb.radius.is_some() || pb.radius.is_some() || !rb.convex || !pb.convex || alpha != -1. || common.face != plane {
+        return Err(refuse());
+    }
+    let rc = corners.iter().find(|c| (c.inn == r || c.out == r) && (c.inn == u || c.out == u)).ok_or_else(refuse)?;
+    let pc = corners.iter().find(|c| (c.inn == p || c.out == p) && (c.inn == u || c.out == u)).ok_or_else(refuse)?;
+    if rc.face != cylinder || pc.face == plane || pc.face == cylinder { return Err(refuse()); }
+    let (skin_point, skin_normal) = plane_of(body, pc.face).ok_or_else(refuse)?;
+    let at = body.vertices[v];
+    let w = at.sub(c0);
+    let radial = w.sub(ah.scale(w.dot(ah)));
+    let rho = radial.unit()?;
+    let (_, ruling) = line_of(body, u.edge).map_err(|_| refuse())?;
+    // The skin plane must be tangent to the input cylinder with the same
+    // material side; the remaining seam must be an axial ruling. Small angular
+    // residuals also have to fit within an eighth of the positional tolerance
+    // over this vertex's incident edges and proposed setbacks.
+    let reach = ends.iter().map(|e| {
+        let edge = &body.edges[e.edge];
+        at.distance(body.vertices[if e.at_end { edge.start } else { edge.end }])
+    }).fold(radius.max(sp).max(sc), f64::max).max(tol);
+    let angular = 1e-12_f64.min(tol / (8. * reach));
+    let outward = rho.scale(if body.faces[cylinder].sense { 1. } else { -1. });
+    if skin_normal.sub(outward).length() > angular || ruling.cross(ah).length() > angular
+        || skin_normal.dot(ah).abs() > angular || w.dot(ah).abs() > tol / 8.
+        || (radial.length() - radius).abs() > tol / 8.
+        || at.sub(skin_point).dot(skin_normal).abs() > tol / 8. {
+        return Err(refuse());
+    }
+    let t = c0.add(rho.scale(radius + alpha * sp));
+    let q = at.add(ah.scale(beta * sc));
+    let offset = |face: usize| if face == pb.a { wa.scale(sa) } else { wb.scale(sb) };
+    if t.distance(at.add(offset(plane))) > tol / 8.
+        || q.distance(at.add(offset(pc.face))) > tol / 8. || t.distance(q) <= tol {
+        return Err(refuse());
+    }
+    let (ti, qi) = (built.vertex(t), built.vertex(q));
+    let mut plan = Plan::default();
+    plan.rail.insert((r, plane), ti);
+    plan.rail.insert((p, plane), ti);
+    plan.rail.insert((r, rc.face), qi);
+    plan.rail.insert((p, pc.face), qi);
+    plan.point.insert(u, qi);
+    let joint = built.edge(Curve::Line { a: t, b: q }, ti, qi);
+    plan.chain.insert(r, vec![joint]);
+    plan.chain.insert(p, vec![joint]);
+    Ok(plan)
 }
 
 fn find<'a>(corners: &'a [Corner], f: impl Fn(&Corner) -> bool) -> &'a Corner {

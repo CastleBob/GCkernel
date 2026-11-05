@@ -10,6 +10,8 @@
 //!   onto the cylinder strip beyond it: `runout`), two blends meeting
 //!   in a mitre (chamfer planes in a line; equal fillets in an ellipse), three meeting at a corner (a plane triangle
 //!   for chamfers; a sphere patch for equal fillets where one face is square to the other two).
+//! - convex outer chamfers along a tangent straight/circular rim on one end plane, with matching setbacks on
+//!   the end and skin. The plane and cone join along a common generator. Mixed fillets and non-tangent joins refuse.
 //!
 //! Every result is proved before it is returned: the rails and trims stay inside their faces, each changed flat face's
 //! curves are proved apart (except where they join) and its loops nest as before, no other edge of the body enters a
@@ -430,14 +432,30 @@ fn check_interference(body: &Body, blends: &HashMap<usize, EdgeBlend>, selected:
                     if worst > r { Some(true) } else if r <= tol / 4.0 { Some(false) } else { None }
                 })
             }
-            Shape::Rim { c0, ah, radius, alpha, beta, sp, sc, .. } => {
+            Shape::Rim { c0, ah, n, x, t0, t1, radius, alpha, beta, sp, sc, .. } => {
                 let (r0, r1) = (radius.min(radius + alpha * sp), radius.max(radius + alpha * sp));
                 let (h0, h1) = (0f64.min(beta * sc), 0f64.max(beta * sc));
+                // A <= half-turn rim occupies a convex angular sector, not the
+                // complete ring. Both inward radial planes contain that sector.
+                // Account for any admitted arc-axis/skin-axis residual over the
+                // axial range; no curve is exempted from the clearance proof.
+                let sector = if t1 > t0 && t1 - t0 <= std::f64::consts::PI {
+                    let y = n.cross(x);
+                    let start = x.scale(t0.cos()).add(y.scale(t0.sin()));
+                    let end = x.scale(t1.cos()).add(y.scale(t1.sin()));
+                    let left = n.cross(start).unit()?;
+                    let right = end.cross(n).unit()?;
+                    Some((left, right, h0.abs().max(h1.abs())))
+                } else { None };
                 Box::new(move |c: Vec3, r: f64| {
                     let w = c.sub(c0);
                     let h = w.dot(ah);
                     let rho = w.sub(ah.scale(h)).length();
-                    let worst = (h0 - h).max(h - h1).max(r0 - rho).max(rho - r1);
+                    let mut worst = (h0 - h).max(h - h1).max(r0 - rho).max(rho - r1);
+                    if let Some((left, right, axial)) = sector {
+                        worst = worst.max(-w.dot(left) - axial * ah.dot(left).abs() - tol)
+                            .max(-w.dot(right) - axial * ah.dot(right).abs() - tol);
+                    }
                     if worst > r { Some(true) } else if r <= tol / 4.0 { Some(false) } else { None }
                 })
             }
