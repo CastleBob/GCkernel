@@ -530,9 +530,11 @@ fn neighbors(a: &Band, b: &Band, tol: f64) -> Option<(usize, usize)> {
 }
 
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    let (body, tool) = (&super::snap_directions(body), &super::snap_directions(tool));
     cut_in_frame(body, tool, tol, frame(body, tool)?)
 }
 pub(super) fn cut_along(body: &Body, tool: &Body, axis: usize, tol: f64) -> Result<Body> {
+    let (body, tool) = (&super::snap_directions(body), &super::snap_directions(tool));
     cut_in_frame(body, tool, tol, frame_for_axis_with(body, Some(tool), axis)?)
 }
 fn cut_in_frame(body: &Body, tool: &Body, tol: f64, f: Frame) -> Result<Body> {
@@ -1206,13 +1208,15 @@ mod tests {
                 Err(KernelError::Unsupported(_))
             ));
         }
-        // The captured miter's cap has a tiny nonzero third normal component;
-        // accepting it would require a declared geometry-normalization contract.
+        // The captured miter's cap has a tiny nonzero third normal component. The declared normalization contract
+        // (boolean::snap_directions, Claude 2026-11-05 under Bob's 10-28 rule): directions within 1e-12 of a
+        // coordinate axis are that axis, so the miter cuts to one valid solid.
         for case in ["pipe_miter_45", "rect_tube_miter_45"] {
-            assert!(matches!(
-                crate::boolean::cut(&survey(case, "base"), &survey(case, "step01"), 1e-6),
-                Err(KernelError::Unsupported(_))
-            ));
+            let base = survey(case, "base");
+            let out = crate::boolean::cut(&base, &survey(case, "step01"), 1e-6).unwrap();
+            assert_eq!(crate::topology::check(&out, 1e-6).unwrap().genus(), crate::topology::check(&base, 1e-6).unwrap().genus());
+            let (before, after) = (crate::mass::measure(&base, 1e-6).unwrap().volume, crate::mass::measure(&out, 1e-6).unwrap().volume);
+            assert!(after > 0. && after < before, "{case}: {after} of {before}");
         }
     }
     #[test]

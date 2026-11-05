@@ -644,3 +644,22 @@ operands before admission; the joined body is admitted as any other. Such a bore
 "... across cap seams joined by this cut ..."). The transverse engine itself keeps its cells: joining them globally
 broke later transverse cuts (patch coverage), so the join is local to the bore. Regression: tests/cap_seams.rs (Bob's
 Angle Corner Cutout).
+
+## Near-cardinal directions are cardinal (Claude, 2026-11-05)
+
+Declared normalization contract, under Bob's rule of 2026-10-28 ("what agrees within the kernel tolerance is the
+same, and the status says so"). Stock built by rotated, tapered or filleted profile math carries plane normals and
+axes off the coordinate axes in the last bits: a C12x20.7 flange end face's (-1, 1.3e-16, 0), a C6x13 inner web's
+(-2.6e-17, 0, -1). Two places now take a direction within 1e-12 per component of a coordinate axis as that axis.
+Points never move; over any admitted part the change lies far inside the tolerance.
+
+- **Transverse end cuts** (`endcut::snap_directions`, in `planar_cross_cut`, `cross::cut` and `cross::cut_along`):
+  the operands' plane normals and x axes and cylinder axes are snapped inside the domain, after selection, so
+  routing is unchanged. The captured pipe and rect-tube 45-degree miters, refused before, now cut. The rat holes'
+  plane-fillet crossings come out as circles (arcs) instead of near-circular conics.
+- **Round passages** (`passage::cap_normal`): such a face is a cap. A planar side face inside the corridor's box is
+  excluded when it lies provably farther than the radius from the corridor's axis segment.
+
+Fixtures: `parts/channel_end_partition` (Arc Steel B2025's first AK end cut, refused on b537031 as "an end-cut
+surface patch is below the admitted partition resolution") and `parts/channel_web_hole` (Valley Industrial B24's
+web hole).

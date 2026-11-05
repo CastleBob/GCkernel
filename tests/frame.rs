@@ -127,7 +127,10 @@ fn every_curve_kind_and_a_real_body_move_exactly() {
     let body = rat_hole();
     let touching = replay("tangent_hole", 3);
     let mut kinds = [0usize; 5];
-    for c in body.edges.iter().chain(&touching.edges).map(|e| &e.curve) {
+    // A genuinely oblique ellipse arc: the rat holes' plane-cylinder crossings are circles (arcs) since cut operands'
+    // near-cardinal directions are taken as exact (boolean::snap_directions).
+    let ellipse = Curve::Conic { c: Vec3::new(1.0, 2.0, 3.0), u: Vec3::new(2.0, 0.0, 0.5), v: Vec3::new(0.0, 1.0, 0.0), t0: 0.3, t1: 2.1 };
+    for c in body.edges.iter().chain(&touching.edges).map(|e| &e.curve).chain(std::iter::once(&ellipse)) {
         let moved = m.curve(c);
         let (t0, t1) = c.domain();
         for k in 0..=8 {

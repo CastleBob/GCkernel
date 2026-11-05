@@ -314,7 +314,13 @@ fn captured_rat_hole(name: &str) -> Body {
 }
 
 #[test]
-fn web_slot_after_both_rat_holes_retains_previous_conic_boundaries() {
+fn web_slot_after_both_rat_holes_retains_previous_curved_boundaries() {
+    // The rat holes' curved boundaries: circles (arcs) since cut operands' near-cardinal planes are taken as exact
+    // (boolean::snap_directions), conics before.
+    let original = captured_ibeam();
+    let fresh = |e: &crate::neutral::Edge| {
+        matches!(e.curve, Curve::Conic { .. } | Curve::Arc { .. }) && !original.edges.iter().any(|o| format!("{:?}", o.curve) == format!("{:?}", e.curve))
+    };
     let mut base = captured_ibeam();
     for step in ["step01", "step02"] {
         base = crate::boolean::cut(&base, &captured_rat_hole(step), 1e-6).unwrap();
@@ -322,10 +328,7 @@ fn web_slot_after_both_rat_holes_retains_previous_conic_boundaries() {
             .body()
             .unwrap();
     }
-    assert!(base
-        .edges
-        .iter()
-        .any(|e| matches!(e.curve, Curve::Conic { .. })));
+    assert!(base.edges.iter().any(fresh));
     let saved = crate::neutral::write_body(&base);
     let (_, tool) = fixture(2, 0., 0., (-6., 1.));
     let result = crate::boolean::cut(&base, &tool, 1e-6).unwrap();
@@ -361,13 +364,11 @@ fn web_slot_after_both_rat_holes_retains_previous_conic_boundaries() {
     }
     assert_eq!(saved, crate::neutral::write_body(&base));
     let mut broken = base.clone();
-    let edge = broken
-        .edges
-        .iter_mut()
-        .find(|e| matches!(e.curve, Curve::Conic { .. }))
-        .unwrap();
-    if let Curve::Conic { u, .. } = &mut edge.curve {
-        *u = u.scale(1.1);
+    let edge = broken.edges.iter_mut().find(|e| fresh(e)).unwrap();
+    match &mut edge.curve {
+        Curve::Conic { u, .. } => *u = u.scale(1.1),
+        Curve::Arc { r, .. } => *r *= 1.1,
+        _ => unreachable!(),
     }
     assert!(crate::boolean::cut(&broken, &tool, 1e-6).is_err());
 }

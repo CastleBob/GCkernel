@@ -1437,6 +1437,32 @@ pub(super) fn crosses_cylinder(
     }
     false
 }
+/// One direction with every component within 1e-12 of zero made exactly zero, renormalized. Stock built by rotated,
+/// tapered or filleted profile math carries plane normals and axes off the coordinate axes in the last bits (a channel
+/// flange face's 1.3e-16, a C6x13 inner web's 2.6e-17); the domains read directions exactly, and over any admitted
+/// part such a direction is the same within the kernel tolerance (Bob 10-28: what agrees within the kernel tolerance is
+/// the same). Points never move.
+fn snapped(v: Vec3) -> Vec3 {
+    let k = |c: f64| if c.abs() <= 1e-12 { 0. } else { c };
+    let w = Vec3::new(k(v.x), k(v.y), k(v.z));
+    let l = w.length();
+    if l > 0. && w != v { w.scale(1. / l) } else { v }
+}
+
+/// A transverse-cut operand with its planes' and cylinders' directions snapped (see `snapped`): the domain's charts and
+/// partitions read directions exactly. Applied inside the domain, after selection, so routing is unchanged.
+pub(super) fn snap_directions(body: &Body) -> Body {
+    let mut out = body.clone();
+    for f in &mut out.faces {
+        match &mut f.surface {
+            Surface::Plane { n, x, .. } => (*n, *x) = (snapped(*n), snapped(*x)),
+            Surface::Cylinder { a, x, .. } => (*a, *x) = (snapped(*a), snapped(*x)),
+            _ => {}
+        }
+    }
+    out
+}
+
 pub(super) fn cross_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     cross::cut(body, tool, tol)
 }
@@ -1447,6 +1473,7 @@ pub(super) fn box_cross_cut(body: &Body, tool: &Body, axis: usize, tol: f64) -> 
 /// Select a transverse coordinate chart from the planar cutter's normals.
 /// This is geometric admission before construction, with no retry if it fails.
 pub(super) fn planar_cross_cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    let (body, tool) = (&snap_directions(body), &snap_directions(tool));
     let mut normals = Vec::new();
     for face in &tool.faces {
         let Surface::Plane { p, n, x } = face.surface else {
@@ -1599,10 +1626,10 @@ mod tests {
         crate::topology::check(&first, 1e-6).unwrap();
         let second = cut(&first, &fixture("step02.f64"), 1e-6).unwrap();
         crate::topology::check(&second, 1e-6).unwrap();
-        assert!(second
-            .edges
-            .iter()
-            .any(|e| matches!(e.curve, Curve::Conic { .. })));
+        // The rat holes' plane-fillet crossings: circles (arcs) since the domain takes the captured near-cardinal
+        // planes as exact (snap_directions), conics before.
+        let curved = |b: &Body| b.edges.iter().filter(|e| matches!(e.curve, Curve::Conic { .. } | Curve::Arc { .. })).count();
+        assert!(curved(&second) > curved(&base));
         assert_eq!(crate::topology::check(&second, 1e-6).unwrap().genus(), 0.);
         // Independent dimensions/area formula for this captured fixture.
         let stock =
@@ -1720,8 +1747,9 @@ mod tests {
         assert_eq!(crate::neutral::write_body(&base), input);
         assert_eq!(crate::neutral::write_body(&first), tool);
         assert_eq!(crate::topology::check(&result, 1e-6).unwrap().genus(), 0.);
-        let direct = cut(
-            &cut(&base, &first, 1e-6).unwrap(),
+        // The public cut, as the wire runs it (operand directions normalized at the boolean entry).
+        let direct = crate::boolean::cut(
+            &crate::boolean::cut(&base, &first, 1e-6).unwrap(),
             &fixture("step02.f64"),
             1e-6,
         )
