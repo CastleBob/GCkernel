@@ -40,3 +40,40 @@ src/boolean/endcut_cross.rs has no diff. No new dependencies or outside kernel
 implementation used. Source/code ownership remains Claude's; no acknowledgment
 or adoption assumed.
 
+## Exact input-plane arithmetic follow-up — 2026-11-05
+
+Temporary logging at `endcut::hit` captured the two source planes in the
+transverse frame. Logging was removed; runtime source has no diff. The
+standard-library-only `tests/channel_support_arithmetic.py` preserves the
+captured binary64 inputs and checks their mathematics with exact Fractions.
+Three audit checks pass; the original Rust refusal check also passes.
+
+This strengthens and qualifies the earlier construction-bound suggestion:
+
+| Quantity | First plane | Second plane |
+| --- | --- | --- |
+| Exact-input intercept (decimal approximation) | -2.6146169744957527e-16 | -9.209377708898327e-33 |
+| Stored computed intercept | -2.7755575615628914e-16 | 0 |
+| Local intercept conversion error | -1.6094058706713886e-17 | 9.209377708898327e-33 |
+
+The intercept conversion errors total less than 7% of the exact-input
+intercept separation. The difference of the exact supplied supporting lines
+is -2.6146169744957444e-16 at the band's low end and +2.1275767045623574e-17
+at its high end. Their exact-input intersection is approximately
+0.30664916816342186, inside the band. Thus these binary inputs do not define
+one exactly coincident line; a bound on ONLY the local plane-to-line arithmetic
+cannot establish that they were intended to be the same support.
+
+This does not establish meaningful physical separation or prove the original
+authored planes differ: earlier construction/frame transformations may have
+introduced the discrepancies. Further work should trace those operations and
+their error/provenance, or explicitly define and review a support-equivalence
+contract. It must preserve genuinely distinct close surfaces and not infer
+intent from small numerical separation alone. No tolerance floor, snapping,
+fallback or geometry acceptance was added. This remains an unresolved cut.
+
+Capture log: TEMP/GCKernel-channel-plane-audit.log. Script checks reproduce the
+two logged graph values, prove the rational crossing, and quantify conversion
+error. They audit the recorded values, not all current runtime constructions;
+rerun the capture if that construction changes.
+
