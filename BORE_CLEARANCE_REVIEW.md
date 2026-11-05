@@ -1,51 +1,66 @@
 # Codex review of b537031 round-passage clearance
 
-Review branch: codex/bore-clearance-review. The original commit 4255a27 records
-both failures below. The follow-up adds a conservative refusal guard; this is a
-review delivery, not a main merge or an installed-worker promotion.
+Branch: codex/bore-clearance-review. Review delivery only; active master and the
+installed GCm pair remain unchanged. Claude owns the boolean lane.
 
-At tolerance 1e-6, axis segment (0,0,0)-(0,100000,0) and edge
-(-0.0001,0,0)-(0.0001,100000,0) intersect at (0,50000,0). On b537031,
-segment_distance returns 0.0001 because a*e-b*b cancels to zero.
-A planar CCW strip with vertices (-0.0001,0,0),(-0.00009,0,0),
-(0.00011,100000,0),(0.0001,100000,0) contains axis point (0,47500,0),
-confirmed independently by inside(). clear_of_corridor nevertheless excludes
-it for radius 1e-5. This is a helper-level counterexample, not a claim about a
-known corrupted customer part.
+## Reproduced failures and superseded guard
 
-The correction makes the private distance helper return Option<f64>. A
-nonparallel determinant within 16 machine epsilons of its product scale supplies
-no clearance evidence. Exact cardinal parallelism is recognized from zero
-components, not from a rounded determinant. Nonfinite arithmetic also supplies
-no evidence. The corridor caller refuses exclusion on None, preserving its
-existing unsupported-geometry outcome. No guessed distance, alternate algorithm,
-geometry repair, tolerance increase or external dependency is introduced.
+Commit 4255a27 preserves two failures on b537031. Axis (0,0,0)-(0,100000,0)
+and edge (-0.0001,0,0)-(0.0001,100000,0) intersect, yet the normal-equation
+distance is 0.0001 because a*e-b*b rounds to zero. An independently checked
+planar strip crossed by the axis is then wrongly excluded from the bore.
 
-Verification (release, locked):
-- cargo test --lib codex_clearance_review: 3 passed, including crossed-face
-  refusal, cancellation refusal, exact parallel and well-conditioned distances.
-- cargo test --test bore_clearance --test cap_seams --test pocket --test provenance:
-  29 passed (1 + 2 + 7 + 19). The channel web-hole acceptance remains passing.
-- Original 4255a27: both counterexamples fail, log
-  TEMP/GCm-b537031-clearance-review.log.
-- Follow-up logs: TEMP/GCm-bore-clearance-guard-{unit,regressions}.log.
+Commit c5ef911's denominator guard fixes those two cases but is INSUFFICIENT.
+Commit 3ed94d9 preserves two further failing tests: with x endpoints +-0.01,
+the nonzero determinant yields distance 5.763319672131423e-6 for an intersection.
+A crossed strip is wrongly excluded at radius/tolerance 1e-6 when its long edges
+are stored in +Y (the last loop occurrence is reversed). Do not adopt c5ef911 or
+the red-only 3ed94d9 as the final correction.
 
-Research: https://www.cs.cmu.edu/~quake/robust.html explains why near-zero
-floating-point determinants require explicit uncertainty handling. Only the
-public mathematical overview was consulted; no linked implementation was read
-or reused. This local guard addresses the demonstrated cancellation class; it
-is not a proof that every distance/clearance calculation is numerically certified.
+## Current correction: verify the proposed separation
 
-Claude owns the active boolean lane. Please review/cherry-pick both commits
-(or their combined change) and retain the crossed-face refusal alongside the
-channel acceptance. The active kernel checkout was untouched. GCm's installed
-pair remains GCcore 9f009e9 / GCKernel f21974dc pending reviewed integration.
+segment_clearance_lower_bound returns a lower bound, not the distance estimate.
+The existing normal equations propose direction n only. For each original
+endpoint, every dot-product multiplication and addition is rounded outward with
+next_down/next_up. Endpoint intervals therefore enclose every projection along
+each segment. The positive gap between those intervals is rounded downward.
+An upper bound on |n| is computed by rounding squares, sums and square root up;
+the final gap/norm quotient is rounded down.
 
-## Follow-up: nonzero determinant also needs an independent certificate
+Proof: if every q projection exceeds every p projection by g, then
+n dot (q-p) >= g. Cauchy-Schwarz gives |q-p| >= g/|n|. Endpoint projection
+extrema bound the entire line segment, so this applies to all point pairs.
+Using a lower gap and upper norm preserves that lower bound. The symmetric
+ordering is checked too. An inaccurate proposed direction can weaken the proof
+but cannot establish separation of intersecting segments. Overlap returns zero;
+uncertainty or nonfinite bounds refuses exclusion. Existing near-parallel refusal
+is retained. No guessed distance, alternate geometry/recovery path, tolerance
+increase, source repair or dependency is introduced.
 
-The c5ef911 threshold is NOT sufficient for general clearance. A crossing edge
-(-0.01,0,0)-(0.01,100000,0) gives Some(5.763319672131423e-6) rather than zero.
-A crossed strip reproducer stores both long edges in +Y with the appropriate
-reversed loop occurrence. This is a valid alternative storage orientation of
-the same face. See the next review revision and GCm-clearance-nonzero-red.log.
-Do not promote c5ef911 alone as a complete clearance correction.
+This certifies the segment-boundary evidence against represented f64 endpoints;
+it is not a blanket certification of the rest of clear_of_corridor's plane/interior
+logic or every boolean operation. These are helper-level counterexamples, not a
+claim that a particular customer part was corrupted.
+
+## Verification
+
+- cargo test --locked --release --lib codex_clearance_review: 6 passed, including
+  both pairs of counterexamples, positive parallel/skew bounds, and 72 analytic
+  midpoint intersections across scales, axes and endpoint orderings.
+- cargo test --locked --release --test bore_clearance --test cap_seams
+  --test pocket --test provenance: 29 passed (1 + 2 + 7 + 19), including the new
+  channel web-hole acceptance and existing cut history.
+- Logs: TEMP/GCm-clearance-certificate-{unit,regressions}.log.
+- Earlier red logs: GCm-b537031-clearance-review.log and
+  GCm-clearance-nonzero-red.log. Original failures remain in git history.
+
+References consulted as public math/API documentation only:
+- https://www.cs.cmu.edu/~quake/robust.html (determinant roundoff)
+- https://pages.mtu.edu/~shene/COURSES/cs3621/NOTES/spline/B-spline/bspline-curve-prop.html
+  (convex-hull containment; the segment case is linear interpolation)
+- https://doc.rust-lang.org/std/primitive.f64.html#method.next_up
+- https://doc.rust-lang.org/std/primitive.f64.html#method.sqrt
+  (adjacent representable floats and correctly rounded square root)
+No linked implementation source was read or reused. Projection-bound reasoning
+and code were independently written. Please review the complete branch change
+before any main merge/promotion. GCm remains GCcore 9f009e9 / GCKernel f21974dc.
