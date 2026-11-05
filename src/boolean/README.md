@@ -693,3 +693,33 @@ station. Such a face is now any single loop of edges parallel to the y and z axe
 oriented area. Its membership is decided even-odd on a grid that holds all its vertex coordinates. The coverage
 equation (left sections minus right sections equals the signed patches, cell by cell) is unchanged. Fixture:
 `parts/channel_stepped_end` (Bob Cody 12004SL0's second AK cutter).
+
+## Annular pipe windows (Codex review candidate, 2026-11-04)
+The AnnularWindow domain is selected for a two-cylinder coaxial sector tool
+with a partial circular edge and a stock cylinder parallel to that axis.
+Its admission proves a plain four-face pipe and a six-face annular sector
+from every face, loop, edge and corner. The tool must overreach both pipe
+wall radii and be strictly clear of both end caps. Axis lines, angular recipes
+and cap planes agree exactly; there is no near-axis or near-plane substitution.
+The angular interval and its complement must exceed the stated clearance
+budget. Generic topology validation is followed by this stricter domain proof.
+
+The result retains the analytic pipe material outside the sector: two walls
+with window loops, two annular end caps and four planar window walls. A fresh
+periodic parameter seam lies halfway around the angular complement. This is
+the admitted plain-pipe boundary, not a regenerated stock with earlier features
+discarded: any earlier opening, trim or extra boundary refuses before building.
+Multiple windows, normalized/mitered ends, conical Pole stock, blind wall
+pockets, full-turn severing and tangent/end-touching cuts are outside this domain.
+
+The result has no ancestry records because the seam representation changes.
+cut_recorded returns its actual missing-history reason; cut_named refuses before
+construction. There is no retry through an unnamed operation. Other domains
+and tolerances are unchanged. Inputs are immutable. Arithmetic uses f64, not
+exact/interval-certified arithmetic; curves and surfaces stay analytic.
+
+The independent volume is pi*(Ro^2-Ri^2)*L minus
+theta*(Ro^2-Ri^2)*(z1-z0)/2. Surface area removes the two wall rectangles and
+adds two annular sectors and two radial rectangles. These derive from public
+cylindrical coordinates (MathWorld equation 17, r dr dtheta dz), written here
+independently; no third-party kernel source/dependency.

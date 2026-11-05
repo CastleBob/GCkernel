@@ -3,6 +3,7 @@
 //! transverse intersections of analytic plane/cylinder solids. Admission selects one operation before execution;
 //! failure never triggers another algorithm.
 mod bore;
+mod annular_window;
 mod box_cut;
 mod capsule;
 mod cone_bore;
@@ -21,6 +22,7 @@ pub use unite::{union, union_named};
 
 #[derive(Clone, Copy, Debug)]
 enum Domain {
+    AnnularWindow,
     Section,
     Radial,
     BoxCut,
@@ -75,6 +77,10 @@ fn select(
         return Err(crate::KernelError::Unsupported(
             "cuts on a normalized pipe end are supported only for radial bores clear of the end".into(),
         ));
+    }
+    // Coaxial annular sectors have their own admission; failure is not retried.
+    if annular_window::selects(body, tool) {
+        return Ok(Domain::AnnularWindow);
     }
     // Through cuts reaching a prism's outline or holes: the section domain (selected before execution).
     if section::selects(body, tool, tolerance) {
@@ -149,6 +155,7 @@ fn run(
     tolerance: f64,
 ) -> Result<crate::neutral::Body, crate::KernelError> {
     match domain {
+        Domain::AnnularWindow => annular_window::cut(body, tool, tolerance),
         Domain::Section => section::cut(body, tool, tolerance),
         Domain::Radial => radial::cut(body, tool, tolerance),
         Domain::BoxCut => box_cut::cut(body, tool, tolerance),
