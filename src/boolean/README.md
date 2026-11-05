@@ -786,3 +786,30 @@ a=sqrt(rho^2-y^2), integrate F(R(y),a)-F(Ri,a), where
 F(R,a)=a*sqrt(R^2-a^2)+R^2*asin(a/R), split at y=s.
 R(y)=R0+(Ro-R0)*y/s below s and Ro above. This independently written set integral
 is a numerical regression reference, not a formal error certificate.
+
+### Repeated flat-end notch: whole-boundary no-change certificate (2026-11-05)
+UnchangedRadialNotch is a separate pre-execution domain, selected only by an
+exact geometry certificate. It does not read feature IDs, prior tool caches,
+operation names or a supplied claim of duplication. Initial scope is the
+canonical flat-end notch on a plain pipe or pipe with one distant outer bevel.
+
+For the bounded candidate topology (5/12/8 or 6/14/9 faces/edges/vertices), a
+temporary proof copy reverses only the known two-ring splice. The complete
+proof copy must pass the existing simple-shell admission with the current
+tool. Its direct, admitted single-notch construction must equal every value
+in the supplied body's entire neutral representation. This proves B=S\T
+within that analytic domain; set difference idempotence proves B\T=B.
+Only the original B is returned unchanged. The proof copy is never output or
+used as replacement stock. There is no failed operation followed by recovery,
+discarding earlier geometry, approximate matching, or duplicate-row skipping.
+An altered intersection vertex even within the general topology tolerance
+fails the exact equality check. Other feature geometry cannot be omitted:
+the entire representation, including all far faces/edges/vertices, is compared.
+
+This is intentionally representation-bounded. Different edge orderings and
+rounded transformed boundaries can refuse even when geometrically equivalent;
+there is no reordering/snapping rescue. Near-bevel notch repetitions remain
+outside the certificate. Tool radius changes do not qualify. Every source
+feature still executes and counts normally. The no-change domain currently
+reports unavailable provenance under op26 and refuses strict named op12;
+it does not invent persistent names by geometric matching.

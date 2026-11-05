@@ -190,7 +190,7 @@ fn existing_openings_partial_depth_seams_and_bevel_intersections_refuse_without_
     )
     .unwrap();
     for (body, cutter) in [
-        (&done, t.clone()),
+        (&done, tool(0., 0.39)),
         (&mid, t.clone()),
         (&near_bevel, tool(0., 0.05)),
         (&b, turn.body(&t)),

@@ -730,3 +730,145 @@ fn cut_near_bevel(body: &Body, p: &Plan, splits: &[Split], tol: f64) -> Result<B
     super::radial::planar_faces_outward(&out)?;
     Ok(out)
 }
+
+/// A bounded whole-boundary certificate, independent of feature history.
+/// If B equals the admitted S\T boundary exactly, set difference gives
+/// B\T = (S\T)\T = B. Only the original B is returned by this domain.
+/// The temporary inverse splice is proof data, never replacement stock.
+pub(super) fn already_removed(body: &Body, tool: &Body, tol: f64) -> bool {
+    fn prove(body: &Body, tool: &Body, tol: f64) -> Result<bool> {
+        let counts = (body.faces.len(), body.edges.len(), body.vertices.len());
+        if counts != (5, 12, 8) && counts != (6, 14, 9) {
+            return Ok(false);
+        }
+        crate::topology::check(body, tol)?;
+        crate::topology::check(tool, tol)?;
+        let base_edges = body.edges.len() - 6;
+        let base_vertices = body.vertices.len() - 4;
+        let base_faces = body.faces.len() - 1;
+        let mut proof = body.clone();
+        let mut rings = vec![];
+        for i in 0..2 {
+            let last = base_edges + 2 * i;
+            let meeting = last + 1;
+            if !matches!(body.edges[meeting].curve, Curve::CylinderPair { .. }) {
+                return Ok(false);
+            }
+            let Curve::Arc {
+                c,
+                n,
+                x,
+                r,
+                t0: hi,
+                t1,
+            } = body.edges[last].curve
+            else {
+                return Ok(false);
+            };
+            let walls: Vec<_> = body.faces[..base_faces]
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.loops.len() == 1 && f.loops[0].iter().any(|v| v.0 == meeting))
+                .collect();
+            let [(fi, face)] = &walls[..] else {
+                return Ok(false);
+            };
+            let arcs: Vec<_> = face.loops[0]
+                .iter()
+                .copied()
+                .filter(|(ei, _)| {
+                    *ei < base_edges
+                        && matches!(body.edges[*ei].curve,
+                    Curve::Arc { c: q, n: a, x: xx, r: rr, t0, t1: lo }
+                    if q==c && a==n && xx==x && rr==r && lo<hi && t1-t0==TAU)
+                })
+                .collect();
+            let [(ring, fw)] = &arcs[..] else {
+                return Ok(false);
+            };
+            let Curve::Arc { t0, .. } = body.edges[*ring].curve else {
+                unreachable!()
+            };
+            let seam = body.edges[*ring].start;
+            if seam != body.edges[last].end {
+                return Ok(false);
+            }
+            proof.edges[*ring] = Edge {
+                curve: Curve::Arc { c, n, x, r, t0, t1 },
+                start: seam,
+                end: seam,
+            };
+            let mut restored = vec![];
+            let mut inserted = false;
+            for &(ei, dir) in &face.loops[0] {
+                if [*ring, last, meeting].contains(&ei) {
+                    if !inserted {
+                        restored.push((*ring, *fw));
+                        inserted = true;
+                    }
+                } else {
+                    restored.push((ei, dir));
+                }
+            }
+            proof.faces[*fi].loops = vec![restored];
+            rings.push(*ring);
+        }
+        if rings[0] == rings[1] {
+            return Ok(false);
+        }
+        let sides = [base_edges + 4, base_edges + 5];
+        let caps: Vec<_> = body.faces[..base_faces]
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                matches!(f.surface, Surface::Plane { .. })
+                    && sides
+                        .iter()
+                        .all(|ei| f.loops.iter().flatten().any(|v| v.0 == *ei))
+            })
+            .collect();
+        let [(cap, face)] = &caps[..] else {
+            return Ok(false);
+        };
+        let mut cap_loops = vec![];
+        for &ring in rings.iter().rev() {
+            let references: Vec<_> = face
+                .loops
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|v| v.0 == ring)
+                .collect();
+            let [item] = &references[..] else {
+                return Ok(false);
+            };
+            cap_loops.push(vec![*item]);
+        }
+        proof.faces[*cap].loops = cap_loops;
+        proof.faces.truncate(base_faces);
+        proof.edges.truncate(base_edges);
+        proof.vertices.truncate(base_vertices);
+        // Invalid inverse references must be rejected before topology::check indexes them.
+        if proof
+            .edges
+            .iter()
+            .any(|e| e.start >= base_vertices || e.end >= base_vertices)
+            || proof
+                .faces
+                .iter()
+                .flat_map(|f| f.loops.iter().flatten())
+                .any(|v| v.0 >= base_edges)
+        {
+            return Ok(false);
+        }
+        let (plan, _) = admission(&proof, tool, tol)?;
+        if plan.near_cone.is_some() {
+            return Ok(false);
+        }
+        // Direct single-domain construction used as the certificate equation,
+        // not a retry of a Boolean against the supplied body.
+        let certified = cut(&proof, tool, tol)?;
+        Ok(crate::neutral::write_body(&certified) == crate::neutral::write_body(body))
+    }
+    prove(body, tool, tol).unwrap_or(false)
+}

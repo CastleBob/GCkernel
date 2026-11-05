@@ -35,6 +35,7 @@ enum Domain {
     NormalEnd,
     ConeBore,
     RadialNotch,
+    UnchangedRadialNotch,
 }
 
 /// The exact drill the bore domain takes: one cylinder wall between two caps, one seam.
@@ -58,6 +59,9 @@ fn select(
     // admission names why anything else is refused, before any other selector reads them.
     if tool.faces.iter().any(|f| matches!(f.surface, crate::geom::Surface::Cone { .. })) {
         return Err(crate::KernelError::Unsupported("cuts with tools that have conical faces are not supported yet".into()));
+    }
+    if radial_notch::already_removed(body, tool, tolerance) {
+        return Ok(Domain::UnchangedRadialNotch);
     }
     if radial_notch::selects(body, tool, tolerance) {
         return Ok(Domain::RadialNotch);
@@ -172,6 +176,7 @@ fn run(
         Domain::NormalEnd => normal_end::cut(body, tool, tolerance),
         Domain::ConeBore => cone_bore::cut(body, tool, tolerance),
         Domain::RadialNotch => radial_notch::cut(body, tool, tolerance),
+        Domain::UnchangedRadialNotch => Ok(body.clone()),
     }
 }
 
