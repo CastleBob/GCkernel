@@ -675,11 +675,12 @@ fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// The distance between segments p0-p1 and q0-q1 (closest points by the clamped normal equations; a degenerate
-/// segment is its point).
-fn segment_distance(p0: [f64; 3], p1: [f64; 3], q0: [f64; 3], q1: [f64; 3]) -> f64 {
+/// A lower bound, not a distance estimate. Normal equations propose a separating direction;
+/// outward-rounded endpoint projections must independently certify its gap. None refuses exclusion.
+fn segment_clearance_lower_bound(p0: [f64; 3], p1: [f64; 3], q0: [f64; 3], q1: [f64; 3]) -> Option<f64> {
     let (d1, d2, r) = (sub3(p1, p0), sub3(q1, q0), sub3(p0, q0));
     let (a, e, f) = (dot3(d1, d1), dot3(d2, d2), dot3(d2, r));
+    if ![a, e, f].iter().all(|x| x.is_finite()) { return None; }
     let (s, t);
     if a <= f64::EPSILON && e <= f64::EPSILON {
         (s, t) = (0., 0.);
@@ -687,11 +688,20 @@ fn segment_distance(p0: [f64; 3], p1: [f64; 3], q0: [f64; 3], q1: [f64; 3]) -> f
         (s, t) = (0., (f / e).clamp(0., 1.));
     } else {
         let c = dot3(d1, r);
+        if !c.is_finite() { return None; }
         if e <= f64::EPSILON {
             (s, t) = ((-c / a).clamp(0., 1.), 0.);
         } else {
             let b = dot3(d1, d2);
             let denom = a * e - b * b;
+            let roundoff_scale = a * e + b * b;
+            if !roundoff_scale.is_finite() { return None; }
+            // The first segment is the cardinal bore axis. Parallelism is exact only when
+            // both directions have zero off-axis components; a rounded zero determinant
+            // is insufficient. Near-parallel uncertainty supplies no exclusion evidence.
+            let exact_parallel = (0..3).any(|axis| d1[axis] != 0.
+                && (0..3).all(|k| k == axis || (d1[k] == 0. && d2[k] == 0.)));
+            if !exact_parallel && denom <= 16. * f64::EPSILON * roundoff_scale { return None; }
             let mut s1 = if denom > 0. { ((b * f - c * e) / denom).clamp(0., 1.) } else { 0. };
             let mut t1 = (b * s1 + f) / e;
             if t1 < 0. {
@@ -707,7 +717,33 @@ fn segment_distance(p0: [f64; 3], p1: [f64; 3], q0: [f64; 3], q1: [f64; 3]) -> f
     let cp = [p0[0] + d1[0] * s, p0[1] + d1[1] * s, p0[2] + d1[2] * s];
     let cq = [q0[0] + d2[0] * t, q0[1] + d2[1] * t, q0[2] + d2[2] * t];
     let d = sub3(cp, cq);
-    dot3(d, d).sqrt()
+    if !d.iter().all(|x| x.is_finite()) { return None; }
+    if d == [0.; 3] { return Some(0.); }
+
+    // Every point of a segment projects between its endpoint projections. These
+    // intervals enclose those dot products even if the candidate d is inaccurate.
+    // For a positive projection gap g, Cauchy-Schwarz gives distance >= g / |d|.
+    let projection = |p: [f64; 3]| {
+        let (mut low, mut high) = (0_f64, 0_f64);
+        for i in 0..3 {
+            let product = p[i] * d[i];
+            low = (low + product.next_down()).next_down();
+            high = (high + product.next_up()).next_up();
+        }
+        (low, high)
+    };
+    let (pa, pb, qa, qb) = (projection(p0), projection(p1), projection(q0), projection(q1));
+    if ![pa.0, pa.1, pb.0, pb.1, qa.0, qa.1, qb.0, qb.1].iter().all(|x| x.is_finite()) {
+        return None;
+    }
+    let gap = (qa.0.min(qb.0) - pa.1.max(pb.1)).next_down()
+        .max((pa.0.min(pb.0) - qa.1.max(qb.1)).next_down()).max(0.);
+    if gap == 0. { return Some(0.); }
+    let norm_squared = d.iter().fold(0_f64, |sum, x| (sum + (x * x).next_up()).next_up());
+    let norm = norm_squared.sqrt().next_up();
+    if !gap.is_finite() || !norm.is_finite() || norm <= 0. { return None; }
+    let lower = (gap / norm).next_down().max(0.);
+    lower.is_finite().then_some(lower)
 }
 
 /// A planar face bounded by straight edges only that lies farther than radius + tol from the corridor's axis segment
@@ -727,7 +763,8 @@ fn clear_of_corridor(body: &Body, face: &Face, n: Vec3, axis: usize, c: [f64; 3]
         let Curve::Line { .. } = edge.curve else { return false };
         let (p, q) = (xyz(body.vertices[edge.start]), xyz(body.vertices[edge.end]));
         first.get_or_insert(p);
-        if segment_distance(a, b, p, q) <= limit {
+        let Some(distance) = segment_clearance_lower_bound(a, b, p, q) else { return false };
+        if distance <= limit {
             return false;
         }
     }
@@ -891,4 +928,90 @@ pub(super) fn splice_cavity(
         KernelError::Internal(format!("passage splice failed analytic validation: {e}"))
     })?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod codex_clearance_review {
+    use super::*;
+    use crate::neutral::Edge;
+
+    #[test]
+    fn long_nearly_parallel_crossing_segments_cannot_supply_clearance_evidence() {
+        let distance = segment_clearance_lower_bound([0.,0.,0.], [0.,100000.,0.],
+            [-0.0001,0.,0.], [0.0001,100000.,0.]);
+        assert!(distance.is_none(), "segments intersect at (0,50000,0); the unstable equations must refuse: {distance:?}");
+    }
+
+    #[test]
+    fn exact_parallel_and_well_conditioned_segments_retain_distance_evidence() {
+        let parallel = segment_clearance_lower_bound([0.,0.,0.], [0.,100000.,0.],
+            [0.0001,0.,0.], [0.0001,100000.,0.]).unwrap();
+        assert!(parallel <= 0.0001 && parallel >= 0.0001 * (1. - 1e-12));
+        assert_eq!(segment_clearance_lower_bound([0.,0.,0.], [0.,10.,0.],
+            [-1.,5.,0.], [1.,5.,0.]), Some(0.));
+        let skew = segment_clearance_lower_bound([0.,0.,0.], [0.,10.,0.],
+            [-1.,5.,2.], [1.,5.,2.]).unwrap();
+        assert!(skew <= 2. && skew >= 2. * (1. - 1e-12));
+    }
+
+    #[test]
+    fn crossed_segments_stay_unclear_across_scales_axes_and_edge_directions() {
+        for axis in 0..3 {
+            for (length, offset) in [(1.,0.1), (100000.,0.0001), (100000.,0.01),
+                    (100000.,0.1), (1e6,1.), (1e7,10.)] {
+                let a = [0.;3];
+                let mut b = a; b[axis] = length;
+                let mut c = a; c[(axis+1)%3] = -offset;
+                let mut e = b; e[(axis+1)%3] = offset;
+                for (p0,p1) in [(a,b),(b,a)] {
+                    for (q0,q1) in [(c,e),(e,c)] {
+                        let lower = segment_clearance_lower_bound(p0,p1,q0,q1);
+                        assert!(lower.is_none_or(|d| d == 0.),
+                            "known midpoint intersection: axis={axis}, length={length}, offset={offset}, lower={lower:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nonzero_determinant_does_not_certify_crossing_segment_clearance() {
+        for x in [0.01, 0.1] {
+            let distance = segment_clearance_lower_bound([0.,0.,0.], [0.,100000.,0.],
+                [-x,0.,0.], [x,100000.,0.]);
+            assert!(distance.is_none_or(|d| d <= 1e-6),
+                "segments intersect at (0,50000,0) despite nonzero determinant: x={x}, distance={distance:?}");
+        }
+    }
+
+    #[test]
+    fn nonzero_determinant_crossed_strip_cannot_be_excluded() {
+        let vertices = vec![Vec3::new(-0.01,0.,0.), Vec3::new(-0.00999,0.,0.),
+            Vec3::new(0.01001,100000.,0.), Vec3::new(0.01,100000.,0.)];
+        // Store both long edges in +Y; the last loop occurrence reverses its edge.
+        let edges = (0..4).map(|i| {
+            let (start, end) = if i == 3 { (0, 3) } else { (i, (i+1)%4) };
+            Edge { start, end, curve:Curve::Line { a:vertices[start], b:vertices[end] } }
+        }).collect();
+        let face = Face { surface:Surface::Plane { p:vertices[0], n:Vec3::new(0.,0.,1.), x:Vec3::new(1.,0.,0.) },
+            sense:true, loops:vec![(0..4).map(|i|(i,i != 3)).collect()] };
+        let body = Body { vertices, edges, faces:vec![face] };
+        assert!(inside(&body,&body.faces[0],Vec3::new(0.,49975.,0.),Vec3::new(0.,0.,1.),1e-6).unwrap());
+        assert!(!clear_of_corridor(&body,&body.faces[0],Vec3::new(0.,0.,1.),1,[0.,0.,0.],1e-6,0.,100000.,1e-6),
+            "a nonzero determinant does not justify excluding this crossed face");
+    }
+
+    #[test]
+    fn a_planar_strip_crossing_the_bore_axis_is_not_clear() {
+        let vertices = vec![Vec3::new(-0.0001,0.,0.), Vec3::new(-0.00009,0.,0.),
+            Vec3::new(0.00011,100000.,0.), Vec3::new(0.0001,100000.,0.)];
+        let edges = (0..4).map(|i| Edge { start:i, end:(i+1)%4,
+            curve:Curve::Line { a:vertices[i], b:vertices[(i+1)%4] } }).collect();
+        let face = Face { surface:Surface::Plane { p:vertices[0], n:Vec3::new(0.,0.,1.), x:Vec3::new(1.,0.,0.) },
+            sense:true, loops:vec![(0..4).map(|i|(i,true)).collect()] };
+        let body = Body { vertices, edges, faces:vec![face] };
+        assert!(inside(&body,&body.faces[0],Vec3::new(0.,47500.,0.),Vec3::new(0.,0.,1.),1e-6).unwrap());
+        assert!(!clear_of_corridor(&body,&body.faces[0],Vec3::new(0.,0.,1.),1,[0.,0.,0.],1e-5,0.,100000.,1e-6),
+            "the bore axis crosses the interior of this face; it cannot be excluded");
+    }
 }
