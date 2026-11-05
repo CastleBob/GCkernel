@@ -1891,3 +1891,54 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod codex_direction_snap_review {
+    use super::*;
+    use crate::frame::{Point3, Rigid};
+    use crate::neutral::Profile;
+
+    fn box_at_angle(length: f64, tol: f64) -> Body {
+        let points = [p(0.,0.,0.),p(length,0.,0.),p(length,1.,0.),p(0.,1.,0.)];
+        let profile = Profile { loops:vec![(0..4).map(|i| Curve::Line { a:points[i],b:points[(i+1)%4] }).collect()],
+            n:p(0.,0.,1.),low:0.,high:1. };
+        let body = crate::extrude::extrude(&profile,tol).unwrap();
+        let rotated = Rigid::rotation(p(0.,0.,1.),5e-13,Point3::new(0.,0.,0.)).unwrap().body(&body);
+        validate(&rotated,tol).unwrap();
+        rotated
+    }
+
+    #[test]
+    fn direction_normalization_must_respect_the_request_distance_tolerance() {
+        let tol=1e-10;
+        let original=box_at_angle(1000.,tol);
+        let normalized=snap_directions(&original);
+        let checked=crate::topology::check(&normalized,tol);
+        assert!(checked.is_ok(),"valid input must not be changed beyond request tolerance by angular threshold: {checked:?}");
+    }
+
+    #[test]
+    fn direction_normalization_must_bound_displacement_for_large_admitted_parts() {
+        let tol=1e-6;
+        let original=box_at_angle(1e8,tol);
+        let normalized=snap_directions(&original);
+        let checked=crate::topology::check(&normalized,tol);
+        assert!(checked.is_ok(),"valid input must not be changed beyond default tolerance: {checked:?}");
+    }
+
+    #[test]
+    fn a_small_face_can_have_a_distant_valid_plane_origin() {
+        let tol=1e-6;
+        let mut original=box_at_angle(1.,tol);
+        for face in &mut original.faces {
+            if let Surface::Plane { p:origin,x,.. }=&mut face.surface {
+                *origin=origin.add(x.scale(1e8));
+            }
+        }
+        // Moving a plane's origin within its own plane changes only its parameterization.
+        validate(&original,tol).unwrap();
+        let normalized=snap_directions(&original);
+        let checked=crate::topology::check(&normalized,tol);
+        assert!(checked.is_ok(),"a one-inch part also needs a spatial bound relative to each support origin: {checked:?}");
+    }
+}
