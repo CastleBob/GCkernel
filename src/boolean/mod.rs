@@ -12,6 +12,7 @@ mod endcut;
 mod normal_end;
 mod passage;
 mod radial;
+mod radial_notch;
 mod rectilinear;
 mod section;
 mod trace;
@@ -33,6 +34,7 @@ enum Domain {
     Cope,
     NormalEnd,
     ConeBore,
+    RadialNotch,
 }
 
 /// The exact drill the bore domain takes: one cylinder wall between two caps, one seam.
@@ -56,6 +58,9 @@ fn select(
     // admission names why anything else is refused, before any other selector reads them.
     if tool.faces.iter().any(|f| matches!(f.surface, crate::geom::Surface::Cone { .. })) {
         return Err(crate::KernelError::Unsupported("cuts with tools that have conical faces are not supported yet".into()));
+    }
+    if radial_notch::selects(body, tool, tolerance) {
+        return Ok(Domain::RadialNotch);
     }
     if body.faces.iter().any(|f| matches!(f.surface, crate::geom::Surface::Cone { .. })) {
         cone_bore::admit(body, tool, tolerance)?;
@@ -166,6 +171,7 @@ fn run(
         Domain::Cope => cope::cut(body, tool, tolerance),
         Domain::NormalEnd => normal_end::cut(body, tool, tolerance),
         Domain::ConeBore => cone_bore::cut(body, tool, tolerance),
+        Domain::RadialNotch => radial_notch::cut(body, tool, tolerance),
     }
 }
 

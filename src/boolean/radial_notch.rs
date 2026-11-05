@@ -1,0 +1,463 @@
+//! Centered radial notch through one flat annular pipe end. Complete simple
+//! axisymmetric boundaries are admitted before splicing; no stock is rebuilt.
+use crate::geom::{Curve, Surface, Vec3};
+use crate::neutral::{Body, Edge, Face};
+use crate::KernelError;
+use std::f64::consts::{PI, TAU};
+type Result<T> = std::result::Result<T, KernelError>;
+fn no(s: &str) -> KernelError {
+    KernelError::Unsupported(format!("radial end notch: {s}"))
+}
+fn parallel(a: Vec3, b: Vec3) -> bool {
+    a.cross(b).length() == 0.
+}
+
+/// A full annular cap and a cutter whose axis lies exactly in that plane and
+/// passes through its axis point. This only selects a domain; admission below
+/// proves the whole boundary and finite cutter before any geometry changes.
+fn cap(body: &Body, tool: &Body, tol: f64) -> Option<(usize, Vec3, Vec3)> {
+    let (s, e, _) = super::radial::cutter(tool, tol)?;
+    let mut found = None;
+    for (fi, f) in body.faces.iter().enumerate() {
+        let Surface::Plane { n, .. } = f.surface else {
+            continue;
+        };
+        if f.loops.len() != 2 || f.loops.iter().any(|lp| lp.len() != 1) {
+            continue;
+        }
+        let Curve::Arc {
+            c, n: axis, t0, t1, ..
+        } = body.edges.get(f.loops[0][0].0)?.curve
+        else {
+            continue;
+        };
+        if t1 - t0 != TAU || !parallel(n, axis) {
+            continue;
+        }
+        let Curve::Arc {
+            c: c2,
+            t0: a,
+            t1: b,
+            ..
+        } = body.edges.get(f.loops[1][0].0)?.curve
+        else {
+            continue;
+        };
+        if c2 != c
+            || b - a != TAU
+            || s.sub(c).dot(n) != 0.
+            || e.sub(c).dot(n) != 0.
+            || !parallel(s.sub(c), e.sub(c))
+        {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some((fi, c, n.scale(if f.sense { -1. } else { 1. })));
+    }
+    found
+}
+pub(super) fn selects(body: &Body, tool: &Body, tol: f64) -> bool {
+    cap(body, tool, tol).is_some()
+}
+
+struct Band {
+    face: usize,
+    rings: [(usize, f64); 2],
+}
+fn band(body: &Body, fi: usize, c: Vec3, u: Vec3) -> Result<Band> {
+    let f = &body.faces[fi];
+    let [lp] = &f.loops[..] else {
+        return Err(no("wall has earlier openings"));
+    };
+    if lp.len() != 4 {
+        return Err(no("wall is not one full band"));
+    }
+    let mut rings = vec![];
+    let mut seams = vec![];
+    for &(ei, fw) in lp {
+        let e = &body.edges[ei];
+        match e.curve {
+            Curve::Arc {
+                c: q, n, t0, t1, ..
+            } if parallel(q.sub(c), u) && parallel(n, u) && t1 - t0 == TAU && e.start == e.end => {
+                rings.push((ei, q.sub(c).dot(u), fw, n.dot(u)))
+            }
+            Curve::Line { .. } => seams.push((ei, fw)),
+            _ => return Err(no("wall needs full coaxial rings and a straight seam")),
+        }
+    }
+    if rings.len() != 2 || seams.len() != 2 || seams[0].0 != seams[1].0 || seams[0].1 == seams[1].1
+    {
+        return Err(no(
+            "wall band connectivity is not two rings and one repeated seam",
+        ));
+    }
+    rings.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let edge = &body.edges[seams[0].0];
+    let ends = [body.edges[rings[0].0].start, body.edges[rings[1].0].start];
+    if ends[0] == ends[1] || !ends.contains(&edge.start) || !ends.contains(&edge.end) {
+        return Err(no("band seam does not join its rings"));
+    }
+    for (i, &(_, _, fw, dir)) in rings.iter().enumerate() {
+        if (fw == (dir > 0.)) != ((i == 0) == f.sense) {
+            return Err(no("wall loop is inside out"));
+        }
+    }
+    Ok(Band {
+        face: fi,
+        rings: [(rings[0].0, rings[0].1), (rings[1].0, rings[1].1)],
+    })
+}
+
+struct Plan {
+    cap: usize,
+    c: Vec3,
+    u: Vec3,
+    d: Vec3,
+    x: Vec3,
+    rho: f64,
+    walls: [Band; 2],
+    radii: [f64; 2],
+}
+fn plan(body: &Body, tool: &Body, tol: f64) -> Result<Plan> {
+    let (cap, c, u) =
+        cap(body, tool, tol).ok_or_else(|| no("cutter is not centered on one flat annular end"))?;
+    if body.faces.len() != 4 && body.faces.len() != 5 {
+        return Err(no("requires a simple pipe with at most one distant bevel"));
+    }
+    let (a, b, rho) =
+        super::radial::cutter(tool, tol).ok_or_else(|| no("not a full round cutter"))?;
+    let (s, e) = if a.sub(c).length() > b.sub(c).length() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let d = s.sub(c).unit()?;
+    let x = u.cross(d);
+    let tool_wall = tool
+        .faces
+        .iter()
+        .position(|f| matches!(f.surface, Surface::Cylinder { .. }))
+        .ok_or_else(|| no("cutter has no cylindrical wall"))?;
+    if !tool.faces[tool_wall].sense {
+        return Err(no("cutter cylindrical wall is inverted"));
+    }
+    let tool_band = band(tool, tool_wall, c, d)?;
+    for (ei, _) in tool_band.rings {
+        if !matches!(tool.edges[ei].curve,Curve::Arc{r,..} if r==rho) {
+            return Err(no("cutter cap radius differs from its wall"));
+        }
+    }
+    for f in &tool.faces {
+        if let Surface::Plane { p, n, .. } = f.surface {
+            if f.loops.len() != 1 || f.loops[0].len() != 1 || !parallel(n, d) {
+                return Err(no("cutter cap is not one full axis-normal disk"));
+            }
+            let outward = n.scale(if f.sense { 1. } else { -1. }).dot(d);
+            if !((p.sub(s).dot(d) == 0. && outward > 0.) || (p.sub(e).dot(d) == 0. && outward < 0.))
+            {
+                return Err(no("cutter cap points into its material"));
+            }
+        }
+    }
+    let mut cyl = vec![];
+    let mut cones = vec![];
+    let mut caps = vec![];
+    for (fi, f) in body.faces.iter().enumerate() {
+        match f.surface {
+            Surface::Cylinder { p, a, r, .. } if parallel(a, u) && parallel(p.sub(c), u) => {
+                cyl.push((fi, r))
+            }
+            Surface::Cone { p, a, .. } if parallel(a, u) && parallel(p.sub(c), u) => cones.push(fi),
+            Surface::Plane { p, n, .. } if parallel(n, u) => caps.push((fi, p.sub(c).dot(u))),
+            _ => return Err(no("boundary is not a simple coaxial pipe")),
+        }
+    }
+    if cyl.len() != 2 || caps.len() != 2 || cones.len() > 1 {
+        return Err(no(
+            "requires two cylindrical walls, two annular ends, and at most one cone",
+        ));
+    }
+    cyl.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let (ri, ro) = (cyl[0].1, cyl[1].1);
+    if body.faces[cyl[0].0].sense
+        || !body.faces[cyl[1].0].sense
+        || !(ri > rho + tol && ro > ri + tol)
+    {
+        return Err(no("wall radii/senses or cutter clearance are invalid"));
+    }
+    if !(s.sub(c).dot(d) > ro + tol
+        && e.sub(c).dot(d) > 0.
+        && (e.sub(c).dot(d).powi(2) + rho * rho).sqrt() < ri - tol)
+    {
+        return Err(no(
+            "cutter must start outside and finish strictly inside the near bore",
+        ));
+    }
+    let inner = band(body, cyl[0].0, c, u)?;
+    let outer = band(body, cyl[1].0, c, u)?;
+    let length = inner.rings[1].1;
+    let transition = outer.rings[1].1;
+    if inner.rings[0].1 != 0.
+        || outer.rings[0].1 != 0.
+        || !(transition > rho + tol && length >= transition)
+    {
+        return Err(no(
+            "hole reaches a wall transition or does not cross its flat end",
+        ));
+    }
+    for &(fi, z) in &caps {
+        let f = &body.faces[fi];
+        if f.loops.len() != 2 || f.loops.iter().any(|lp| lp.len() != 1) || !(z == 0. || z == length)
+        {
+            return Err(no("end is not one full annulus at the wall limits"));
+        }
+        for lp in &f.loops {
+            let Curve::Arc {
+                c: q, n, t0, t1, ..
+            } = body.edges[lp[0].0].curve
+            else {
+                return Err(no("end has a noncircular rim"));
+            };
+            if q != c.add(u.scale(z)) || !parallel(n, u) || t1 - t0 != TAU {
+                return Err(no("end rim is not its exact full coaxial circle"));
+            }
+        }
+    }
+    if cones.is_empty() {
+        if transition != length {
+            return Err(no("straight walls have different end levels"));
+        }
+    } else {
+        let cone = band(body, cones[0], c, u)?;
+        if !body.faces[cone.face].sense
+            || cone.rings[0].1 != transition
+            || cone.rings[1].1 != length
+            || !(length > transition + tol)
+        {
+            return Err(no("cone is not strictly beyond the cylindrical wall"));
+        }
+        let radius = |ei: usize| match body.edges[ei].curve {
+            Curve::Arc { r, .. } => r,
+            _ => unreachable!(),
+        };
+        if radius(cone.rings[0].0) != ro
+            || !(radius(cone.rings[1].0) > ri + tol && radius(cone.rings[1].0) < ro)
+        {
+            return Err(no("distant cone is not an outer end bevel"));
+        }
+    }
+    // No hidden extra boundaries or unused topology: these counts are exact
+    // for the fully checked two-band shell, plus one optional conical band.
+    let expected = if cones.is_empty() { (6, 4) } else { (8, 5) };
+    if (body.edges.len(), body.vertices.len()) != expected {
+        return Err(no(
+            "additional edges or vertices are outside the supported shell",
+        ));
+    }
+    Ok(Plan {
+        cap,
+        c,
+        u,
+        d,
+        x,
+        rho,
+        walls: [inner, outer],
+        radii: [ri, ro],
+    })
+}
+
+fn add_edge(out: &mut Body, curve: Curve, start: usize, end: usize) -> usize {
+    let ei = out.edges.len();
+    out.edges.push(Edge { curve, start, end });
+    ei
+}
+/// Join a degree-two boundary from an oriented first edge. Ambiguity is an
+/// internal construction error, never repaired by proximity or point welding.
+fn loop_from(out: &Body, edges: &[usize], first: (usize, bool)) -> Result<Vec<(usize, bool)>> {
+    let ends = |e: usize, f: bool| {
+        if f {
+            (out.edges[e].start, out.edges[e].end)
+        } else {
+            (out.edges[e].end, out.edges[e].start)
+        }
+    };
+    let (start, mut at) = ends(first.0, first.1);
+    let mut lp = vec![first];
+    while lp.len() < edges.len() {
+        let next: Vec<_> = edges
+            .iter()
+            .copied()
+            .filter(|e| !lp.iter().any(|v| v.0 == *e))
+            .filter_map(|e| {
+                if out.edges[e].start == at {
+                    Some((e, true))
+                } else if out.edges[e].end == at {
+                    Some((e, false))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let [v] = &next[..] else {
+            return Err(KernelError::Internal(
+                "radial notch boundary does not have one continuation".into(),
+            ));
+        };
+        at = ends(v.0, v.1).1;
+        lp.push(*v);
+    }
+    if at != start {
+        return Err(KernelError::Internal(
+            "radial notch boundary is not closed".into(),
+        ));
+    }
+    Ok(lp)
+}
+
+pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
+    crate::topology::check(body, tol)?;
+    crate::topology::check(tool, tol)?;
+    super::radial::planar_faces_outward(body)?;
+    super::radial::planar_faces_outward(tool)?;
+    let p = plan(body, tool, tol)?;
+    // Check both periodic seams before constructing anything. A ring is split
+    // only when its removed minor arc stays strictly inside its existing chart.
+    let mut splits = vec![];
+    for (band, r) in p.walls.iter().zip(p.radii) {
+        let Curve::Arc {
+            c,
+            n,
+            x,
+            r: ar,
+            t0,
+            t1,
+        } = body.edges[band.rings[0].0].curve
+        else {
+            unreachable!()
+        };
+        if ar != r {
+            return Err(no("end ring and wall radii differ"));
+        }
+        let center = (p.d.dot(n.cross(x)).atan2(p.d.dot(x)) - t0).rem_euclid(TAU) + t0;
+        let half = (p.rho / r).asin();
+        let (lo, hi) = (center - half, center + half);
+        if !(r * (lo - t0) > tol && r * (t1 - hi) > tol) {
+            return Err(no("notch meets the existing periodic seam"));
+        }
+        splits.push((c, n, x, r, t0, t1, lo, hi));
+    }
+    let mut out = body.clone();
+    let mut pieces = vec![];
+    for (i, band) in p.walls.iter().enumerate() {
+        let (c, n, x, r, t0, t1, lo, hi) = splits[i];
+        let pair = Curve::CylinderPair {
+            c: p.c,
+            a: p.d,
+            x: p.x,
+            rho: p.rho,
+            p: p.c,
+            b: p.u,
+            r,
+            branch: 1.,
+            t0: 0.,
+            t1: PI,
+        };
+        let plus = out.vertices.len();
+        out.vertices.push(pair.eval(0.).0);
+        let minus = out.vertices.len();
+        out.vertices.push(pair.eval(PI).0);
+        let forward = n.dot(p.u) < 0.; // ring lo -> hi follows or reverses the pair
+        let (vlow, vhigh) = if forward {
+            (plus, minus)
+        } else {
+            (minus, plus)
+        };
+        let ring = band.rings[0].0;
+        let seam = out.edges[ring].start;
+        out.edges[ring] = Edge {
+            curve: Curve::Arc {
+                c,
+                n,
+                x,
+                r,
+                t0,
+                t1: lo,
+            },
+            start: seam,
+            end: vlow,
+        };
+        let last = add_edge(
+            &mut out,
+            Curve::Arc {
+                c,
+                n,
+                x,
+                r,
+                t0: hi,
+                t1,
+            },
+            vhigh,
+            seam,
+        );
+        let meeting = add_edge(&mut out, pair, plus, minus);
+        let old = &body.faces[band.face].loops[0];
+        let ring_fw = old.iter().find(|v| v.0 == ring).unwrap().1;
+        let path = [(ring, true), (meeting, forward), (last, true)];
+        let mut lp = vec![];
+        for &(ei, fw) in old {
+            if ei != ring {
+                lp.push((ei, fw));
+            } else if fw {
+                lp.extend(path);
+            } else {
+                lp.extend(path.iter().rev().map(|(e, f)| (*e, !*f)));
+            }
+        }
+        out.faces[band.face].loops = vec![lp];
+        pieces.push((ring, last, meeting, plus, minus, forward == ring_fw));
+    }
+    let mut sides = vec![];
+    for side in [3, 4] {
+        let v = |i: usize| if side == 3 { pieces[i].3 } else { pieces[i].4 };
+        let (a, b) = (v(0), v(1));
+        let curve = Curve::Line {
+            a: out.vertices[a],
+            b: out.vertices[b],
+        };
+        sides.push(add_edge(&mut out, curve, a, b));
+    }
+    let outer_ring_fw = body.faces[p.cap]
+        .loops
+        .iter()
+        .flatten()
+        .find(|v| v.0 == pieces[1].0)
+        .unwrap()
+        .1;
+    let cap_edges = [
+        pieces[0].0,
+        pieces[0].1,
+        pieces[1].0,
+        pieces[1].1,
+        sides[0],
+        sides[1],
+    ];
+    out.faces[p.cap].loops = vec![loop_from(&out, &cap_edges, (pieces[1].0, outer_ring_fw))?];
+    let hole_edges = [pieces[0].2, pieces[1].2, sides[0], sides[1]];
+    let hole_loop = loop_from(&out, &hole_edges, (pieces[1].2, !pieces[1].5))?;
+    out.faces.push(Face {
+        surface: Surface::Cylinder {
+            p: p.c,
+            a: p.d,
+            x: p.x,
+            r: p.rho,
+        },
+        sense: false,
+        loops: vec![hole_loop],
+    });
+    crate::topology::check(&out, tol)?;
+    super::radial::planar_faces_outward(&out)?;
+    Ok(out)
+}

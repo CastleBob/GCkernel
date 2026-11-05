@@ -731,3 +731,24 @@ removed end-cap sector and added interior sector cancel in the area sum;
 the two radial rectangles remain. These derive from public
 cylindrical coordinates (MathWorld equation 17, r dr dtheta dz), written here
 independently; no third-party kernel source/dependency.
+
+### Centered radial flat-end notch (Codex candidate, 2026-11-05)
+One full cylindrical cutter whose axis lies exactly in one flat annular end
+plane and passes through the pipe axis. It starts outside the outer wall and
+ends strictly inside the near bore. The supplied body must be a complete
+simple two-cylinder pipe, optionally with one strictly distant outer end bevel:
+full coaxial rings, single repeated seams, two annular caps, outward senses and
+exact shell counts/connectivity are checked before construction. The cutter
+must clear the bore radius, far wall transition and both existing periodic seams.
+General rotated frames whose rounded coordinates lose these exact relations
+may refuse; no center, direction or dimension is snapped.
+
+The new RadialNotch domain is selected before execution. It splits each near
+ring into complement arcs, inserts the exact half CylinderPair intersection,
+joins the end annulus around the notch and adds the inward cutter cylinder.
+It clones the supplied body: all far faces and their edges remain unchanged.
+No stock is regenerated, other features dropped or second algorithm retried.
+Prior openings/repeated cuts, off-center cuts, partial-depth pockets, seam
+crossings and bevel-intersecting notches remain unsupported. Failure preserves
+both operands. Op 26 explicitly returns missing history; strict named op 12
+refuses this domain. No synthetic persistent names are assigned.
