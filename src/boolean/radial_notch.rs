@@ -122,12 +122,13 @@ struct Plan {
     rho: f64,
     walls: [Band; 2],
     radii: [f64; 2],
+    near_cone: Option<Band>,
 }
 fn plan(body: &Body, tool: &Body, tol: f64) -> Result<Plan> {
     let (cap, c, u) =
         cap(body, tool, tol).ok_or_else(|| no("cutter is not centered on one flat annular end"))?;
     if body.faces.len() != 4 && body.faces.len() != 5 {
-        return Err(no("requires a simple pipe with at most one distant bevel"));
+        return Err(no("requires a simple pipe with at most one outer bevel"));
     }
     let (a, b, rho) =
         super::radial::cutter(tool, tol).ok_or_else(|| no("not a full round cutter"))?;
@@ -202,8 +203,9 @@ fn plan(body: &Body, tool: &Body, tol: f64) -> Result<Plan> {
     let outer = band(body, cyl[1].0, c, u)?;
     let length = inner.rings[1].1;
     let transition = outer.rings[1].1;
+    let near = outer.rings[0].1;
     if inner.rings[0].1 != 0.
-        || outer.rings[0].1 != 0.
+        || !(near >= 0. && near < rho - tol)
         || !(transition > rho + tol && length >= transition)
     {
         return Err(no(
@@ -228,27 +230,62 @@ fn plan(body: &Body, tool: &Body, tol: f64) -> Result<Plan> {
             }
         }
     }
+    let mut near_cone = None;
     if cones.is_empty() {
-        if transition != length {
+        if transition != length || near != 0. {
             return Err(no("straight walls have different end levels"));
         }
     } else {
         let cone = band(body, cones[0], c, u)?;
-        if !body.faces[cone.face].sense
-            || cone.rings[0].1 != transition
-            || cone.rings[1].1 != length
-            || !(length > transition + tol)
-        {
-            return Err(no("cone is not strictly beyond the cylindrical wall"));
-        }
         let radius = |ei: usize| match body.edges[ei].curve {
             Curve::Arc { r, .. } => r,
             _ => unreachable!(),
         };
-        if radius(cone.rings[0].0) != ro
-            || !(radius(cone.rings[1].0) > ri + tol && radius(cone.rings[1].0) < ro)
-        {
-            return Err(no("distant cone is not an outer end bevel"));
+        if !body.faces[cone.face].sense {
+            return Err(no("outer cone is inverted"));
+        }
+        if near == 0. {
+            if cone.rings[0].1 != transition
+                || cone.rings[1].1 != length
+                || !(length > transition + tol)
+                || radius(cone.rings[0].0) != ro
+                || !(radius(cone.rings[1].0) > ri + tol && radius(cone.rings[1].0) < ro)
+            {
+                return Err(no("distant cone is not an outer end bevel"));
+            }
+        } else {
+            let r0 = radius(cone.rings[0].0);
+            if transition != length
+                || cone.rings[0].1 != 0.
+                || cone.rings[1] != outer.rings[0]
+                || !(near > tol && r0 > ri + tol && r0 < ro)
+                || radius(cone.rings[1].0) != ro
+            {
+                return Err(no(
+                    "near cone does not join the flat end to the outer cylinder",
+                ));
+            }
+            // The increasing radius is bounded below by r0 > ri > rho;
+            // therefore both cone/cutter intersections have positive discriminant.
+            let Surface::Cone {
+                p: cp,
+                a: ca,
+                r: cr,
+                k,
+                ..
+            } = body.faces[cone.face].surface
+            else {
+                unreachable!()
+            };
+            if !(k * ca.dot(u) > 0.)
+                || cr + k * c.sub(cp).dot(ca) != r0
+                || cr + k * c.add(u.scale(near)).sub(cp).dot(ca) != ro
+            {
+                return Err(no(
+                    "near cone radius/frame does not agree with the end ring",
+                ));
+            }
+            near_cone = Some(cone);
         }
     }
     // No hidden extra boundaries or unused topology: these counts are exact
@@ -268,6 +305,7 @@ fn plan(body: &Body, tool: &Body, tol: f64) -> Result<Plan> {
         rho,
         walls: [inner, outer],
         radii: [ri, ro],
+        near_cone,
     })
 }
 
@@ -329,7 +367,26 @@ fn admission(body: &Body, tool: &Body, tol: f64) -> Result<(Plan, Vec<Split>)> {
     // Check both periodic seams before constructing anything. A ring is split
     // only when its removed minor arc stays strictly inside its existing chart.
     let mut splits = vec![];
-    for (band, r) in p.walls.iter().zip(p.radii) {
+    let mut rings: Vec<_> = p
+        .walls
+        .iter()
+        .zip(p.radii)
+        .map(|(band, r)| {
+            (
+                band.rings[0].0,
+                r,
+                (p.rho * p.rho - band.rings[0].1.powi(2)).sqrt(),
+            )
+        })
+        .collect();
+    if let Some(cone) = &p.near_cone {
+        let ring = cone.rings[0].0;
+        let Curve::Arc { r, .. } = body.edges[ring].curve else {
+            unreachable!()
+        };
+        rings.push((ring, r, p.rho));
+    }
+    for (ring, r, width) in rings {
         let Curve::Arc {
             c,
             n,
@@ -337,7 +394,7 @@ fn admission(body: &Body, tool: &Body, tol: f64) -> Result<(Plan, Vec<Split>)> {
             r: ar,
             t0,
             t1,
-        } = body.edges[band.rings[0].0].curve
+        } = body.edges[ring].curve
         else {
             unreachable!()
         };
@@ -345,7 +402,7 @@ fn admission(body: &Body, tool: &Body, tol: f64) -> Result<(Plan, Vec<Split>)> {
             return Err(no("end ring and wall radii differ"));
         }
         let center = (p.d.dot(n.cross(x)).atan2(p.d.dot(x)) - t0).rem_euclid(TAU) + t0;
-        let half = (p.rho / r).asin();
+        let half = (width / r).asin();
         let (lo, hi) = (center - half, center + half);
         if !(r * (lo - t0) > tol && r * (t1 - hi) > tol) {
             return Err(no("notch meets the existing periodic seam"));
@@ -356,6 +413,9 @@ fn admission(body: &Body, tool: &Body, tol: f64) -> Result<(Plan, Vec<Split>)> {
 }
 pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     let (p, splits) = admission(body, tool, tol)?;
+    if p.near_cone.is_some() {
+        return cut_near_bevel(body, &p, &splits, tol);
+    }
     let mut out = body.clone();
     let mut pieces = vec![];
     for (i, band) in p.walls.iter().enumerate() {
@@ -453,6 +513,208 @@ pub(super) fn cut(body: &Body, tool: &Body, tol: f64) -> Result<Body> {
     ];
     out.faces[p.cap].loops = vec![loop_from(&out, &cap_edges, (pieces[1].0, outer_ring_fw))?];
     let hole_edges = [pieces[0].2, pieces[1].2, sides[0], sides[1]];
+    let hole_loop = loop_from(&out, &hole_edges, (pieces[1].2, !pieces[1].5))?;
+    out.faces.push(Face {
+        surface: Surface::Cylinder {
+            p: p.c,
+            a: p.d,
+            x: p.x,
+            r: p.rho,
+        },
+        sense: false,
+        loops: vec![hole_loop],
+    });
+    crate::topology::check(&out, tol)?;
+    super::radial::planar_faces_outward(&out)?;
+    Ok(out)
+}
+
+/// A near bevel has two cone/cutter edges joined by the central cylindrical
+/// edge. The supplied cone's seam becomes unnecessary once the notch joins
+/// both of its rings: reuse that edge slot, retaining all distant edge indices.
+fn cut_near_bevel(body: &Body, p: &Plan, splits: &[Split], tol: f64) -> Result<Body> {
+    let cone = p.near_cone.as_ref().unwrap();
+    let beta = (cone.rings[1].1 / p.rho).asin();
+    let mut out = body.clone();
+    // (original ring, second complement arc, intersection, plus, minus,
+    // intersection direction in its wall).
+    let mut pieces = vec![];
+    for (i, band) in p.walls.iter().enumerate() {
+        let (c, n, x, r, t0, t1, lo, hi) = splits[i];
+        let (a, b) = if i == 0 { (0., PI) } else { (beta, PI - beta) };
+        let pair = Curve::CylinderPair {
+            c: p.c,
+            a: p.d,
+            x: p.x,
+            rho: p.rho,
+            p: p.c,
+            b: p.u,
+            r,
+            branch: 1.,
+            t0: a,
+            t1: b,
+        };
+        let plus = out.vertices.len();
+        out.vertices.push(pair.eval(a).0);
+        let minus = out.vertices.len();
+        out.vertices.push(pair.eval(b).0);
+        let forward = n.dot(p.u) < 0.;
+        let (vlow, vhigh) = if forward {
+            (plus, minus)
+        } else {
+            (minus, plus)
+        };
+        let ring = band.rings[0].0;
+        let seam = out.edges[ring].start;
+        out.edges[ring] = Edge {
+            curve: Curve::Arc {
+                c,
+                n,
+                x,
+                r,
+                t0,
+                t1: lo,
+            },
+            start: seam,
+            end: vlow,
+        };
+        let last = add_edge(
+            &mut out,
+            Curve::Arc {
+                c,
+                n,
+                x,
+                r,
+                t0: hi,
+                t1,
+            },
+            vhigh,
+            seam,
+        );
+        let meeting = add_edge(&mut out, pair, plus, minus);
+        let old = &body.faces[band.face].loops[0];
+        let ring_fw = old.iter().find(|v| v.0 == ring).unwrap().1;
+        let path = [(ring, true), (meeting, forward), (last, true)];
+        let mut lp = vec![];
+        for &(ei, fw) in old {
+            if ei != ring {
+                lp.push((ei, fw));
+            } else if fw {
+                lp.extend(path);
+            } else {
+                lp.extend(path.iter().rev().map(|(e, f)| (*e, !*f)));
+            }
+        }
+        out.faces[band.face].loops = vec![lp];
+        pieces.push((ring, last, meeting, plus, minus, forward == ring_fw));
+    }
+    let Surface::Cone {
+        p: cp,
+        a: ca,
+        r: cr,
+        k,
+        ..
+    } = body.faces[cone.face].surface
+    else {
+        unreachable!()
+    };
+    let conic = |a, b| Curve::ConePair {
+        c: p.c,
+        a: p.d,
+        x: p.x,
+        rho: p.rho,
+        p: cp,
+        b: ca,
+        r: cr,
+        k,
+        branch: 1.,
+        t0: a,
+        t1: b,
+    };
+    let first_curve = conic(0., beta);
+    let last_curve = conic(PI - beta, PI);
+    let plus = out.vertices.len();
+    out.vertices.push(first_curve.eval(0.).0);
+    let minus = out.vertices.len();
+    out.vertices.push(last_curve.eval(PI).0);
+    let seam_edge = body.faces[cone.face].loops[0]
+        .iter()
+        .find(|(ei, _)| matches!(body.edges[*ei].curve, Curve::Line { .. }))
+        .unwrap()
+        .0;
+    out.edges[seam_edge] = Edge {
+        curve: first_curve,
+        start: plus,
+        end: pieces[1].3,
+    };
+    let last_cone = add_edge(&mut out, last_curve, pieces[1].4, minus);
+    let (c, n, x, r, t0, t1, lo, hi) = splits[2];
+    let forward = n.dot(p.u) < 0.;
+    let (vlow, vhigh) = if forward {
+        (plus, minus)
+    } else {
+        (minus, plus)
+    };
+    let ring = cone.rings[0].0;
+    let seam = out.edges[ring].start;
+    out.edges[ring] = Edge {
+        curve: Curve::Arc {
+            c,
+            n,
+            x,
+            r,
+            t0,
+            t1: lo,
+        },
+        start: seam,
+        end: vlow,
+    };
+    let last = add_edge(
+        &mut out,
+        Curve::Arc {
+            c,
+            n,
+            x,
+            r,
+            t0: hi,
+            t1,
+        },
+        vhigh,
+        seam,
+    );
+    let cone_edges = [ring, last, pieces[1].0, pieces[1].1, seam_edge, last_cone];
+    let ring_fw = body.faces[cone.face].loops[0]
+        .iter()
+        .find(|v| v.0 == ring)
+        .unwrap()
+        .1;
+    out.faces[cone.face].loops = vec![loop_from(&out, &cone_edges, (ring, ring_fw))?];
+
+    let mut sides = vec![];
+    for (a, b) in [(pieces[0].3, plus), (pieces[0].4, minus)] {
+        let line = Curve::Line {
+            a: out.vertices[a],
+            b: out.vertices[b],
+        };
+        sides.push(add_edge(&mut out, line, a, b));
+    }
+    let cap_edges = [pieces[0].0, pieces[0].1, ring, last, sides[0], sides[1]];
+    let cap_fw = body.faces[p.cap]
+        .loops
+        .iter()
+        .flatten()
+        .find(|v| v.0 == ring)
+        .unwrap()
+        .1;
+    out.faces[p.cap].loops = vec![loop_from(&out, &cap_edges, (ring, cap_fw))?];
+    let hole_edges = [
+        pieces[0].2,
+        pieces[1].2,
+        seam_edge,
+        last_cone,
+        sides[0],
+        sides[1],
+    ];
     let hole_loop = loop_from(&out, &hole_edges, (pieces[1].2, !pieces[1].5))?;
     out.faces.push(Face {
         surface: Surface::Cylinder {

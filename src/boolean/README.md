@@ -755,3 +755,34 @@ crossings and bevel-intersecting notches are outside this domain. Existing
 domain behavior is unchanged for ineligible inputs. Failure preserves
 both operands. Op 26 explicitly returns missing history; strict named op 12
 refuses this domain. No synthetic persistent names are assigned.
+
+### Centered radial notch crossing an outer end bevel (Codex candidate, 2026-11-05)
+The RadialNotch admission also accepts a single outer bevel at the crossed end,
+with a positive annular cap radius above the inner wall radius, increasing cone
+radius, and cone/cylinder transition strictly between the end and cutter radius.
+The complete supplied shell still has exactly two cylinders, two annular caps
+and one cone. The cone shares the outer cylinder's actual ring edge; its radius
+agrees exactly with both end rings. All original outward/band/frame/reach/seam
+checks apply. A hole confined to the cone or touching its transition refuses.
+
+For inward axial height y, cutter radius rho and transition height s, the outer
+boundary is ConePair over [0,asin(s/rho)], CylinderPair over
+[asin(s/rho),pi-asin(s/rho)], then ConePair to pi. The inner boundary is the full
+half CylinderPair. Radius at the end exceeds the bore radius, which exceeds rho:
+this bounds the discriminant strictly positive. Cone radius increases while
+the cutter's transverse width decreases, so endpoint seam clearance bounds
+the entire cone segment. Existing f64 representations are used; no certified
+exact-arithmetic claim, tolerance change or rounded-coordinate repair.
+
+The cone's obsolete repeated seam edge slot is reused for one new intersection.
+Its two split rings and two cone intersections form the new cone boundary.
+The opposite cap and its edge indices/values are preserved. All new junctions
+share vertex identity; no welding, regenerated stock, ignored history or retry.
+Prior openings/repeated cuts and every other unsupported domain remain refused.
+The existing explicit missing-history and strict-named refusal contract remains.
+
+Reference volume integrates disk strips through the wall: for
+a=sqrt(rho^2-y^2), integrate F(R(y),a)-F(Ri,a), where
+F(R,a)=a*sqrt(R^2-a^2)+R^2*asin(a/R), split at y=s.
+R(y)=R0+(Ro-R0)*y/s below s and Ro above. This independently written set integral
+is a numerical regression reference, not a formal error certificate.
